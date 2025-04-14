@@ -204,13 +204,28 @@ class XchgMatrix(Matrix):
     def recvreq(self, pid, tag):
         comm, rank, root = get_comm_rank_root()
 
-        return autofree(comm.Recv_init(self.hdata, pid, tag))
+        r = autofree(comm.Recv_init(self.hdata, pid, tag))
+
+        if not hasattr(self.backend, '_req_info_map'):
+            self.backend._req_info_map = {}
+
+        self.backend._req_info_map[id(r)] = {'type': 'recv', 
+                                             'peer': pid,
+                                             'hdata_size': self.hdata.nbytes}
+        return r
 
     def sendreq(self, pid, tag):
         comm, rank, root = get_comm_rank_root()
 
-        return autofree(comm.Send_init(self.hdata, pid, tag))
+        r = autofree(comm.Send_init(self.hdata, pid, tag))
 
+        if not hasattr(self.backend, '_req_info_map'):
+            self.backend._req_info_map = {}
+
+        self.backend._req_info_map[id(r)] = {'type': 'send', 
+                                             'peer': pid,
+                                             'hdata_size': self.hdata.nbytes}
+        return r
 
 class View:
     def __init__(self, backend, matmap, rmap, cmap, rstridemap, vshape, tags):
@@ -306,8 +321,63 @@ class Graph:
 
         # MPI wrappers
         self._startall = mpi.Prequest.Startall
+    
+        # Initialize MPI request lists BEFORE defining _waitall
+        self.mpi_reqs = []
+        self.mpi_req_deps = []
+        
+        # Parallel “metadata” list: each entry holds a dict with info
+        self.mpi_req_info = []
+    
+        if backend.cfg.getbool('backend', 'collect-waitsome-times', False):
+            comm, rank, root = get_comm_rank_root()
 
-        if backend.cfg.getbool('backend', 'collect-wait-times', False):
+            n = backend.cfg.getint('backend', 'collect-waitsome-times-len', 10000)
+            
+            # Instead of storing sums, store deques of times (rolling buffers)
+            self._compute_times = compute_times = deque(maxlen=n)
+            self._recv_times    = [deque(maxlen=n) for _ in range(comm.size)]
+            self._send_times    = [deque(maxlen=n) for _ in range(comm.size)]    
+
+            self._prev_end = time.perf_counter_ns()
+
+            def waitall(reqs):
+                if not reqs:
+                    return
+    
+                now = time.perf_counter_ns()
+                compute_times.append((now - self._prev_end)/1e9)
+                while True:
+                    wait_start = now
+                    statuses = [mpi.Status() for _ in reqs]
+                    idxs = mpi.Prequest.Waitsome(reqs, statuses)
+                    wait_end = time.perf_counter_ns()
+                    dt = (wait_end - wait_start) / 1e9
+
+                    if idxs is None:
+                        break
+
+                    for k, idx in enumerate(idxs):
+                        if statuses[k].Get_tag() != -1:
+                            self._send_times[statuses[k].Get_source()].append(dt)
+#                            order_and_time.append(('send', statuses[k].Get_source(), dt))
+                        else:
+                            self._recv_times[self.mpi_req_info[idx]['peer']].append(dt)
+#                            order_and_time.append(('recv', int(self.mpi_req_info[idx]['peer']), dt))
+                            
+                    # Remove completed requests so that Waitsome will wait on the remaining ones
+                    reqs = [r for r in reqs if r is not None and r not in [reqs[i] for i in idxs]]
+                    if not reqs:
+                        break
+                self._prev_end = wait_end              # next compute slice starts here
+
+#                print(f"[rank {rank}] Order and time: {order_and_time}")
+    
+                #print(f"[rank {rank}] Recv times: {[list(x) for x in self._recv_times]}")
+                #print(f"[rank {rank}] Send times: {[list(x) for x in self._send_times]}")    
+
+            self._waitall = waitall
+        elif backend.cfg.getbool('backend', 'collect-wait-times', False):
             n = backend.cfg.getint('backend', 'collect-wait-times-len', 10000)
             self._wait_times = wait_times = deque(maxlen=n)
 
@@ -321,10 +391,6 @@ class Graph:
             self._waitall = waitall
         else:
             self._waitall = mpi.Prequest.Waitall
-
-        # MPI requests along with their associated dependencies
-        self.mpi_reqs = []
-        self.mpi_req_deps = []
 
     def add(self, kern, deps=[], pdeps=[]):
         if self.committed:
@@ -350,7 +416,7 @@ class Graph:
         for k in kerns:
             self.add(k, deps, pdeps)
 
-    def add_mpi_req(self, req, deps=[]):
+    def add_mpi_req(self, req, deps=[], info=None):
         if self.committed:
             raise RuntimeError('Can not add nodes to a committed graph')
 
@@ -361,7 +427,10 @@ class Graph:
         self.mpi_reqs.append(req)
         self.mpi_req_deps.append(deps)
 
-        # Note any dependencies
+        if info is None:
+            info = self.backend._req_info_map[id(req)]
+
+        self.mpi_req_info.append(info)
         self.depk.update(deps)
 
     def add_mpi_reqs(self, reqs, deps=[]):
@@ -411,3 +480,12 @@ class Graph:
 
     def get_wait_times(self):
         return list(self._wait_times)
+    
+    def get_compute_times(self):
+        return list(self._compute_times)
+ 
+    def get_wait_times_send(self):
+        return [list(dq) for dq in self._send_times]
+    
+    def get_wait_times_recv(self):
+        return [list(dq) for dq in self._recv_times]

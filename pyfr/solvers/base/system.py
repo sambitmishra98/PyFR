@@ -1,6 +1,7 @@
 from collections import defaultdict
 import inspect
 import itertools as it
+import math
 import statistics
 
 import numpy as np
@@ -11,6 +12,7 @@ from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
 from pyfr.shapes import BaseShape
 from pyfr.util import subclasses
 
+from pyfr.mpiutil import get_comm_rank_root
 
 class BaseSystem:
     elementscls = None
@@ -322,6 +324,100 @@ class BaseSystem:
             stats.append((mean, stdev, median))
 
         return stats
+
+    def rhs_compute_times(self):
+        # Group together timings for graphs which are semantically equivalent
+        times = defaultdict(list)
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                times[i].extend(g.get_compute_times())
+
+        # Compute all statistics
+        stats = []
+        for t in times.values():
+            print(f"len(t) = {len(t)}", flush = True)
+
+            mean = statistics.mean(t) if t else 0
+            stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
+            median = statistics.median(t) if t else 0
+
+            sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
+
+            tmin   = min(t) if t else 0
+            tmax   = max(t) if t else 0
+
+            stats.append((mean, sem, stdev, median, tmin, tmax))
+
+        return stats
+
+    def rhs_wait_times_send(self):
+
+        comm, rank, root = get_comm_rank_root()
+
+        # times_send[i][j] = list of dt ...
+        # ... for sends (local rank -> rank j) at stage i
+        times_send = defaultdict(lambda: [[] for _ in range(comm.size)])
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_send()  
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_send[i][rank_j].extend(dt_list)
+
+        stage_stats = []
+        num_stages = max(times_send.keys())+1 if times_send else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((comm.size, 4), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_send[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    sem = s / math.sqrt(len(dt_list)) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = sem = s = d = 0
+                arr[rank_j] = [m, sem, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats
+
+    def rhs_wait_times_recv(self):
+
+        comm, rank, root = get_comm_rank_root()
+
+        times_recv = defaultdict(lambda: [[] for _ in range(comm.size)])
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_recv()  
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_recv[i][rank_j].extend(dt_list)
+
+        stage_stats = []
+        num_stages = max(times_recv.keys())+1 if times_recv else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((comm.size, 4), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_recv[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    sem = s / math.sqrt(len(dt_list)) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = sem = s = d = 0
+                arr[rank_j] = [m, sem, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats
+
 
     def _compute_grads_graph(self, t, uinbank):
         raise NotImplementedError(f'Solver "{self.name}" does not compute '

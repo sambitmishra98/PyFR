@@ -205,6 +205,39 @@ class BaseIntegrator:
                     stats.set('backend-wait-times', f'rhs-graph-{i}-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
 
+        if self.cfg.getbool('backend', 'collect-waitsome-times', False):
+            comm, rank, root = get_comm_rank_root()
+
+            compute_times = comm.allgather(self.system.rhs_compute_times())
+            for i, ms in enumerate(zip(*compute_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median', 
+                                       'min', 'max']):
+                    stats.set('backend-compute-times', f'rhs-graph-{i}-{k}',
+                              ','.join(f'{v[j]:.3g}' for v in ms))
+
+            waitsome_send = comm.allgather(self.system.rhs_wait_times_send())
+            for i, ms in enumerate(zip(*waitsome_send)):
+                for j, k in enumerate(['mean', 'sem','stdev', 'median']):
+                    coldata = []
+                    for arr in ms:
+                        coldata.extend(row[j] for row in arr)
+
+                    stats.set('backend-wait-times',
+                            f'rhs-graph-{i}-send-{k}',
+                            ','.join(f'{val:.3g}' for val in coldata))
+
+            waitsome_recv = comm.allgather(self.system.rhs_wait_times_recv())
+            for i, ms in enumerate(zip(*waitsome_recv)):
+                for j, k in enumerate(['mean', 'sem', 'stdev', 'median']):
+                    coldata = []
+                    for arr in ms:
+                        coldata.extend(row[j] for row in arr)
+
+                    stats.set('backend-wait-times',
+                            f'rhs-graph-{i}-recv-{k}',
+                            ','.join(f'{val:.3g}' for val in coldata))
+
     @property
     def cfgmeta(self):
         cfg = self.cfg.tostr()
