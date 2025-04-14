@@ -10,6 +10,7 @@ from pyfr.cache import memoize
 from pyfr.shapes import BaseShape
 from pyfr.util import subclasses
 
+from pyfr.mpiutil import get_comm_rank_root
 
 class BaseSystem:
     elementscls = None
@@ -70,6 +71,9 @@ class BaseSystem:
         self._mpi_inters = self._load_mpi_inters(mesh, elemap)
         self._bc_inters = self._load_bc_inters(mesh, elemap)
         backend.commit()
+
+        comm, rank, root = get_comm_rank_root()
+        self.n_ranks = comm.Get_size()
 
     def commit(self):
         # Prepare the kernels and any associated MPI requests
@@ -292,6 +296,75 @@ class BaseSystem:
             stats.append((mean, stdev, median))
 
         return stats
+
+    def rhs_wait_times_send(self):
+
+        # times_send[i][j] = list of dt for sends (local rank -> rank j) at stage i
+        times_send = defaultdict(lambda: [[] for _ in range(self.n_ranks)])
+        # self.n_ranks can come from mpi.COMM_WORLD.Get_size()
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_send()  
+                # list_of_lists has length n_ranks, each a list of dt
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_send[i][rank_j].extend(dt_list)
+
+        # Now we produce a list of Nx3 arrays, one for each stage
+        stage_stats = []
+        num_stages = max(times_send.keys())+1 if times_send else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((self.n_ranks, 3), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_send[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = s = d = 0
+                arr[rank_j] = [m, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats   # A list of length num_stages, each shape = (n_ranks, 3)
+
+    def rhs_wait_times_recv(self):
+
+        # times_recv[i][j] = list of dt for recvs (local rank -> rank j) at stage i
+        times_recv = defaultdict(lambda: [[] for _ in range(self.n_ranks)])
+        # self.n_ranks can come from mpi.COMM_WORLD.Get_size()
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_recv()  
+                # list_of_lists has length n_ranks, each a list of dt
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_recv[i][rank_j].extend(dt_list)
+
+        # Now we produce a list of Nx3 arrays, one for each stage
+        stage_stats = []
+        num_stages = max(times_recv.keys())+1 if times_recv else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((self.n_ranks, 3), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_recv[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = s = d = 0
+                arr[rank_j] = [m, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats   # A list of length num_stages, each shape = (n_ranks, 3)
+
 
     def _compute_grads_graph(self, t, uinbank):
         raise NotImplementedError(f'Solver "{self.name}" does not compute '
