@@ -1,0 +1,95 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="384pt" height="98pt" viewBox="0.00 0.00 384.00 98.00">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 94)">
+<ns0:title>inheritance050f13d0eb</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>ACEulerSystem</ns0:title>
+<ns0:g id="a_node1"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.aceuler.system.ACEulerSystem" ns1:title="ACEulerSystem" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M244.5,-90C244.5,-90 191.5,-90 191.5,-90 188.5,-90 185.5,-87 185.5,-84 185.5,-84 185.5,-78 185.5,-78 185.5,-75 188.5,-72 191.5,-72 191.5,-72 244.5,-72 244.5,-72 247.5,-72 250.5,-75 250.5,-78 250.5,-78 250.5,-84 250.5,-84 250.5,-87 247.5,-90 244.5,-90" />
+<ns0:text text-anchor="middle" x="218" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">ACEulerSystem</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseAdvectionSystem</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M146,-54C146,-54 70,-54 70,-54 67,-54 64,-51 64,-48 64,-48 64,-42 64,-42 64,-39 67,-36 70,-36 70,-36 146,-36 146,-36 149,-36 152,-39 152,-42 152,-42 152,-48 152,-48 152,-51 149,-54 146,-54" />
+<ns0:text text-anchor="middle" x="108" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionSystem</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>BaseAdvectionSystem-&gt;ACEulerSystem</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M108,-54.08C108,-64.75 108,-81 108,-81 108,-81 180.29,-81 180.29,-81" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="180.29,-82.75 185.29,-81 180.29,-79.25 180.29,-82.75" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>BaseAdvectionDiffusionSystem</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M270,-54C270,-54 166,-54 166,-54 163,-54 160,-51 160,-48 160,-48 160,-42 160,-42 160,-39 163,-36 166,-36 166,-36 270,-36 270,-36 273,-36 276,-39 276,-42 276,-42 276,-48 276,-48 276,-51 273,-54 270,-54" />
+<ns0:text text-anchor="middle" x="218" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionDiffusionSystem</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>BaseAdvectionSystem-&gt;BaseAdvectionDiffusionSystem</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M152.11,-45C152.11,-45 154.71,-45 154.71,-45" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="154.71,-46.75 159.71,-45 154.71,-43.25 154.71,-46.75" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>EulerSystem</ns0:title>
+<ns0:g id="a_node6"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.euler.system.EulerSystem" ns1:title="EulerSystem" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M240,-18C240,-18 196,-18 196,-18 193,-18 190,-15 190,-12 190,-12 190,-6 190,-6 190,-3 193,0 196,0 196,0 240,0 240,0 243,0 246,-3 246,-6 246,-6 246,-12 246,-12 246,-15 243,-18 240,-18" />
+<ns0:text text-anchor="middle" x="218" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">EulerSystem</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>BaseAdvectionSystem-&gt;EulerSystem</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M108,-35.92C108,-25.25 108,-9 108,-9 108,-9 184.96,-9 184.96,-9" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="184.96,-10.75 189.96,-9 184.96,-7.25 184.96,-10.75" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>ACNavierStokesSystem</ns0:title>
+<ns0:g id="a_node3"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.acnavstokes.system.ACNavierStokesSystem" ns1:title="ACNavierStokesSystem" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M370,-72C370,-72 290,-72 290,-72 287,-72 284,-69 284,-66 284,-66 284,-60 284,-60 284,-57 287,-54 290,-54 290,-54 370,-54 370,-54 373,-54 376,-57 376,-60 376,-60 376,-66 376,-66 376,-69 373,-72 370,-72" />
+<ns0:text text-anchor="middle" x="330" y="-61.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">ACNavierStokesSystem</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseAdvectionDiffusionSystem-&gt;ACNavierStokesSystem</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M264,-54.42C264,-58.78 264,-63 264,-63 264,-63 278.8,-63 278.8,-63" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="278.8,-64.75 283.8,-63 278.8,-61.25 278.8,-64.75" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>NavierStokesSystem</ns0:title>
+<ns0:g id="a_node7"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.navstokes.system.NavierStokesSystem" ns1:title="NavierStokesSystem" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M365.5,-36C365.5,-36 294.5,-36 294.5,-36 291.5,-36 288.5,-33 288.5,-30 288.5,-30 288.5,-24 288.5,-24 288.5,-21 291.5,-18 294.5,-18 294.5,-18 365.5,-18 365.5,-18 368.5,-18 371.5,-21 371.5,-24 371.5,-24 371.5,-30 371.5,-30 371.5,-33 368.5,-36 365.5,-36" />
+<ns0:text text-anchor="middle" x="330" y="-25.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">NavierStokesSystem</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>BaseAdvectionDiffusionSystem-&gt;NavierStokesSystem</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M261,-35.58C261,-31.22 261,-27 261,-27 261,-27 283.27,-27 283.27,-27" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="283.27,-28.75 288.27,-27 283.27,-25.25 283.27,-28.75" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>BaseSystem</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M50,-54C50,-54 6,-54 6,-54 3,-54 0,-51 0,-48 0,-48 0,-42 0,-42 0,-39 3,-36 6,-36 6,-36 50,-36 50,-36 53,-36 56,-39 56,-42 56,-42 56,-48 56,-48 56,-51 53,-54 50,-54" />
+<ns0:text text-anchor="middle" x="28" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseSystem</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>BaseSystem-&gt;BaseAdvectionSystem</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M56.43,-45C56.43,-45 58.85,-45 58.85,-45" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="58.85,-46.75 63.85,-45 58.85,-43.25 58.85,-46.75" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

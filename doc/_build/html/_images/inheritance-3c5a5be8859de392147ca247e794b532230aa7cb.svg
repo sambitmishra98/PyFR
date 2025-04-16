@@ -1,0 +1,122 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="576pt" height="152pt" viewBox="0.00 0.00 576.00 151.74">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 148)">
+<ns0:title>inheritancec565d1e4d7</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>BaseDualPseudoIntegrator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M96,-72C96,-72 6,-72 6,-72 3,-72 0,-69 0,-66 0,-66 0,-60 0,-60 0,-57 3,-54 6,-54 6,-54 96,-54 96,-54 99,-54 102,-57 102,-60 102,-60 102,-66 102,-66 102,-69 99,-72 96,-72" />
+<ns0:text text-anchor="middle" x="51" y="-61.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDualPseudoIntegrator</ns0:text>
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseDualPseudoStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M200,-72C200,-72 116,-72 116,-72 113,-72 110,-69 110,-66 110,-66 110,-60 110,-60 110,-57 113,-54 116,-54 116,-54 200,-54 200,-54 203,-54 206,-57 206,-60 206,-60 206,-66 206,-66 206,-69 203,-72 200,-72" />
+<ns0:text text-anchor="middle" x="158" y="-61.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDualPseudoStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>BaseDualPseudoIntegrator-&gt;BaseDualPseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M102.31,-63C102.31,-63 104.71,-63 104.71,-63" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="104.71,-64.75 109.71,-63 104.71,-61.25 104.71,-64.75" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>DualEmbeddedPairPseudoStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M336,-126C336,-126 220,-126 220,-126 217,-126 214,-123 214,-120 214,-120 214,-114 214,-114 214,-111 217,-108 220,-108 220,-108 336,-108 336,-108 339,-108 342,-111 342,-114 342,-114 342,-120 342,-120 342,-123 339,-126 336,-126" />
+<ns0:text text-anchor="middle" x="278" y="-115.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualEmbeddedPairPseudoStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseDualPseudoStepper-&gt;DualEmbeddedPairPseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M206.24,-67.5C214.24,-67.5 220,-67.5 220,-67.5 220,-67.5 220,-102.92 220,-102.92" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="218.25,-102.92 220,-107.92 221.75,-102.92 218.25,-102.92" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>DualEulerPseudoStepper</ns0:title>
+<ns0:g id="a_node4"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualEulerPseudoStepper" ns1:title="DualEulerPseudoStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M320,-90C320,-90 236,-90 236,-90 233,-90 230,-87 230,-84 230,-84 230,-78 230,-78 230,-75 233,-72 236,-72 236,-72 320,-72 320,-72 323,-72 326,-75 326,-78 326,-78 326,-84 326,-84 326,-87 323,-90 320,-90" />
+<ns0:text text-anchor="middle" x="278" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualEulerPseudoStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>BaseDualPseudoStepper-&gt;DualEulerPseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M206.2,-63C233.8,-63 263,-63 263,-63 263,-63 263,-66.58 263,-66.58" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="261.25,-66.58 263,-71.58 264.75,-66.58 261.25,-66.58" />
+</ns0:g>
+
+<ns0:g id="node8" class="node">
+<ns0:title>DualRK4PseudoStepper</ns0:title>
+<ns0:g id="a_node8"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK4PseudoStepper" ns1:title="DualRK4PseudoStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M319,-54C319,-54 237,-54 237,-54 234,-54 231,-51 231,-48 231,-48 231,-42 231,-42 231,-39 234,-36 237,-36 237,-36 319,-36 319,-36 322,-36 325,-39 325,-42 325,-42 325,-48 325,-48 325,-51 322,-54 319,-54" />
+<ns0:text text-anchor="middle" x="278" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualRK4PseudoStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>BaseDualPseudoStepper-&gt;DualRK4PseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M206.33,-58.5C245.42,-58.5 294,-58.5 294,-58.5 294,-58.5 294,-58.07 294,-58.07" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="295.75,-59.23 294,-54.23 292.25,-59.23 295.75,-59.23" />
+</ns0:g>
+
+<ns0:g id="node9" class="node">
+<ns0:title>DualTVDRK3PseudoStepper</ns0:title>
+<ns0:g id="a_node9"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualTVDRK3PseudoStepper" ns1:title="DualTVDRK3PseudoStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M325.5,-18C325.5,-18 230.5,-18 230.5,-18 227.5,-18 224.5,-15 224.5,-12 224.5,-12 224.5,-6 224.5,-6 224.5,-3 227.5,0 230.5,0 230.5,0 325.5,0 325.5,0 328.5,0 331.5,-3 331.5,-6 331.5,-6 331.5,-12 331.5,-12 331.5,-15 328.5,-18 325.5,-18" />
+<ns0:text text-anchor="middle" x="278" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualTVDRK3PseudoStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>BaseDualPseudoStepper-&gt;DualTVDRK3PseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M158,-53.59C158,-38.12 158,-9 158,-9 158,-9 219.32,-9 219.32,-9" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="219.32,-10.75 224.32,-9 219.32,-7.25 219.32,-10.75" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>DualRKVdH2RPseudoStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M457,-126C457,-126 356,-126 356,-126 353,-126 350,-123 350,-120 350,-120 350,-114 350,-114 350,-111 353,-108 356,-108 356,-108 457,-108 457,-108 460,-108 463,-111 463,-114 463,-114 463,-120 463,-120 463,-123 460,-126 457,-126" />
+<ns0:text text-anchor="middle" x="406.5" y="-115.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualRKVdH2RPseudoStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>DualEmbeddedPairPseudoStepper-&gt;DualRKVdH2RPseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M342.25,-117C342.25,-117 344.76,-117 344.76,-117" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="344.76,-118.75 349.76,-117 344.76,-115.25 344.76,-118.75" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>DualRK34PseudoStepper</ns0:title>
+<ns0:g id="a_node5"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK34PseudoStepper" ns1:title="DualRK34PseudoStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M563,-144C563,-144 477,-144 477,-144 474,-144 471,-141 471,-138 471,-138 471,-132 471,-132 471,-129 474,-126 477,-126 477,-126 563,-126 563,-126 566,-126 569,-129 569,-132 569,-132 569,-138 569,-138 569,-141 566,-144 563,-144" />
+<ns0:text text-anchor="middle" x="520" y="-133.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualRK34PseudoStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>DualRKVdH2RPseudoStepper-&gt;DualRK34PseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M463.22,-120C484.67,-120 504,-120 504,-120 504,-120 504,-120.76 504,-120.76" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="502.25,-120.76 504,-125.76 505.75,-120.76 502.25,-120.76" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>DualRK45PseudoStepper</ns0:title>
+<ns0:g id="a_node7"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK45PseudoStepper" ns1:title="DualRK45PseudoStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M563,-108C563,-108 477,-108 477,-108 474,-108 471,-105 471,-102 471,-102 471,-96 471,-96 471,-93 474,-90 477,-90 477,-90 563,-90 563,-90 566,-90 569,-93 569,-96 569,-96 569,-102 569,-102 569,-105 566,-108 563,-108" />
+<ns0:text text-anchor="middle" x="520" y="-97.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualRK45PseudoStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>DualRKVdH2RPseudoStepper-&gt;DualRK45PseudoStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M463.36,-114C498.53,-114 537,-114 537,-114 537,-114 537,-113.24 537,-113.24" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="538.75,-113.24 537,-108.24 535.25,-113.24 538.75,-113.24" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

@@ -1,0 +1,239 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pyfr.backends.hip.base &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../../../../_static/pyfr_favicon.png"/>
+      <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../../_static/contentui.js?v=9ee86694"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../../../../index.html">
+            
+              <img src="../../../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pyfr.backends.hip.base</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pyfr.backends.hip.base</h1><div class="highlight"><pre>
+<span></span><span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseBackend</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.mpiutil</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_local_rank</span>
+
+
+<div class="viewcode-block" id="HIPBackend">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.hip.base.HIPBackend">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">HIPBackend</span><span class="p">(</span><span class="n">BaseBackend</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;hip&#39;</span>
+    <span class="n">blocks</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cfg</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.hip.compiler</span><span class="w"> </span><span class="kn">import</span> <span class="n">HIPCompiler</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.hip.driver</span><span class="w"> </span><span class="kn">import</span> <span class="n">HIP</span>
+
+        <span class="c1"># Load and wrap HIP</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">hip</span> <span class="o">=</span> <span class="n">HIP</span><span class="p">()</span>
+
+        <span class="c1"># Get the desired HIP device</span>
+        <span class="n">devid</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;backend-hip&#39;</span><span class="p">,</span> <span class="s1">&#39;device-id&#39;</span><span class="p">,</span> <span class="s1">&#39;local-rank&#39;</span><span class="p">)</span>
+
+        <span class="n">uuid</span> <span class="o">=</span> <span class="s1">&#39;[0-9a-f]</span><span class="si">{8}</span><span class="s1">-[0-9a-f]</span><span class="si">{4}</span><span class="s1">-[0-9a-f]</span><span class="si">{4}</span><span class="s1">-[0-9a-f]</span><span class="si">{4}</span><span class="s1">-[0-9a-f]</span><span class="si">{12}</span><span class="s1">&#39;</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">re</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="sa">rf</span><span class="s1">&#39;(local-rank|\d+|</span><span class="si">{</span><span class="n">uuid</span><span class="si">}</span><span class="s1">)$&#39;</span><span class="p">,</span> <span class="n">devid</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Invalid device-id&#39;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">devid</span> <span class="o">==</span> <span class="s1">&#39;local-rank&#39;</span><span class="p">:</span>
+            <span class="n">devid</span> <span class="o">=</span> <span class="n">get_local_rank</span><span class="p">()</span>
+        <span class="k">elif</span> <span class="s1">&#39;-&#39;</span> <span class="ow">in</span> <span class="n">devid</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">device_count</span><span class="p">()):</span>
+                <span class="k">if</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">device_uuid</span><span class="p">(</span><span class="n">i</span><span class="p">))</span> <span class="o">==</span> <span class="n">devid</span><span class="p">:</span>
+                    <span class="n">devid</span> <span class="o">=</span> <span class="n">i</span>
+                    <span class="k">break</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Unable to find HIP device </span><span class="si">{</span><span class="n">devid</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">devid</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">devid</span><span class="p">)</span>
+
+        <span class="c1"># Set the device</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">set_device</span><span class="p">(</span><span class="n">devid</span><span class="p">)</span>
+
+        <span class="c1"># HIP compiler</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">compiler</span> <span class="o">=</span> <span class="n">HIPCompiler</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="p">)</span>
+
+        <span class="c1"># Get its properties</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">props</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">device_properties</span><span class="p">(</span><span class="n">devid</span><span class="p">)</span>
+
+        <span class="c1"># Take the required alignment to be 128 bytes</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">alignb</span> <span class="o">=</span> <span class="mi">128</span>
+
+        <span class="c1"># Take the SoA size to be the warp size of the device</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">soasz</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">props</span><span class="p">[</span><span class="s1">&#39;warp_size&#39;</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">csubsz</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">soasz</span>
+
+        <span class="c1"># Get the MPI runtime type</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">mpitype</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;backend-hip&#39;</span><span class="p">,</span> <span class="s1">&#39;mpi-type&#39;</span><span class="p">,</span> <span class="s1">&#39;standard&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">mpitype</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s1">&#39;standard&#39;</span><span class="p">,</span> <span class="s1">&#39;hip-aware&#39;</span><span class="p">}:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Invalid HIP backend MPI type&#39;</span><span class="p">)</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.hip</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">blasext</span><span class="p">,</span> <span class="n">gimmik</span><span class="p">,</span> <span class="n">packing</span><span class="p">,</span> <span class="n">provider</span><span class="p">,</span>
+                                       <span class="n">rocblas</span><span class="p">,</span> <span class="n">types</span><span class="p">)</span>
+
+        <span class="c1"># Register our data types and meta kernels</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">const_matrix_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPConstMatrix</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">graph_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPGraph</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">matrix_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPMatrix</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">matrix_slice_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPMatrixSlice</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">view_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPView</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">xchg_matrix_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPXchgMatrix</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">xchg_view_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">HIPXchgView</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ordered_meta_kernel_cls</span> <span class="o">=</span> <span class="n">provider</span><span class="o">.</span><span class="n">HIPOrderedMetaKernel</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">unordered_meta_kernel_cls</span> <span class="o">=</span> <span class="n">provider</span><span class="o">.</span><span class="n">HIPUnorderedMetaKernel</span>
+
+        <span class="c1"># Instantiate the base kernel providers</span>
+        <span class="n">kprovs</span> <span class="o">=</span> <span class="p">[</span><span class="n">provider</span><span class="o">.</span><span class="n">HIPPointwiseKernelProvider</span><span class="p">,</span>
+                  <span class="n">blasext</span><span class="o">.</span><span class="n">HIPBlasExtKernels</span><span class="p">,</span>
+                  <span class="n">packing</span><span class="o">.</span><span class="n">HIPPackingKernels</span><span class="p">,</span>
+                  <span class="n">gimmik</span><span class="o">.</span><span class="n">HIPGiMMiKKernels</span><span class="p">,</span>
+                  <span class="n">rocblas</span><span class="o">.</span><span class="n">HIPRocBLASKernels</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_providers</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">kprovs</span><span class="p">]</span>
+
+        <span class="c1"># Pointwise kernels</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pointwise</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_providers</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># Create a stream to run kernels on</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_stream</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">create_stream</span><span class="p">()</span>
+
+<div class="viewcode-block" id="HIPBackend.run_kernels">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.hip.base.HIPBackend.run_kernels">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run_kernels</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kernels</span><span class="p">,</span> <span class="n">wait</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="c1"># Submit the kernels to the HIP stream</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">kernels</span><span class="p">:</span>
+            <span class="n">k</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_stream</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">wait</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_stream</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="HIPBackend.run_graph">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.hip.base.HIPBackend.run_graph">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">wait</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">graph</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_stream</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">wait</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_stream</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="HIPBackend.wait">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.hip.base.HIPBackend.wait">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">wait</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_stream</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="HIPBackend._malloc_impl">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.hip.base.HIPBackend._malloc_impl">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_malloc_impl</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">nbytes</span><span class="p">):</span>
+        <span class="c1"># Allocate</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">mem_alloc</span><span class="p">(</span><span class="n">nbytes</span><span class="p">)</span>
+
+        <span class="c1"># Zero</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">hip</span><span class="o">.</span><span class="n">memset</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">nbytes</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">data</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

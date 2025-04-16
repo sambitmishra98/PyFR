@@ -1,0 +1,340 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Installation &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="_static/pyfr_favicon.png"/>
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=c4a36953"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/contentui.js?v=9ee86694"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="User Guide" href="user_guide.html" />
+    <link rel="prev" title="PyFR" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="index.html">
+            
+              <img src="_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#quick-start">Quick-start</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#macos">macOS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#ubuntu">Ubuntu</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#compiling-from-source">Compiling from source</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#dependencies">Dependencies</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#cuda-backend">CUDA Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#hip-backend">HIP Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#metal-backend">Metal Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#opencl-backend">OpenCL Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#openmp-backend">OpenMP Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#parallel">Parallel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#ascent">Ascent</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Installation</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/installation.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="installation">
+<h1>Installation<a class="headerlink" href="#installation" title="Link to this heading"></a></h1>
+<section id="quick-start">
+<h2>Quick-start<a class="headerlink" href="#quick-start" title="Link to this heading"></a></h2>
+<p>PyFR 2.1 can be installed using
+<a class="reference external" href="https://pypi.python.org/pypi/pip">pip</a> and
+<a class="reference external" href="https://pypi.python.org/pypi/virtualenv">virtualenv</a>, as shown in the
+quick-start guides below.</p>
+<section id="macos">
+<h3>macOS<a class="headerlink" href="#macos" title="Link to this heading"></a></h3>
+<p>It is assumed that the Xcode Command Line Tools and
+<a class="reference external" href="https://brew.sh/">Homebrew</a> are already installed. Follow the steps
+below to setup the OpenMP backend on macOS:</p>
+<ol class="arabic">
+<li><p>Install MPI:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>brew install mpi4py
+</pre></div>
+</div>
+</li>
+<li><p>Download and install libxsmm and set the library path:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>git clone https://github.com/libxsmm/libxsmm.git
+cd libxsmm
+make -j4 STATIC=0 BLAS=0
+export PYFR_XSMM_LIBRARY_PATH=`pwd`/lib/libxsmm.dylib
+</pre></div>
+</div>
+</li>
+<li><p>Make a venv and activate it:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>python3.12 -m venv pyfr-venv
+source pyfr-venv/bin/activate
+</pre></div>
+</div>
+</li>
+<li><p>Install PyFR:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pip install pyfr
+</pre></div>
+</div>
+</li>
+<li><p>Add the following to your <a class="reference internal" href="user_guide.html#configuration-file"><span class="std std-ref">Configuration File (.ini)</span></a>:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[backend-openmp]
+cc = gcc-13
+</pre></div>
+</div>
+</li>
+</ol>
+<p>Note the version of the compiler which must support the <code class="docutils literal notranslate"><span class="pre">openmp</span></code>
+flag. This has been tested on macOS 13.6.2 with an Apple M1 Max.</p>
+</section>
+<section id="ubuntu">
+<h3>Ubuntu<a class="headerlink" href="#ubuntu" title="Link to this heading"></a></h3>
+<p>Follow the steps below to setup the OpenMP backend on Ubuntu:</p>
+<ol class="arabic">
+<li><p>Install Python and MPI:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>sudo apt install python3 python3-pip libopenmpi-dev openmpi-bin
+pip3 install virtualenv
+</pre></div>
+</div>
+</li>
+<li><p>Download and install libxsmm and set the library path:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>git clone https://github.com/libxsmm/libxsmm.git
+cd libxsmm
+make -j4 STATIC=0 BLAS=0
+export PYFR_XSMM_LIBRARY_PATH=`pwd`/lib/libxsmm.so
+</pre></div>
+</div>
+</li>
+<li><p>Make a virtualenv and activate it:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>python3 -m virtualenv pyfr-venv
+source pyfr-venv/bin/activate
+</pre></div>
+</div>
+</li>
+<li><p>Install PyFR:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pip install pyfr
+</pre></div>
+</div>
+</li>
+</ol>
+<p>This has been tested on Ubuntu 22.04.</p>
+</section>
+</section>
+<section id="compiling-from-source">
+<span id="compile-from-source"></span><h2>Compiling from source<a class="headerlink" href="#compiling-from-source" title="Link to this heading"></a></h2>
+<p>PyFR can be obtained
+<a class="reference external" href="https://github.com/PyFR/PyFR/tree/master">here</a>.  To install the
+software from source, use the provided <code class="docutils literal notranslate"><span class="pre">setup.py</span></code> installer or add
+the root PyFR directory to <code class="docutils literal notranslate"><span class="pre">PYTHONPATH</span></code> using:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>user@computer ~/PyFR$ export PYTHONPATH=.:$PYTHONPATH
+</pre></div>
+</div>
+<p>When installing from source, we strongly recommend using
+<a class="reference external" href="https://pypi.python.org/pypi/pip">pip</a> and
+<a class="reference external" href="https://pypi.python.org/pypi/virtualenv">virtualenv</a> to manage the
+Python dependencies.</p>
+<section id="dependencies">
+<h3>Dependencies<a class="headerlink" href="#dependencies" title="Link to this heading"></a></h3>
+<p>PyFR 2.1 has a hard dependency on Python 3.11+ and the following
+Python packages:</p>
+<ol class="arabic simple">
+<li><p><a class="reference external" href="https://github.com/PyFR/GiMMiK">gimmik</a> &gt;= 3.1.1</p></li>
+<li><p><a class="reference external" href="https://www.h5py.org/">h5py</a> &gt;= 2.10</p></li>
+<li><p><a class="reference external" href="https://www.makotemplates.org/">mako</a> &gt;= 1.0.0</p></li>
+<li><p><a class="reference external" href="https://mpi4py.readthedocs.io/en/stable/">mpi4py</a> &gt;= 4.0</p></li>
+<li><p><a class="reference external" href="https://www.numpy.org/">numpy</a> &gt;= 1.26.4</p></li>
+<li><p><a class="reference external" href="https://pypi.org/project/platformdirs/">platformdirs</a> &gt;= 2.2.0</p></li>
+<li><p><a class="reference external" href="https://pypi.python.org/pypi/pytools">pytools</a> &gt;= 2016.2.1</p></li>
+<li><p><a class="reference external" href="https://pypi.org/project/Rtree/">rtree</a> &gt;= 1.0.1</p></li>
+</ol>
+<p>In addition an MPI library supporting version 4 of the MPI standard is
+required.</p>
+<section id="cuda-backend">
+<span id="install-cuda-backend"></span><h4>CUDA Backend<a class="headerlink" href="#cuda-backend" title="Link to this heading"></a></h4>
+<p>The CUDA backend targets NVIDIA GPUs with a compute capability of 3.0
+or greater. The backend requires:</p>
+<ol class="arabic simple">
+<li><p><a class="reference external" href="https://developer.nvidia.com/cuda-downloads">CUDA</a> &gt;= 11.4</p></li>
+</ol>
+</section>
+<section id="hip-backend">
+<h4>HIP Backend<a class="headerlink" href="#hip-backend" title="Link to this heading"></a></h4>
+<p>The HIP backend targets AMD GPUs which are supported by the ROCm stack.
+The backend requires:</p>
+<ol class="arabic simple">
+<li><p><a class="reference external" href="https://docs.amd.com/">ROCm</a> &gt;= 6.0.0</p></li>
+<li><p><a class="reference external" href="https://github.com/ROCmSoftwarePlatform/rocBLAS">rocBLAS</a> &gt;=
+4.0.0</p></li>
+</ol>
+</section>
+<section id="metal-backend">
+<h4>Metal Backend<a class="headerlink" href="#metal-backend" title="Link to this heading"></a></h4>
+<p>The Metal backend targets Apple silicon GPUs. The backend requires:</p>
+<ol class="arabic simple">
+<li><p><a class="reference external" href="https://pyobjc.readthedocs.io/en/latest">pyobjc-framework-Metal</a> &gt;= 9.0</p></li>
+</ol>
+</section>
+<section id="opencl-backend">
+<h4>OpenCL Backend<a class="headerlink" href="#opencl-backend" title="Link to this heading"></a></h4>
+<p>The OpenCL backend targets a range of accelerators including GPUs from
+AMD, Intel, and NVIDIA. The backend requires:</p>
+<ol class="arabic simple">
+<li><p>OpenCL &gt;= 2.1</p></li>
+<li><p>Optionally <a class="reference external" href="https://github.com/CNugteren/CLBlast">CLBlast</a></p></li>
+<li><p>Optionally <a class="reference external" href="https://intel.github.io/tiny-tensor-compiler/">TinyTC</a>
+&gt;= 0.3.1</p></li>
+</ol>
+<p>Note that when running on NVIDIA GPUs the OpenCL backend may terminate
+with a segmentation fault after the simulation has finished.  This is
+due to a long-standing bug in how the NVIDIA OpenCL implementation
+handles sub-buffers.  As it occurs during the termination phase—after
+all data has been written out to disk—the issue does <em>not</em> impact the
+functionality or correctness of PyFR.</p>
+</section>
+<section id="openmp-backend">
+<span id="install-openmp-backend"></span><h4>OpenMP Backend<a class="headerlink" href="#openmp-backend" title="Link to this heading"></a></h4>
+<p>The OpenMP backend targets multi-core x86-64 and ARM CPUs. The backend
+requires:</p>
+<ol class="arabic simple">
+<li><p>GCC &gt;= 12.0 or another C compiler with OpenMP 5.1 support</p></li>
+<li><p><a class="reference external" href="https://github.com/hfp/libxsmm">libxsmm</a> &gt;= commit
+bf5313db8bf2edfc127bb715c36353e610ce7c04 in the <code class="docutils literal notranslate"><span class="pre">main</span></code> branch
+compiled as a shared library (STATIC=0) with BLAS=0.</p></li>
+</ol>
+<p>In order for PyFR to find libxsmm it must be located in a directory
+which is on the library search path.  Alternatively, the path can be
+specified explicitly by exporting the environment variable
+<code class="docutils literal notranslate"><span class="pre">PYFR_XSMM_LIBRARY_PATH=/path/to/libxsmm.so</span></code>.</p>
+</section>
+<section id="parallel">
+<h4>Parallel<a class="headerlink" href="#parallel" title="Link to this heading"></a></h4>
+<p>To partition meshes for running in parallel it is also necessary to
+have one of the following partitioners installed:</p>
+<ol class="arabic simple">
+<li><p><a class="reference external" href="http://glaros.dtc.umn.edu/gkhome/views/metis">METIS</a> &gt;= 5.2</p></li>
+<li><p><a class="reference external" href="https://www.labri.fr/perso/pelegrin/scotch/">SCOTCH</a> &gt;= 7.0</p></li>
+<li><p><a class="reference external" href="https://kahip.github.io/">KaHIP</a> &gt;= 3.10</p></li>
+</ol>
+<p>In order for PyFR to find these libraries they must be located in a
+directory which is on the library search path.  Alternatively, the
+paths can be specified explicitly by exporting environment
+variables e.g. <code class="docutils literal notranslate"><span class="pre">PYFR_METIS_LIBRARY_PATH=/path/to/libmetis.so</span></code> and/or
+<code class="docutils literal notranslate"><span class="pre">PYFR_SCOTCH_LIBRARY_PATH=/path/to/libscotch.so</span></code>.</p>
+</section>
+<section id="ascent">
+<h4>Ascent<a class="headerlink" href="#ascent" title="Link to this heading"></a></h4>
+<p>To run the <a class="reference internal" href="plugins/soln-plugin-ascent.html#soln-plugin-ascent"><span class="std std-ref">[soln-plugin-ascent]</span></a> plugin, MPI, VTK-m, and Conduit are required.
+VTK-m is a supplimentary VTK library, and Conduit is a library that implements
+the data classes used in Ascent. Detailed information on compilation and installation
+of <a class="reference external" href="https://llnl-conduit.readthedocs.io">Conduit</a> and <a class="reference external" href="https://ascent.readthedocs.io">Ascent</a> can
+be found in the respective documentation. Ascent must be version &gt;=0.9.0.
+When compiling Ascent a renderer must be selected to be compiled, currently
+PyFR only supports the VTK-h option that comes with Ascent. The paths to the
+libraries may need to be set as an environment variable. For example, on linux
+you will need:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>PYFR_CONDUIT_LIBRARY_PATH=/path/to/libconduit.so
+PYFR_ASCENT_MPI_LIBRARY_PATH=/path/to/libascent_mpi.so
+</pre></div>
+</div>
+<p>Currently the plugin requires that Ascent and Conduit are 64-bit, this is
+default when compiling in most cases.</p>
+</section>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="PyFR" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="user_guide.html" class="btn btn-neutral float-right" title="User Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

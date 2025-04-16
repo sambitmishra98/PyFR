@@ -1,0 +1,376 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Performance Tuning &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="_static/pyfr_favicon.png"/>
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=c4a36953"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/contentui.js?v=9ee86694"></script>
+      <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Examples" href="examples.html" />
+    <link rel="prev" title="Post Processing" href="post_processing.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="index.html">
+            
+              <img src="_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="post_processing.html">Post Processing</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Performance Tuning</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#openmp-backend">OpenMP Backend</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#avx-512">AVX-512</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#cores-vs-threads">Cores vs. threads</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#loop-scheduling">Loop Scheduling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#mpi-processes-vs-openmp-threads">MPI processes vs. OpenMP threads</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#asynchronous-mpi-progression">Asynchronous MPI progression</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#cuda-backend">CUDA Backend</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#cuda-aware-mpi">CUDA-aware MPI</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#hip-backend">HIP Backend</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#hip-aware-mpi">HIP-aware MPI</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#partitioning">Partitioning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#metis-vs-scotch-vs-kahip">METIS vs SCOTCH vs KaHIP</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#mixed-grids">Mixed grids</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#detecting-load-imbalances">Detecting load imbalances</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#scaling">Scaling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#plugins">Plugins</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#start-up-time">Start-up Time</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Performance Tuning</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/performance_tuning.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="performance-tuning">
+<h1>Performance Tuning<a class="headerlink" href="#performance-tuning" title="Link to this heading"></a></h1>
+<p>The following sections contain best practices for <em>tuning</em> the
+performance of PyFR.  Note, however, that it is typically not worth
+pursuing the advice in this section until a simulation is working
+acceptably and generating the desired results.</p>
+<section id="openmp-backend">
+<span id="perf-openmp-backend"></span><h2>OpenMP Backend<a class="headerlink" href="#openmp-backend" title="Link to this heading"></a></h2>
+<section id="avx-512">
+<h3>AVX-512<a class="headerlink" href="#avx-512" title="Link to this heading"></a></h3>
+<p>When running on an AVX-512 capable CPU Clang and GCC will, by default,
+only make use of 256-bit vectors.  Given that the kernels in PyFR
+benefit meaningfully from longer vectors it is desirable to override
+this behaviour.  This can be accomplished through the <code class="docutils literal notranslate"><span class="pre">cflags</span></code> key
+as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[backend-openmp]
+cflags = -mprefer-vector-width=512
+</pre></div>
+</div>
+</section>
+<section id="cores-vs-threads">
+<h3>Cores vs. threads<a class="headerlink" href="#cores-vs-threads" title="Link to this heading"></a></h3>
+<p>PyFR does not typically derive any benefit from SMT.  As such the number
+of OpenMP threads should be chosen to be equal to the number of physical
+cores.</p>
+</section>
+<section id="loop-scheduling">
+<h3>Loop Scheduling<a class="headerlink" href="#loop-scheduling" title="Link to this heading"></a></h3>
+<p>By default PyFR employs static scheduling for loops, with work being
+split evenly across cores.  For systems with a single type of core this
+is usually the right choice.  However, on heterogeneous systems it
+typically results in load imbalance.  Here, it can be beneficial to
+experiment with the <em>guided</em> and <em>dynamic</em> loop schedules as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[backend-openmp]
+schedule = dynamic, 5
+</pre></div>
+</div>
+</section>
+<section id="mpi-processes-vs-openmp-threads">
+<h3>MPI processes vs. OpenMP threads<a class="headerlink" href="#mpi-processes-vs-openmp-threads" title="Link to this heading"></a></h3>
+<p>When using the OpenMP backend it is recommended to employ <em>one MPI rank
+per NUMA zone</em>.  For most systems each socket represents its own NUMA
+zone.  Thus, on a two socket system it is suggested to run PyFR with two
+MPI ranks, with each process being bound to a single socket.  The
+specifics of how to accomplish this depend on both the job scheduler and
+MPI distribution.</p>
+</section>
+<section id="asynchronous-mpi-progression">
+<h3>Asynchronous MPI progression<a class="headerlink" href="#asynchronous-mpi-progression" title="Link to this heading"></a></h3>
+<p>The parallel scalability of the OpenMP backend depends <em>heavily</em> on MPI
+having support for asynchronous progression; that is to say the ability
+for non-blocking send and receive requests to complete <em>without</em> the
+need for the host application to make explicit calls into MPI routines.
+A lack of support for asynchronous progression prevents PyFR from being
+able to overlap computation with communication.</p>
+</section>
+</section>
+<section id="cuda-backend">
+<span id="perf-cuda-backend"></span><h2>CUDA Backend<a class="headerlink" href="#cuda-backend" title="Link to this heading"></a></h2>
+<section id="cuda-aware-mpi">
+<h3>CUDA-aware MPI<a class="headerlink" href="#cuda-aware-mpi" title="Link to this heading"></a></h3>
+<p>PyFR is capable of taking advantage of CUDA-aware MPI.  This enables
+CUDA device pointers to be directly to passed MPI routines.  Under the
+right circumstances this can result in improved performance for
+simulations which are near the strong scaling limit.  Assuming mpi4py
+has been built against an MPI distribution which is CUDA-aware this
+functionality can be enabled through the <code class="docutils literal notranslate"><span class="pre">mpi-type</span></code> key as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[backend-cuda]
+mpi-type = cuda-aware
+</pre></div>
+</div>
+</section>
+</section>
+<section id="hip-backend">
+<span id="perf-hip-backend"></span><h2>HIP Backend<a class="headerlink" href="#hip-backend" title="Link to this heading"></a></h2>
+<section id="hip-aware-mpi">
+<h3>HIP-aware MPI<a class="headerlink" href="#hip-aware-mpi" title="Link to this heading"></a></h3>
+<p>PyFR is capable of taking advantage of HIP-aware MPI.  This enables HIP
+device pointers to be directly to passed MPI routines.  Under the right
+circumstances this can result in improved performance for simulations
+which are near the strong scaling limit.  Assuming mpi4py has been built
+against an MPI distribution which is HIP-aware this functionality can be
+enabled through the <code class="docutils literal notranslate"><span class="pre">mpi-type</span></code> key as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[backend-hip]
+mpi-type = hip-aware
+</pre></div>
+</div>
+</section>
+</section>
+<section id="partitioning">
+<h2>Partitioning<a class="headerlink" href="#partitioning" title="Link to this heading"></a></h2>
+<section id="metis-vs-scotch-vs-kahip">
+<h3>METIS vs SCOTCH vs KaHIP<a class="headerlink" href="#metis-vs-scotch-vs-kahip" title="Link to this heading"></a></h3>
+<p>The partitioning module in PyFR includes support for both METIS, SCOTCH,
+and KaHIP.  All three usually result in high-quality decompositions.
+However, for long running simulations on complex geometries it may be
+worth partitioning a grid with each and observing which decomposition
+performs best.</p>
+</section>
+<section id="mixed-grids">
+<span id="perf-mixed-grids"></span><h3>Mixed grids<a class="headerlink" href="#mixed-grids" title="Link to this heading"></a></h3>
+<p>When running PyFR in parallel on mixed element grids it is necessary to
+take additional care when partitioning the grid.  A good domain
+decomposition is one where each partition contains the same amount of
+computational work.  For grids with a single element type, the amount of
+computational work is very well approximated by the number of elements
+assigned to a partition.  Thus the goal is simply to ensure that all of
+the partitions have roughly the same number of elements.  However, when
+considering mixed grids this relationship begins to break down since the
+computational cost of one element type can be appreciably more than that
+of another.</p>
+<p>There are two main solutions to this problem.  The first is to require
+that each partition contain the same number of elements of each type.
+For example, if partitioning a mesh with 500 quadrilaterals and 1,500
+triangles into two parts, then a sensible goal would be to aim for each
+domain to have 250 quadrilaterals and 750 triangles.  Irrespective of
+what the relative performance differential between the element types is,
+both partitions will have nearly identical amounts of work.  In PyFR
+this is known as the <em>balanced</em> approach and can be requested via:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition add -e balanced ...
+</pre></div>
+</div>
+<p>This approach typically works well when the number of partitions is
+small.  However, for larger partition counts it can become difficult to
+achieve such a balance whilst simultaneously minimising communication
+volume.  Thus, to obtain a good decomposition a secondary approach is
+required in which each type of element in the domain is assigned a
+<em>weight</em>.  Element types which are more computationally intensive are
+assigned a larger weight than those that are less intensive.  Through
+this mechanism the total cost of each partition can remain balanced.
+Unfortunately, the relative cost of different element types depends on a
+variety of factors, including:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>The polynomial order.</p></li>
+<li><p>If anti-aliasing is enabled in the simulation, and if so, to what
+extent.</p></li>
+<li><p>The hardware which the simulation will be run on.</p></li>
+</ul>
+</div></blockquote>
+<p>Weights can be specified when partitioning the mesh as
+<code class="docutils literal notranslate"><span class="pre">-e</span> <span class="pre">shape:weight</span></code>.  For example, if on a particular system a
+quadrilateral is found to be 50% more expensive than a triangle this
+can be specified as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition add -e quad:3 -e tri:2 ...
+</pre></div>
+</div>
+<p>If precise profiling data is not available regarding the performance of
+each element type in a given configuration a helpful rule of thumb is to
+under-weight the dominant element type in the domain.  For example, if a
+domain is 90% tetrahedra and 10% prisms then, absent any additional
+information about the relative performance of tetrahedra and prisms, a
+safe choice is to assume the prisms are considerably <em>more</em> expensive
+than the tetrahedra.</p>
+</section>
+<section id="detecting-load-imbalances">
+<h3>Detecting load imbalances<a class="headerlink" href="#detecting-load-imbalances" title="Link to this heading"></a></h3>
+<p>PyFR includes code for monitoring the amount of time each rank spends
+waiting for MPI transfers to complete.  This can be used, among other
+things, to detect load imbalances.  Such imbalances are typically
+observed on mixed-element grids with an incorrect weighting factor.
+Wait time tracking can be enabled as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[backend]
+collect-wait-times = true
+</pre></div>
+</div>
+<p>with the resulting statistics being recorded in the
+<code class="docutils literal notranslate"><span class="pre">[backend-wait-times]</span></code> section of the <code class="docutils literal notranslate"><span class="pre">/stats</span></code> object which is
+included in all PyFR solution files.  This can be extracted as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>h5dump -d /stats -b --output=stats.ini soln.pyfrs
+</pre></div>
+</div>
+<p>Note that the number of graphs depends on the system, and not all graphs
+initiate MPI requests.  The average amount of time each rank spends
+waiting for MPI requests per right hand side evaluation can be obtained
+by vertically summing all of the <code class="docutils literal notranslate"><span class="pre">-median</span></code> fields together.</p>
+<p>There exists an inverse relationship between the amount of computational
+work a rank has to perform and the amount of time it spends waiting for
+MPI requests to complete.  Hence, ranks which spend comparatively less
+time waiting than their peers are likely to be overloaded, whereas those
+which spend comparatively more time waiting are likely to be
+underloaded.  This information can then be used to explicitly re-weight
+the partitions and/or the per-element weights.</p>
+</section>
+</section>
+<section id="scaling">
+<h2>Scaling<a class="headerlink" href="#scaling" title="Link to this heading"></a></h2>
+<p>The general recommendation when running PyFR in parallel is to aim for a
+parallel efficiency of <span class="math notranslate nohighlight">\(\epsilon \simeq 0.8\)</span> with the parallel
+efficiency being defined as:</p>
+<div class="math notranslate nohighlight">
+\[\epsilon = \frac{1}{N}\frac{T_1}{T_N},\]</div>
+<p>where <span class="math notranslate nohighlight">\(N\)</span> is the number of ranks, <span class="math notranslate nohighlight">\(T_1\)</span> is the simulation
+time with one rank, and <span class="math notranslate nohighlight">\(T_N\)</span> is the simulation time with
+<span class="math notranslate nohighlight">\(N\)</span> ranks.  This represents a reasonable trade-off between the
+overall time-to-solution and efficient resource utilisation.</p>
+</section>
+<section id="plugins">
+<h2>Plugins<a class="headerlink" href="#plugins" title="Link to this heading"></a></h2>
+<p>A common source of performance issues is running plugins too frequently.
+PyFR records the amount of time spent in plugins in the
+<code class="docutils literal notranslate"><span class="pre">[solver-time-integrator]</span></code> section of the <code class="docutils literal notranslate"><span class="pre">/stats</span></code> object which is
+included in all PyFR solution files.  This can be extracted as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>h5dump -d /stats -b --output=stats.ini soln.pyfrs
+</pre></div>
+</div>
+<p>Here, the <em>common</em> field contains the amount of time spent obtaining
+properties which are not directly attributable to any specific plugin.
+Examples include fetching the solution, computing its gradient, and
+computing its time derivative.  The <em>other</em> field accounts for time
+spent in unnamed plugins such as the progress bar.</p>
+<p>Given the time steps taken by PyFR are typically much smaller than those
+associated with the underlying physics there is seldom any benefit to
+running integration and/or time average accumulation plugins more
+frequently than once every 50 steps.  Further, when running with
+adaptive time stepping there is no need to run the NaN check plugin.
+For simulations with fixed time steps, it is not recommended to run the
+NaN check plugin more frequently than once every 10 steps.</p>
+</section>
+<section id="start-up-time">
+<h2>Start-up Time<a class="headerlink" href="#start-up-time" title="Link to this heading"></a></h2>
+<p>The start-up time required by PyFR can be reduced by ensuring that
+Python is compiled from source with profile guided optimisations (PGO)
+which can be enabled by passing <code class="docutils literal notranslate"><span class="pre">--enable-optimizations</span> <span class="pre">--with-lto</span></code> to
+the <code class="docutils literal notranslate"><span class="pre">configure</span></code> script.</p>
+<p>It is also important that NumPy be configured to use an optimised
+BLAS/LAPACK distribution.  Further details can be found in the <a class="reference external" href="https://numpy.org/devdocs/user/building.html">NumPy
+building from source</a>
+guide.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="post_processing.html" class="btn btn-neutral float-left" title="Post Processing" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="examples.html" class="btn btn-neutral float-right" title="Examples" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

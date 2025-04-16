@@ -1,0 +1,98 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="297pt" height="134pt" viewBox="0.00 0.00 297.00 134.00">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 130)">
+<ns0:title>inheritance2b06d2028c</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>BaseGPUKernelGenerator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M182,-72C182,-72 97,-72 97,-72 94,-72 91,-69 91,-66 91,-66 91,-60 91,-60 91,-57 94,-54 97,-54 97,-54 182,-54 182,-54 185,-54 188,-57 188,-60 188,-60 188,-66 188,-66 188,-69 185,-72 182,-72" />
+<ns0:text text-anchor="middle" x="139.5" y="-61.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseGPUKernelGenerator</ns0:text>
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>CUDAKernelGenerator</ns0:title>
+<ns0:g id="a_node3"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.cuda.generator.CUDAKernelGenerator" ns1:title="CUDAKernelGenerator" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M279.5,-126C279.5,-126 205.5,-126 205.5,-126 202.5,-126 199.5,-123 199.5,-120 199.5,-120 199.5,-114 199.5,-114 199.5,-111 202.5,-108 205.5,-108 205.5,-108 279.5,-108 279.5,-108 282.5,-108 285.5,-111 285.5,-114 285.5,-114 285.5,-120 285.5,-120 285.5,-123 282.5,-126 279.5,-126" />
+<ns0:text text-anchor="middle" x="242.5" y="-115.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">CUDAKernelGenerator</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseGPUKernelGenerator-&gt;CUDAKernelGenerator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M140,-72.41C140,-87.88 140,-117 140,-117 140,-117 194.33,-117 194.33,-117" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="194.33,-118.75 199.33,-117 194.33,-115.25 194.33,-118.75" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>HIPKernelGenerator</ns0:title>
+<ns0:g id="a_node4"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.hip.generator.HIPKernelGenerator" ns1:title="HIPKernelGenerator" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M276,-90C276,-90 209,-90 209,-90 206,-90 203,-87 203,-84 203,-84 203,-78 203,-78 203,-75 206,-72 209,-72 209,-72 276,-72 276,-72 279,-72 282,-75 282,-78 282,-78 282,-84 282,-84 282,-87 279,-90 276,-90" />
+<ns0:text text-anchor="middle" x="242.5" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">HIPKernelGenerator</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>BaseGPUKernelGenerator-&gt;HIPKernelGenerator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M188.19,-67.5C209.61,-67.5 230,-67.5 230,-67.5 230,-67.5 230,-67.93 230,-67.93" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="228.25,-66.77 230,-71.77 231.75,-66.77 228.25,-66.77" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>MetalKernelGenerator</ns0:title>
+<ns0:g id="a_node5"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.metal.generator.MetalKernelGenerator" ns1:title="MetalKernelGenerator" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M278.5,-54C278.5,-54 206.5,-54 206.5,-54 203.5,-54 200.5,-51 200.5,-48 200.5,-48 200.5,-42 200.5,-42 200.5,-39 203.5,-36 206.5,-36 206.5,-36 278.5,-36 278.5,-36 281.5,-36 284.5,-39 284.5,-42 284.5,-42 284.5,-48 284.5,-48 284.5,-51 281.5,-54 278.5,-54" />
+<ns0:text text-anchor="middle" x="242.5" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">MetalKernelGenerator</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>BaseGPUKernelGenerator-&gt;MetalKernelGenerator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M188.23,-63C220.16,-63 256,-63 256,-63 256,-63 256,-59.42 256,-59.42" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="257.75,-59.42 256,-54.42 254.25,-59.42 257.75,-59.42" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>OpenCLKernelGenerator</ns0:title>
+<ns0:g id="a_node6"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.opencl.generator.OpenCLKernelGenerator" ns1:title="OpenCLKernelGenerator" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M283,-18C283,-18 202,-18 202,-18 199,-18 196,-15 196,-12 196,-12 196,-6 196,-6 196,-3 199,0 202,0 202,0 283,0 283,0 286,0 289,-3 289,-6 289,-6 289,-12 289,-12 289,-15 286,-18 283,-18" />
+<ns0:text text-anchor="middle" x="242.5" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenCLKernelGenerator</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>BaseGPUKernelGenerator-&gt;OpenCLKernelGenerator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M188.06,-58.5C191.12,-58.5 193,-58.5 193,-58.5 193,-58.5 193,-9 193,-9 193,-9 193.29,-9 193.29,-9" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="190.95,-10.75 195.95,-9 190.95,-7.25 190.95,-10.75" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseKernelGenerator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M77,-54C77,-54 6,-54 6,-54 3,-54 0,-51 0,-48 0,-48 0,-42 0,-42 0,-39 3,-36 6,-36 6,-36 77,-36 77,-36 80,-36 83,-39 83,-42 83,-42 83,-48 83,-48 83,-51 80,-54 77,-54" />
+<ns0:text text-anchor="middle" x="41.5" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseKernelGenerator</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>BaseKernelGenerator-&gt;BaseGPUKernelGenerator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M42,-54.42C42,-58.78 42,-63 42,-63 42,-63 85.75,-63 85.75,-63" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="85.75,-64.75 90.75,-63 85.75,-61.25 85.75,-64.75" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>OpenMPKernelGenerator</ns0:title>
+<ns0:g id="a_node7"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.openmp.generator.OpenMPKernelGenerator" ns1:title="OpenMPKernelGenerator" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M180.5,-36C180.5,-36 98.5,-36 98.5,-36 95.5,-36 92.5,-33 92.5,-30 92.5,-30 92.5,-24 92.5,-24 92.5,-21 95.5,-18 98.5,-18 98.5,-18 180.5,-18 180.5,-18 183.5,-18 186.5,-21 186.5,-24 186.5,-24 186.5,-30 186.5,-30 186.5,-33 183.5,-36 180.5,-36" />
+<ns0:text text-anchor="middle" x="139.5" y="-25.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPKernelGenerator</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>BaseKernelGenerator-&gt;OpenMPKernelGenerator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M42,-35.58C42,-31.22 42,-27 42,-27 42,-27 87.46,-27 87.46,-27" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="87.46,-28.75 92.46,-27 87.46,-25.25 87.46,-28.75" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

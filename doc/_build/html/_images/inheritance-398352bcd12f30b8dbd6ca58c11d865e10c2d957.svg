@@ -1,0 +1,461 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="336pt" height="800pt" viewBox="0.00 0.00 336.00 800.00">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 796)">
+<ns0:title>inheritance4de8b3b25d</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>BaseKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M76.5,-108C76.5,-108 11.5,-108 11.5,-108 8.5,-108 5.5,-105 5.5,-102 5.5,-102 5.5,-96 5.5,-96 5.5,-93 8.5,-90 11.5,-90 11.5,-90 76.5,-90 76.5,-90 79.5,-90 82.5,-93 82.5,-96 82.5,-96 82.5,-102 82.5,-102 82.5,-105 79.5,-108 76.5,-108" />
+<ns0:text text-anchor="middle" x="44" y="-97.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>BasePointwiseKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M197,-126C197,-126 102,-126 102,-126 99,-126 96,-123 96,-120 96,-120 96,-114 96,-114 96,-111 99,-108 102,-108 102,-108 197,-108 197,-108 200,-108 203,-111 203,-114 203,-114 203,-120 203,-120 203,-123 200,-126 197,-126" />
+<ns0:text text-anchor="middle" x="149.5" y="-115.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BasePointwiseKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseKernelProvider-&gt;BasePointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M82.65,-103.5C92.82,-103.5 101,-103.5 101,-103.5 101,-103.5 101,-103.93 101,-103.93" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="99.25,-102.77 101,-107.77 102.75,-102.77 99.25,-102.77" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>CUDAKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M183.5,-198C183.5,-198 115.5,-198 115.5,-198 112.5,-198 109.5,-195 109.5,-192 109.5,-192 109.5,-186 109.5,-186 109.5,-183 112.5,-180 115.5,-180 115.5,-180 183.5,-180 183.5,-180 186.5,-180 189.5,-183 189.5,-186 189.5,-186 189.5,-192 189.5,-192 189.5,-195 186.5,-198 183.5,-198" />
+<ns0:text text-anchor="middle" x="149.5" y="-187.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">CUDAKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>BaseKernelProvider-&gt;CUDAKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M75,-108.29C75,-131.29 75,-189 75,-189 75,-189 104.2,-189 104.2,-189" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="104.2,-190.75 109.2,-189 104.2,-187.25 104.2,-190.75" />
+</ns0:g>
+
+<ns0:g id="node12" class="node">
+<ns0:title>HIPKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M180,-162C180,-162 119,-162 119,-162 116,-162 113,-159 113,-156 113,-156 113,-150 113,-150 113,-147 116,-144 119,-144 119,-144 180,-144 180,-144 183,-144 186,-147 186,-150 186,-150 186,-156 186,-156 186,-159 183,-162 180,-162" />
+<ns0:text text-anchor="middle" x="149.5" y="-151.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">HIPKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge11" class="edge">
+<ns0:title>BaseKernelProvider-&gt;HIPKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M79,-108.41C79,-123.88 79,-153 79,-153 79,-153 107.6,-153 107.6,-153" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="107.6,-154.75 112.6,-153 107.6,-151.25 107.6,-154.75" />
+</ns0:g>
+
+<ns0:g id="node17" class="node">
+<ns0:title>MetalKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M182.5,-90C182.5,-90 116.5,-90 116.5,-90 113.5,-90 110.5,-87 110.5,-84 110.5,-84 110.5,-78 110.5,-78 110.5,-75 113.5,-72 116.5,-72 116.5,-72 182.5,-72 182.5,-72 185.5,-72 188.5,-75 188.5,-78 188.5,-78 188.5,-84 188.5,-84 188.5,-87 185.5,-90 182.5,-90" />
+<ns0:text text-anchor="middle" x="149.5" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">MetalKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge17" class="edge">
+<ns0:title>BaseKernelProvider-&gt;MetalKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M64,-89.58C64,-85.22 64,-81 64,-81 64,-81 105.25,-81 105.25,-81" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="105.25,-82.75 110.25,-81 105.25,-79.25 105.25,-82.75" />
+</ns0:g>
+
+<ns0:g id="node22" class="node">
+<ns0:title>OpenCLKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M187,-54C187,-54 112,-54 112,-54 109,-54 106,-51 106,-48 106,-48 106,-42 106,-42 106,-39 109,-36 112,-36 112,-36 187,-36 187,-36 190,-36 193,-39 193,-42 193,-42 193,-48 193,-48 193,-51 190,-54 187,-54" />
+<ns0:text text-anchor="middle" x="149.5" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenCLKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge23" class="edge">
+<ns0:title>BaseKernelProvider-&gt;OpenCLKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M44,-89.59C44,-74.12 44,-45 44,-45 44,-45 100.98,-45 100.98,-45" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="100.98,-46.75 105.98,-45 100.98,-43.25 100.98,-46.75" />
+</ns0:g>
+
+<ns0:g id="node32" class="node">
+<ns0:title>OpenMPKernelProvider</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M187.5,-18C187.5,-18 111.5,-18 111.5,-18 108.5,-18 105.5,-15 105.5,-12 105.5,-12 105.5,-6 105.5,-6 105.5,-3 108.5,0 111.5,0 111.5,0 187.5,0 187.5,0 190.5,0 193.5,-3 193.5,-6 193.5,-6 193.5,-12 193.5,-12 193.5,-15 190.5,-18 187.5,-18" />
+<ns0:text text-anchor="middle" x="149.5" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPKernelProvider</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge32" class="edge">
+<ns0:title>BaseKernelProvider-&gt;OpenMPKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M25,-89.71C25,-66.71 25,-9 25,-9 25,-9 100.26,-9 100.26,-9" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="100.26,-10.75 105.26,-9 100.26,-7.25 100.26,-10.75" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseOrderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M189.5,-559C189.5,-559 109.5,-559 109.5,-559 106.5,-559 103.5,-556 103.5,-553 103.5,-553 103.5,-547 103.5,-547 103.5,-544 106.5,-541 109.5,-541 109.5,-541 189.5,-541 189.5,-541 192.5,-541 195.5,-544 195.5,-547 195.5,-547 195.5,-553 195.5,-553 195.5,-556 192.5,-559 189.5,-559" />
+<ns0:text text-anchor="middle" x="149.5" y="-548.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseOrderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="node8" class="node">
+<ns0:title>CUDAOrderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M311,-660C311,-660 228,-660 228,-660 225,-660 222,-657 222,-654 222,-654 222,-648 222,-648 222,-645 225,-642 228,-642 228,-642 311,-642 311,-642 314,-642 317,-645 317,-648 317,-648 317,-654 317,-654 317,-657 314,-660 311,-660" />
+<ns0:text text-anchor="middle" x="269.5" y="-649.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">CUDAOrderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>BaseOrderedMetaKernel-&gt;CUDAOrderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M195.64,-557.25C201.78,-557.25 206,-557.25 206,-557.25 206,-557.25 206,-653.5 206,-653.5 206,-653.5 216.7,-653.5 216.7,-653.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="216.7,-655.25 221.7,-653.5 216.7,-651.75 216.7,-655.25" />
+</ns0:g>
+
+<ns0:g id="node13" class="node">
+<ns0:title>HIPOrderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M307.5,-624C307.5,-624 231.5,-624 231.5,-624 228.5,-624 225.5,-621 225.5,-618 225.5,-618 225.5,-612 225.5,-612 225.5,-609 228.5,-606 231.5,-606 231.5,-606 307.5,-606 307.5,-606 310.5,-606 313.5,-609 313.5,-612 313.5,-612 313.5,-618 313.5,-618 313.5,-621 310.5,-624 307.5,-624" />
+<ns0:text text-anchor="middle" x="269.5" y="-613.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">HIPOrderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge12" class="edge">
+<ns0:title>BaseOrderedMetaKernel-&gt;HIPOrderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M195.8,-555.5C203.48,-555.5 209,-555.5 209,-555.5 209,-555.5 209,-616.5 209,-616.5 209,-616.5 220.21,-616.5 220.21,-616.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="220.21,-618.25 225.21,-616.5 220.21,-614.75 220.21,-618.25" />
+</ns0:g>
+
+<ns0:g id="node18" class="node">
+<ns0:title>MetalOrderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M310,-588C310,-588 229,-588 229,-588 226,-588 223,-585 223,-582 223,-582 223,-576 223,-576 223,-573 226,-570 229,-570 229,-570 310,-570 310,-570 313,-570 316,-573 316,-576 316,-576 316,-582 316,-582 316,-585 313,-588 310,-588" />
+<ns0:text text-anchor="middle" x="269.5" y="-577.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">MetalOrderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge18" class="edge">
+<ns0:title>BaseOrderedMetaKernel-&gt;MetalOrderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M195.74,-553.75C229.73,-553.75 270,-553.75 270,-553.75 270,-553.75 270,-564.88 270,-564.88" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="268.25,-564.88 270,-569.88 271.75,-564.88 268.25,-564.88" />
+</ns0:g>
+
+<ns0:g id="node23" class="node">
+<ns0:title>OpenCLOrderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M314.5,-552C314.5,-552 224.5,-552 224.5,-552 221.5,-552 218.5,-549 218.5,-546 218.5,-546 218.5,-540 218.5,-540 218.5,-537 221.5,-534 224.5,-534 224.5,-534 314.5,-534 314.5,-534 317.5,-534 320.5,-537 320.5,-540 320.5,-540 320.5,-546 320.5,-546 320.5,-549 317.5,-552 314.5,-552" />
+<ns0:text text-anchor="middle" x="269.5" y="-541.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenCLOrderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge24" class="edge">
+<ns0:title>BaseOrderedMetaKernel-&gt;OpenCLOrderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M195.55,-546.5C195.55,-546.5 213.17,-546.5 213.17,-546.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="213.17,-548.25 218.17,-546.5 213.17,-544.75 213.17,-548.25" />
+</ns0:g>
+
+<ns0:g id="node33" class="node">
+<ns0:title>OpenMPOrderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M315,-516C315,-516 224,-516 224,-516 221,-516 218,-513 218,-510 218,-510 218,-504 218,-504 218,-501 221,-498 224,-498 224,-498 315,-498 315,-498 318,-498 321,-501 321,-504 321,-504 321,-510 321,-510 321,-513 318,-516 315,-516" />
+<ns0:text text-anchor="middle" x="269.5" y="-505.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPOrderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge33" class="edge">
+<ns0:title>BaseOrderedMetaKernel-&gt;OpenMPOrderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M135,-540.88C135,-528.26 135,-507 135,-507 135,-507 212.88,-507 212.88,-507" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="212.88,-508.75 217.88,-507 212.88,-505.25 212.88,-508.75" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>Kernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M65,-369C65,-369 23,-369 23,-369 20,-369 17,-366 17,-363 17,-363 17,-357 17,-357 17,-354 20,-351 23,-351 23,-351 65,-351 65,-351 68,-351 71,-354 71,-357 71,-357 71,-363 71,-363 71,-366 68,-369 65,-369" />
+<ns0:text text-anchor="middle" x="44" y="-358.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">Kernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>Kernel-&gt;BaseOrderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M31,-369.16C31,-407.12 31,-550 31,-550 31,-550 98.35,-550 98.35,-550" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="98.35,-551.75 103.35,-550 98.35,-548.25 98.35,-551.75" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>BaseUnorderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M193,-441C193,-441 106,-441 106,-441 103,-441 100,-438 100,-435 100,-435 100,-429 100,-429 100,-426 103,-423 106,-423 106,-423 193,-423 193,-423 196,-423 199,-426 199,-429 199,-429 199,-435 199,-435 199,-438 196,-441 193,-441" />
+<ns0:text text-anchor="middle" x="149.5" y="-430.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseUnorderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>Kernel-&gt;BaseUnorderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M71.29,-363C87.53,-363 105,-363 105,-363 105,-363 105,-417.98 105,-417.98" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="103.25,-417.98 105,-422.98 106.75,-417.98 103.25,-417.98" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>CUDAKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M170.5,-405C170.5,-405 128.5,-405 128.5,-405 125.5,-405 122.5,-402 122.5,-399 122.5,-399 122.5,-393 122.5,-393 122.5,-390 125.5,-387 128.5,-387 128.5,-387 170.5,-387 170.5,-387 173.5,-387 176.5,-390 176.5,-393 176.5,-393 176.5,-399 176.5,-399 176.5,-402 173.5,-405 170.5,-405" />
+<ns0:text text-anchor="middle" x="149.5" y="-394.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">CUDAKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>Kernel-&gt;CUDAKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M58,-369.08C58,-379.75 58,-396 58,-396 58,-396 117.05,-396 117.05,-396" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="117.05,-397.75 122.05,-396 117.05,-394.25 117.05,-397.75" />
+</ns0:g>
+
+<ns0:g id="node11" class="node">
+<ns0:title>HIPKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M170.5,-369C170.5,-369 128.5,-369 128.5,-369 125.5,-369 122.5,-366 122.5,-363 122.5,-363 122.5,-357 122.5,-357 122.5,-354 125.5,-351 128.5,-351 128.5,-351 170.5,-351 170.5,-351 173.5,-351 176.5,-354 176.5,-357 176.5,-357 176.5,-363 176.5,-363 176.5,-366 173.5,-369 170.5,-369" />
+<ns0:text text-anchor="middle" x="149.5" y="-358.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">HIPKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge10" class="edge">
+<ns0:title>Kernel-&gt;HIPKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M71.17,-357C71.17,-357 117.42,-357 117.42,-357" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="117.42,-358.75 122.42,-357 117.42,-355.25 117.42,-358.75" />
+</ns0:g>
+
+<ns0:g id="node16" class="node">
+<ns0:title>MetalKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M170.5,-333C170.5,-333 128.5,-333 128.5,-333 125.5,-333 122.5,-330 122.5,-327 122.5,-327 122.5,-321 122.5,-321 122.5,-318 125.5,-315 128.5,-315 128.5,-315 170.5,-315 170.5,-315 173.5,-315 176.5,-318 176.5,-321 176.5,-321 176.5,-327 176.5,-327 176.5,-330 173.5,-333 170.5,-333" />
+<ns0:text text-anchor="middle" x="149.5" y="-322.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">MetalKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge16" class="edge">
+<ns0:title>Kernel-&gt;MetalKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M58,-350.92C58,-340.25 58,-324 58,-324 58,-324 117.05,-324 117.05,-324" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="117.05,-325.75 122.05,-324 117.05,-322.25 117.05,-325.75" />
+</ns0:g>
+
+<ns0:g id="node21" class="node">
+<ns0:title>OpenCLKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M174,-297C174,-297 125,-297 125,-297 122,-297 119,-294 119,-291 119,-291 119,-285 119,-285 119,-282 122,-279 125,-279 125,-279 174,-279 174,-279 177,-279 180,-282 180,-285 180,-285 180,-291 180,-291 180,-294 177,-297 174,-297" />
+<ns0:text text-anchor="middle" x="149.5" y="-286.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenCLKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge22" class="edge">
+<ns0:title>Kernel-&gt;OpenCLKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M44,-350.88C44,-331.51 44,-288 44,-288 44,-288 113.99,-288 113.99,-288" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="113.99,-289.75 118.99,-288 113.98,-286.25 113.99,-289.75" />
+</ns0:g>
+
+<ns0:g id="node30" class="node">
+<ns0:title>OpenMPKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M174.5,-261C174.5,-261 124.5,-261 124.5,-261 121.5,-261 118.5,-258 118.5,-255 118.5,-255 118.5,-249 118.5,-249 118.5,-246 121.5,-243 124.5,-243 124.5,-243 174.5,-243 174.5,-243 177.5,-243 180.5,-246 180.5,-249 180.5,-249 180.5,-255 180.5,-255 180.5,-258 177.5,-261 174.5,-261" />
+<ns0:text text-anchor="middle" x="149.5" y="-250.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge31" class="edge">
+<ns0:title>Kernel-&gt;OpenMPKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M31,-350.79C31,-324.67 31,-252 31,-252 31,-252 113.37,-252 113.37,-252" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="113.37,-253.75 118.37,-252 113.37,-250.25 113.37,-253.75" />
+</ns0:g>
+
+<ns0:g id="node9" class="node">
+<ns0:title>CUDAPointwiseKernelProvider</ns0:title>
+<ns0:g id="a_node9"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.cuda.provider.CUDAPointwiseKernelProvider" ns1:title="CUDAPointwiseKernelProvider" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M318.5,-189C318.5,-189 220.5,-189 220.5,-189 217.5,-189 214.5,-186 214.5,-183 214.5,-183 214.5,-177 214.5,-177 214.5,-174 217.5,-171 220.5,-171 220.5,-171 318.5,-171 318.5,-171 321.5,-171 324.5,-174 324.5,-177 324.5,-177 324.5,-183 324.5,-183 324.5,-186 321.5,-189 318.5,-189" />
+<ns0:text text-anchor="middle" x="269.5" y="-178.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">CUDAPointwiseKernelProvider</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>BasePointwiseKernelProvider-&gt;CUDAPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M195,-126.14C195,-142.59 195,-175.5 195,-175.5 195,-175.5 209.19,-175.5 209.19,-175.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="209.19,-177.25 214.19,-175.5 209.19,-173.75 209.19,-177.25" />
+</ns0:g>
+
+<ns0:g id="node14" class="node">
+<ns0:title>HIPPointwiseKernelProvider</ns0:title>
+<ns0:g id="a_node14"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.hip.provider.HIPPointwiseKernelProvider" ns1:title="HIPPointwiseKernelProvider" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M314.5,-149C314.5,-149 224.5,-149 224.5,-149 221.5,-149 218.5,-146 218.5,-143 218.5,-143 218.5,-137 218.5,-137 218.5,-134 221.5,-131 224.5,-131 224.5,-131 314.5,-131 314.5,-131 317.5,-131 320.5,-134 320.5,-137 320.5,-137 320.5,-143 320.5,-143 320.5,-146 317.5,-149 314.5,-149" />
+<ns0:text text-anchor="middle" x="269.5" y="-138.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">HIPPointwiseKernelProvider</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge14" class="edge">
+<ns0:title>BasePointwiseKernelProvider-&gt;HIPPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M198,-126.17C198,-130.75 198,-135.33 198,-135.33 198,-135.33 213.3,-135.33 213.3,-135.33" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="213.3,-137.08 218.3,-135.33 213.3,-133.58 213.3,-137.08" />
+</ns0:g>
+
+<ns0:g id="node19" class="node">
+<ns0:title>MetalPointwiseKernelProvider</ns0:title>
+<ns0:g id="a_node19"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.metal.provider.MetalPointwiseKernelProvider" ns1:title="MetalPointwiseKernelProvider" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M317,-108C317,-108 222,-108 222,-108 219,-108 216,-105 216,-102 216,-102 216,-96 216,-96 216,-93 219,-90 222,-90 222,-90 317,-90 317,-90 320,-90 323,-93 323,-96 323,-96 323,-102 323,-102 323,-105 320,-108 317,-108" />
+<ns0:text text-anchor="middle" x="269.5" y="-97.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">MetalPointwiseKernelProvider</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge20" class="edge">
+<ns0:title>BasePointwiseKernelProvider-&gt;MetalPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M201,-107.58C201,-103.22 201,-99 201,-99 201,-99 210.86,-99 210.86,-99" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="210.86,-100.75 215.86,-99 210.86,-97.25 210.86,-100.75" />
+</ns0:g>
+
+<ns0:g id="node24" class="node">
+<ns0:title>OpenCLPointwiseKernelProvider</ns0:title>
+<ns0:g id="a_node24"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.opencl.provider.OpenCLPointwiseKernelProvider" ns1:title="OpenCLPointwiseKernelProvider" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M321.5,-68C321.5,-68 217.5,-68 217.5,-68 214.5,-68 211.5,-65 211.5,-62 211.5,-62 211.5,-56 211.5,-56 211.5,-53 214.5,-50 217.5,-50 217.5,-50 321.5,-50 321.5,-50 324.5,-50 327.5,-53 327.5,-56 327.5,-56 327.5,-62 327.5,-62 327.5,-65 324.5,-68 321.5,-68" />
+<ns0:text text-anchor="middle" x="269.5" y="-57.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenCLPointwiseKernelProvider</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge26" class="edge">
+<ns0:title>BasePointwiseKernelProvider-&gt;OpenCLPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M199,-107.65C199,-92.28 199,-63.33 199,-63.33 199,-63.33 206.28,-63.33 206.28,-63.33" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="206.28,-65.08 211.28,-63.33 206.28,-61.58 206.28,-65.08" />
+</ns0:g>
+
+<ns0:g id="node34" class="node">
+<ns0:title>OpenMPPointwiseKernelProvider</ns0:title>
+<ns0:g id="a_node34"><ns0:a ns1:href="../developer_guide.html#pyfr.backends.openmp.provider.OpenMPPointwiseKernelProvider" ns1:title="OpenMPPointwiseKernelProvider" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M322,-23C322,-23 217,-23 217,-23 214,-23 211,-20 211,-17 211,-17 211,-11 211,-11 211,-8 214,-5 217,-5 217,-5 322,-5 322,-5 325,-5 328,-8 328,-11 328,-11 328,-17 328,-17 328,-20 325,-23 322,-23" />
+<ns0:text text-anchor="middle" x="269.5" y="-12.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPPointwiseKernelProvider</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge35" class="edge">
+<ns0:title>BasePointwiseKernelProvider-&gt;OpenMPPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M196,-107.83C196,-82.54 196,-13.67 196,-13.67 196,-13.67 205.87,-13.67 205.87,-13.67" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="205.87,-15.42 210.87,-13.67 205.87,-11.92 205.87,-15.42" />
+</ns0:g>
+
+<ns0:g id="node10" class="node">
+<ns0:title>CUDAUnorderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M314.5,-480C314.5,-480 224.5,-480 224.5,-480 221.5,-480 218.5,-477 218.5,-474 218.5,-474 218.5,-468 218.5,-468 218.5,-465 221.5,-462 224.5,-462 224.5,-462 314.5,-462 314.5,-462 317.5,-462 320.5,-465 320.5,-468 320.5,-468 320.5,-474 320.5,-474 320.5,-477 317.5,-480 314.5,-480" />
+<ns0:text text-anchor="middle" x="269.5" y="-469.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">CUDAUnorderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge9" class="edge">
+<ns0:title>BaseUnorderedMetaKernel-&gt;CUDAUnorderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M165,-441.05C165,-452.57 165,-471 165,-471 165,-471 213.47,-471 213.47,-471" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="213.47,-472.75 218.47,-471 213.47,-469.25 213.47,-472.75" />
+</ns0:g>
+
+<ns0:g id="node15" class="node">
+<ns0:title>HIPUnorderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M311,-444C311,-444 228,-444 228,-444 225,-444 222,-441 222,-438 222,-438 222,-432 222,-432 222,-429 225,-426 228,-426 228,-426 311,-426 311,-426 314,-426 317,-429 317,-432 317,-432 317,-438 317,-438 317,-441 314,-444 311,-444" />
+<ns0:text text-anchor="middle" x="269.5" y="-433.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">HIPUnorderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge15" class="edge">
+<ns0:title>BaseUnorderedMetaKernel-&gt;HIPUnorderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M199,-433.5C199,-433.5 216.66,-433.5 216.66,-433.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="216.66,-435.25 221.66,-433.5 216.66,-431.75 216.66,-435.25" />
+</ns0:g>
+
+<ns0:g id="node20" class="node">
+<ns0:title>MetalUnorderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M313.5,-408C313.5,-408 225.5,-408 225.5,-408 222.5,-408 219.5,-405 219.5,-402 219.5,-402 219.5,-396 219.5,-396 219.5,-393 222.5,-390 225.5,-390 225.5,-390 313.5,-390 313.5,-390 316.5,-390 319.5,-393 319.5,-396 319.5,-396 319.5,-402 319.5,-402 319.5,-405 316.5,-408 313.5,-408" />
+<ns0:text text-anchor="middle" x="269.5" y="-397.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">MetalUnorderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge21" class="edge">
+<ns0:title>BaseUnorderedMetaKernel-&gt;MetalUnorderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M196,-422.94C196,-412.71 196,-397.5 196,-397.5 196,-397.5 214.26,-397.5 214.26,-397.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="214.26,-399.25 219.26,-397.5 214.26,-395.75 214.26,-399.25" />
+</ns0:g>
+
+<ns0:g id="node25" class="node">
+<ns0:title>OpenCLUnorderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M317.5,-372C317.5,-372 221.5,-372 221.5,-372 218.5,-372 215.5,-369 215.5,-366 215.5,-366 215.5,-360 215.5,-360 215.5,-357 218.5,-354 221.5,-354 221.5,-354 317.5,-354 317.5,-354 320.5,-354 323.5,-357 323.5,-360 323.5,-360 323.5,-366 323.5,-366 323.5,-369 320.5,-372 317.5,-372" />
+<ns0:text text-anchor="middle" x="269.5" y="-361.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenCLUnorderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge27" class="edge">
+<ns0:title>BaseUnorderedMetaKernel-&gt;OpenCLUnorderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M193,-422.78C193,-403.67 193,-361.5 193,-361.5 193,-361.5 210.13,-361.5 210.13,-361.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="210.13,-363.25 215.13,-361.5 210.13,-359.75 210.13,-363.25" />
+</ns0:g>
+
+<ns0:g id="node36" class="node">
+<ns0:title>OpenMPUnorderedMetaKernel</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M318.5,-336C318.5,-336 220.5,-336 220.5,-336 217.5,-336 214.5,-333 214.5,-330 214.5,-330 214.5,-324 214.5,-324 214.5,-321 217.5,-318 220.5,-318 220.5,-318 318.5,-318 318.5,-318 321.5,-318 324.5,-321 324.5,-324 324.5,-324 324.5,-330 324.5,-330 324.5,-333 321.5,-336 318.5,-336" />
+<ns0:text text-anchor="middle" x="269.5" y="-325.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPUnorderedMetaKernel</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge37" class="edge">
+<ns0:title>BaseUnorderedMetaKernel-&gt;OpenMPUnorderedMetaKernel</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M192,-422.92C192,-397.17 192,-325.5 192,-325.5 192,-325.5 209.42,-325.5 209.42,-325.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="209.42,-327.25 214.42,-325.5 209.42,-323.75 209.42,-327.25" />
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>CUDAKernelProvider-&gt;CUDAPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M189.79,-184.5C189.79,-184.5 209.39,-184.5 209.39,-184.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="209.39,-186.25 214.39,-184.5 209.39,-182.75 209.39,-186.25" />
+</ns0:g>
+
+<ns0:g id="edge13" class="edge">
+<ns0:title>HIPKernelProvider-&gt;HIPPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M150,-143.89C150,-141.54 150,-139.67 150,-139.67 150,-139.67 213.47,-139.67 213.47,-139.67" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="213.47,-141.42 218.47,-139.67 213.47,-137.92 213.47,-141.42" />
+</ns0:g>
+
+<ns0:g id="edge19" class="edge">
+<ns0:title>MetalKernelProvider-&gt;MetalPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M150,-90.23C150,-92.6 150,-94.5 150,-94.5 150,-94.5 210.69,-94.5 210.69,-94.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="210.69,-96.25 215.69,-94.5 210.69,-92.75 210.69,-96.25" />
+</ns0:g>
+
+<ns0:g id="edge25" class="edge">
+<ns0:title>OpenCLKernelProvider-&gt;OpenCLPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M150,-54.04C150,-56.58 150,-58.67 150,-58.67 150,-58.67 206.15,-58.67 206.15,-58.67" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="206.15,-60.42 211.15,-58.67 206.15,-56.92 206.15,-60.42" />
+</ns0:g>
+
+<ns0:g id="node26" class="node">
+<ns0:title>OpenMPBlockKernelArgs</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M190.5,-717C190.5,-717 108.5,-717 108.5,-717 105.5,-717 102.5,-714 102.5,-711 102.5,-711 102.5,-705 102.5,-705 102.5,-702 105.5,-699 108.5,-699 108.5,-699 190.5,-699 190.5,-699 193.5,-699 196.5,-702 196.5,-705 196.5,-705 196.5,-711 196.5,-711 196.5,-714 193.5,-717 190.5,-717" />
+<ns0:text text-anchor="middle" x="149.5" y="-706.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPBlockKernelArgs</ns0:text>
+</ns0:g>
+
+<ns0:g id="node27" class="node">
+<ns0:title>Structure</ns0:title>
+<ns0:g id="a_node27"><ns0:a ns1:title="Structure base class">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M65,-647C65,-647 23,-647 23,-647 20,-647 17,-644 17,-641 17,-641 17,-635 17,-635 17,-632 20,-629 23,-629 23,-629 65,-629 65,-629 68,-629 71,-632 71,-635 71,-635 71,-641 71,-641 71,-644 68,-647 65,-647" />
+<ns0:text text-anchor="middle" x="44" y="-636.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">Structure</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge28" class="edge">
+<ns0:title>Structure-&gt;OpenMPBlockKernelArgs</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M35,-647.15C35,-666.13 35,-708 35,-708 35,-708 97.27,-708 97.27,-708" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="97.27,-709.75 102.27,-708 97.27,-706.25 97.27,-709.75" />
+</ns0:g>
+
+<ns0:g id="node28" class="node">
+<ns0:title>OpenMPBlockRunArgs</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M187,-681C187,-681 112,-681 112,-681 109,-681 106,-678 106,-675 106,-675 106,-669 106,-669 106,-666 109,-663 112,-663 112,-663 187,-663 187,-663 190,-663 193,-666 193,-669 193,-669 193,-675 193,-675 193,-678 190,-681 187,-681" />
+<ns0:text text-anchor="middle" x="149.5" y="-670.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPBlockRunArgs</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge29" class="edge">
+<ns0:title>Structure-&gt;OpenMPBlockRunArgs</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M53,-647.29C53,-657.36 53,-672 53,-672 53,-672 100.77,-672 100.77,-672" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="100.77,-673.75 105.77,-672 100.77,-670.25 100.77,-673.75" />
+</ns0:g>
+
+<ns0:g id="node29" class="node">
+<ns0:title>OpenMPKRunArgs</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M180.5,-645C180.5,-645 118.5,-645 118.5,-645 115.5,-645 112.5,-642 112.5,-639 112.5,-639 112.5,-633 112.5,-633 112.5,-630 115.5,-627 118.5,-627 118.5,-627 180.5,-627 180.5,-627 183.5,-627 186.5,-630 186.5,-633 186.5,-633 186.5,-639 186.5,-639 186.5,-642 183.5,-645 180.5,-645" />
+<ns0:text text-anchor="middle" x="149.5" y="-634.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPKRunArgs</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge30" class="edge">
+<ns0:title>Structure-&gt;OpenMPKRunArgs</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M71.17,-637C71.17,-637 107.48,-637 107.48,-637" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="107.48,-638.75 112.48,-637 107.48,-635.25 107.48,-638.75" />
+</ns0:g>
+
+<ns0:g id="node35" class="node">
+<ns0:title>OpenMPRegularRunArgs</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M191,-609C191,-609 108,-609 108,-609 105,-609 102,-606 102,-603 102,-603 102,-597 102,-597 102,-594 105,-591 108,-591 108,-591 191,-591 191,-591 194,-591 197,-594 197,-597 197,-597 197,-603 197,-603 197,-606 194,-609 191,-609" />
+<ns0:text text-anchor="middle" x="149.5" y="-598.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPRegularRunArgs</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge36" class="edge">
+<ns0:title>Structure-&gt;OpenMPRegularRunArgs</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M44,-628.8C44,-617.56 44,-600 44,-600 44,-600 97,-600 97,-600" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="97,-601.75 102,-600 97,-598.25 97,-601.75" />
+</ns0:g>
+
+<ns0:g id="node31" class="node">
+<ns0:title>OpenMPKernelFunction</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M82,-792C82,-792 6,-792 6,-792 3,-792 0,-789 0,-786 0,-786 0,-780 0,-780 0,-777 3,-774 6,-774 6,-774 82,-774 82,-774 85,-774 88,-777 88,-780 88,-780 88,-786 88,-786 88,-789 85,-792 82,-792" />
+<ns0:text text-anchor="middle" x="44" y="-781.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">OpenMPKernelFunction</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge34" class="edge">
+<ns0:title>OpenMPKernelProvider-&gt;OpenMPPointwiseKernelProvider</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M193.5,-9.33C193.5,-9.33 205.75,-9.33 205.75,-9.33" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="205.75,-11.08 210.75,-9.33 205.75,-7.58 205.75,-11.08" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

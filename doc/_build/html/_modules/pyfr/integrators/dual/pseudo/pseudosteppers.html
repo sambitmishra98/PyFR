@@ -1,0 +1,445 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pyfr.integrators.dual.pseudo.pseudosteppers &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../../../../../_static/pyfr_favicon.png"/>
+      <script src="../../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../../../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../../../_static/contentui.js?v=9ee86694"></script>
+    <script src="../../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../../../../../index.html">
+            
+              <img src="../../../../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pyfr.integrators.dual.pseudo.pseudosteppers</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pyfr.integrators.dual.pseudo.pseudosteppers</h1><div class="highlight"><pre>
+<span></span><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.cache</span><span class="w"> </span><span class="kn">import</span> <span class="n">memoize</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.integrators.dual.pseudo.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseDualPseudoIntegrator</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_get_coefficients_from_txt</span><span class="p">(</span><span class="n">scheme</span><span class="p">):</span>
+    <span class="n">coeffs_mat</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">l</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">scheme</span><span class="o">.</span><span class="n">splitlines</span><span class="p">(),</span> <span class="n">start</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="n">a</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">f</span><span class="p">)</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">l</span><span class="o">.</span><span class="n">split</span><span class="p">()]</span>
+
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="o">==</span> <span class="n">i</span><span class="p">:</span>
+            <span class="n">coeffs_mat</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Invalid coefficient structure in scheme&#39;</span><span class="p">)</span>
+
+    <span class="c1"># The last row is the b vector</span>
+    <span class="k">return</span> <span class="n">coeffs_mat</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">coeffs_mat</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">BaseDualPseudoStepper</span><span class="p">(</span><span class="n">BaseDualPseudoIntegrator</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">ntotiters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">collect_stats</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stats</span><span class="p">):</span>
+        <span class="c1"># Total number of RHS evaluations</span>
+        <span class="n">stats</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s1">&#39;solver-time-integrator&#39;</span><span class="p">,</span> <span class="s1">&#39;nfevals&#39;</span><span class="p">,</span>
+                  <span class="bp">self</span><span class="o">.</span><span class="n">pseudo_stepper_nfevals</span><span class="p">)</span>
+
+        <span class="c1"># Total number of pseudo-steps</span>
+        <span class="n">stats</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s1">&#39;solver-time-integrator&#39;</span><span class="p">,</span> <span class="s1">&#39;npseudosteps&#39;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_rhs_with_dts</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">,</span> <span class="n">uin</span><span class="p">,</span> <span class="n">fout</span><span class="p">):</span>
+        <span class="c1"># Compute -∇·f</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">uin</span><span class="p">,</span> <span class="n">fout</span><span class="p">)</span>
+
+        <span class="c1"># Registers and coefficients</span>
+        <span class="n">vals</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">stepper_coeffs</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="o">/</span><span class="bp">self</span><span class="o">.</span><span class="n">_dt</span><span class="p">,</span> <span class="mi">1</span><span class="p">]</span>
+        <span class="n">regs</span> <span class="o">=</span> <span class="p">[</span><span class="n">fout</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_source_regidx</span><span class="p">]</span>
+
+        <span class="c1"># Physical stepper source addition -∇·f - dQ/dt</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_addv</span><span class="p">(</span><span class="n">vals</span><span class="p">,</span> <span class="n">regs</span><span class="p">,</span> <span class="n">subdims</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_subdims</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="DualEulerPseudoStepper">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualEulerPseudoStepper">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DualEulerPseudoStepper</span><span class="p">(</span><span class="n">BaseDualPseudoStepper</span><span class="p">):</span>
+    <span class="n">pseudo_stepper_name</span> <span class="o">=</span> <span class="s1">&#39;euler&#39;</span>
+    <span class="n">pseudo_stepper_order</span> <span class="o">=</span> <span class="mi">1</span>
+    <span class="n">pseudo_stepper_nregs</span> <span class="o">=</span> <span class="mi">2</span>
+    <span class="n">pseudo_stepper_has_lerrest</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pseudo_stepper_nfevals</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span>
+
+<div class="viewcode-block" id="DualEulerPseudoStepper.step">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualEulerPseudoStepper.step">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="n">add</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_add</span>
+        <span class="n">rhs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rhs_with_dts</span>
+
+        <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_stepper_regidx</span>
+
+        <span class="k">if</span> <span class="n">r0</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span><span class="p">:</span>
+            <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span> <span class="o">=</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r0</span>
+
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span><span class="p">)</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dtau</span><span class="p">,</span> <span class="n">r1</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r0</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="DualTVDRK3PseudoStepper">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualTVDRK3PseudoStepper">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DualTVDRK3PseudoStepper</span><span class="p">(</span><span class="n">BaseDualPseudoStepper</span><span class="p">):</span>
+    <span class="n">pseudo_stepper_name</span> <span class="o">=</span> <span class="s1">&#39;tvd-rk3&#39;</span>
+    <span class="n">pseudo_stepper_order</span> <span class="o">=</span> <span class="mi">3</span>
+    <span class="n">pseudo_stepper_nregs</span> <span class="o">=</span> <span class="mi">3</span>
+    <span class="n">pseudo_stepper_has_lerrest</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pseudo_stepper_nfevals</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="mi">3</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span>
+
+<div class="viewcode-block" id="DualTVDRK3PseudoStepper.step">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualTVDRK3PseudoStepper.step">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="n">add</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_add</span>
+        <span class="n">rhs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rhs_with_dts</span>
+        <span class="n">dtau</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dtau</span>
+
+        <span class="c1"># Get the bank indices for pseudo-registers (n+1,m; n+1,m+1; rhs),</span>
+        <span class="c1"># where m = pseudo-time and n = real-time</span>
+        <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_stepper_regidx</span>
+
+        <span class="c1"># Ensure r0 references the bank containing u(n+1,m)</span>
+        <span class="k">if</span> <span class="n">r0</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span><span class="p">:</span>
+            <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span> <span class="o">=</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r0</span>
+
+        <span class="c1"># First stage;</span>
+        <span class="c1"># r2 = -∇·f(r0) - dQ/dt; r1 = r0 + dtau*r2</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">dtau</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Second stage;</span>
+        <span class="c1"># r2 = -∇·f(r1) - dQ/dt; r1 = 3/4*r0 + 1/4*r1 + 1/4*dtau*r2</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="o">/</span><span class="mi">4</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="mi">3</span><span class="o">/</span><span class="mi">4</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">dtau</span><span class="o">/</span><span class="mi">4</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Third stage;</span>
+        <span class="c1"># r2 = -∇·f(r1) - dQ/dt; r1 = 1/3*r0 + 2/3*r1 + 2/3*dtau*r2</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">2</span><span class="o">/</span><span class="mi">3</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="mi">1</span><span class="o">/</span><span class="mi">3</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="mi">2</span><span class="o">*</span><span class="n">dtau</span><span class="o">/</span><span class="mi">3</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Return the index of the bank containing u(n+1,m+1)</span>
+        <span class="k">return</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r0</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="DualRK4PseudoStepper">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK4PseudoStepper">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DualRK4PseudoStepper</span><span class="p">(</span><span class="n">BaseDualPseudoStepper</span><span class="p">):</span>
+    <span class="n">pseudo_stepper_name</span> <span class="o">=</span> <span class="s1">&#39;rk4&#39;</span>
+    <span class="n">pseudo_stepper_order</span> <span class="o">=</span> <span class="mi">4</span>
+    <span class="n">pseudo_stepper_nregs</span> <span class="o">=</span> <span class="mi">3</span>
+    <span class="n">pseudo_stepper_has_lerrest</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pseudo_stepper_nfevals</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="mi">4</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span>
+
+<div class="viewcode-block" id="DualRK4PseudoStepper.step">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK4PseudoStepper.step">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="n">add</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_add</span>
+        <span class="n">rhs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rhs_with_dts</span>
+        <span class="n">dtau</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dtau</span>
+
+        <span class="c1"># Get the bank indices for pseudo-registers (n+1,m; n+1,m+1; rhs),</span>
+        <span class="c1"># where m = pseudo-time and n = real-time</span>
+        <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_stepper_regidx</span>
+
+        <span class="c1"># Ensure r0 references the bank containing u(n+1,m)</span>
+        <span class="k">if</span> <span class="n">r0</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span><span class="p">:</span>
+            <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span> <span class="o">=</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r0</span>
+
+        <span class="c1"># First stage; r1 = -∇·f(r0) - dQ/dt;</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">r1</span><span class="p">)</span>
+
+        <span class="c1"># Second stage; r2 = r0 + dtau/2*r1; r2 = -∇·f(r2) - dQ/dt;</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">dtau</span><span class="o">/</span><span class="mi">2</span><span class="p">,</span> <span class="n">r1</span><span class="p">)</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># As no subsequent stages depend on the first stage we can</span>
+        <span class="c1"># reuse its register to start accumulating the solution with</span>
+        <span class="c1"># r1 = r0 + dtau/6*r1 + dtau/3*r2</span>
+        <span class="n">add</span><span class="p">(</span><span class="n">dtau</span><span class="o">/</span><span class="mi">6</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">r0</span><span class="p">,</span> <span class="n">dtau</span><span class="o">/</span><span class="mi">3</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Third stage; here we reuse the r2 register</span>
+        <span class="c1"># r2 = r0 + dtau/2*r2 - dtau/2*dQ/dt</span>
+        <span class="c1"># r2 = -∇·f(r2) - dQ/dt;</span>
+        <span class="n">add</span><span class="p">(</span><span class="n">dtau</span><span class="o">/</span><span class="mi">2</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">r0</span><span class="p">)</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Accumulate; r1 = r1 + dtau/3*r2</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">dtau</span><span class="o">/</span><span class="mi">3</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Fourth stage; again we reuse r2</span>
+        <span class="c1"># r2 = r0 + dtau*r2</span>
+        <span class="c1"># r2 = -∇·f(r2) - dQ/dt;</span>
+        <span class="n">add</span><span class="p">(</span><span class="n">dtau</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">r0</span><span class="p">)</span>
+        <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Final accumulation r1 = r1 + dtau/6*r2 = u(n+1,m+1)</span>
+        <span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">dtau</span><span class="o">/</span><span class="mi">6</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+        <span class="c1"># Return the index of the bank containing u(n+1,m+1)</span>
+        <span class="k">return</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r0</span></div>
+</div>
+
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">DualEmbeddedPairPseudoStepper</span><span class="p">(</span><span class="n">BaseDualPseudoStepper</span><span class="p">):</span>
+    <span class="c1"># Coefficients</span>
+    <span class="n">a</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">b</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">bhat</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+        <span class="c1"># Compute the error coeffs</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">e</span> <span class="o">=</span> <span class="p">[</span><span class="n">b</span> <span class="o">-</span> <span class="n">bh</span> <span class="k">for</span> <span class="n">b</span><span class="p">,</span> <span class="n">bh</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">bhat</span><span class="p">)]</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_nstages</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">b</span><span class="p">)</span>
+
+        <span class="c1"># Allocate storage for the local pseudo time-step field</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dtau_upts</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">matrix</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">shape</span><span class="p">)</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_dtau</span><span class="p">,</span>
+                                              <span class="n">tags</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;align&#39;</span><span class="p">})</span>
+                          <span class="k">for</span> <span class="n">shape</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">ele_shapes</span><span class="o">.</span><span class="n">values</span><span class="p">()]</span>
+
+        <span class="c1"># Register a pointwise kernel for the low-storage stepper</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">pointwise</span><span class="o">.</span><span class="n">register</span><span class="p">(</span>
+            <span class="s1">&#39;pyfr.integrators.dual.pseudo.kernels.rkvdh2pseudo&#39;</span>
+        <span class="p">)</span>
+
+    <span class="nd">@memoize</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_get_rkvdh2pseudo_kerns</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stage</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="n">rold</span><span class="p">,</span> <span class="n">rerr</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">kerns</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">tplargs</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;a&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">a</span><span class="p">,</span> <span class="s1">&#39;b&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">b</span><span class="p">,</span> <span class="s1">&#39;e&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">e</span><span class="p">,</span> <span class="s1">&#39;stage&#39;</span><span class="p">:</span> <span class="n">stage</span><span class="p">,</span>
+                   <span class="s1">&#39;nstages&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_nstages</span><span class="p">,</span> <span class="s1">&#39;nvars&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">nvars</span><span class="p">,</span>
+                   <span class="s1">&#39;errest&#39;</span><span class="p">:</span> <span class="n">rerr</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">}</span>
+
+        <span class="k">for</span> <span class="n">dims</span><span class="p">,</span> <span class="n">em</span><span class="p">,</span> <span class="n">dtaum</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">ele_shapes</span><span class="o">.</span><span class="n">values</span><span class="p">(),</span>
+                                   <span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">ele_banks</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtau_upts</span><span class="p">):</span>
+            <span class="n">kern</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">kernel</span><span class="p">(</span>
+                <span class="s1">&#39;rkvdh2pseudo&#39;</span><span class="p">,</span> <span class="n">tplargs</span><span class="o">=</span><span class="n">tplargs</span><span class="p">,</span> <span class="n">dims</span><span class="o">=</span><span class="p">[</span><span class="n">dims</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">dims</span><span class="p">[</span><span class="mi">2</span><span class="p">]],</span>
+                <span class="n">dtau</span><span class="o">=</span><span class="n">dtaum</span><span class="p">,</span> <span class="n">r1</span><span class="o">=</span><span class="n">em</span><span class="p">[</span><span class="n">r1</span><span class="p">],</span> <span class="n">r2</span><span class="o">=</span><span class="n">em</span><span class="p">[</span><span class="n">r2</span><span class="p">],</span> <span class="n">rold</span><span class="o">=</span><span class="n">em</span><span class="p">[</span><span class="n">rold</span><span class="p">],</span>
+                <span class="n">rerr</span><span class="o">=</span><span class="n">em</span><span class="p">[</span><span class="n">rerr</span><span class="p">]</span> <span class="k">if</span> <span class="n">rerr</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">kerns</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">kern</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">kerns</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pseudo_stepper_has_lerrest</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pseudo_controller_needs_lerrest</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">bhat</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">DualRKVdH2RPseudoStepper</span><span class="p">(</span><span class="n">DualEmbeddedPairPseudoStepper</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pseudo_stepper_nfevals</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">b</span><span class="p">)</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pseudo_stepper_nregs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="mi">4</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">pseudo_stepper_has_lerrest</span> <span class="k">else</span> <span class="mi">3</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">npseudosteps</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="n">run_kernels</span><span class="p">,</span> <span class="n">rhs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">run_kernels</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rhs_with_dts</span>
+
+        <span class="n">rold</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span>
+        <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="o">*</span><span class="n">rerr</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_stepper_regidx</span><span class="p">)</span> <span class="o">-</span> <span class="p">{</span><span class="n">rold</span><span class="p">}</span>
+
+        <span class="c1"># Evaluate the stages in the scheme</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_nstages</span><span class="p">):</span>
+            <span class="c1"># Compute -∇·f - dQ/dt</span>
+            <span class="n">rhs</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">r2</span> <span class="k">if</span> <span class="n">i</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="n">rold</span><span class="p">,</span> <span class="n">r2</span><span class="p">)</span>
+
+            <span class="c1"># Fetch the appropriate RK accumulation kernels</span>
+            <span class="n">kerns</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_rkvdh2pseudo_kerns</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="n">rold</span><span class="p">,</span> <span class="o">*</span><span class="n">rerr</span><span class="p">)</span>
+
+            <span class="c1"># Execute</span>
+            <span class="n">run_kernels</span><span class="p">(</span><span class="n">kerns</span><span class="p">)</span>
+
+            <span class="c1"># Swap</span>
+            <span class="n">r1</span><span class="p">,</span> <span class="n">r2</span> <span class="o">=</span> <span class="n">r2</span><span class="p">,</span> <span class="n">r1</span>
+
+        <span class="c1"># Return</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">r2</span><span class="p">,</span> <span class="n">rold</span><span class="p">,</span> <span class="o">*</span><span class="n">rerr</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="DualRK34PseudoStepper">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK34PseudoStepper">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DualRK34PseudoStepper</span><span class="p">(</span><span class="n">DualRKVdH2RPseudoStepper</span><span class="p">):</span>
+    <span class="n">pseudo_stepper_name</span> <span class="o">=</span> <span class="s1">&#39;rk34&#39;</span>
+    <span class="n">pseudo_stepper_order</span> <span class="o">=</span> <span class="mi">3</span>
+
+    <span class="n">a</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="mi">11847461282814</span> <span class="o">/</span> <span class="mi">36547543011857</span><span class="p">,</span>
+        <span class="mi">3943225443063</span> <span class="o">/</span> <span class="mi">7078155732230</span><span class="p">,</span>
+        <span class="o">-</span><span class="mi">346793006927</span> <span class="o">/</span> <span class="mi">4029903576067</span>
+    <span class="p">]</span>
+
+    <span class="n">b</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="mi">1017324711453</span> <span class="o">/</span> <span class="mi">9774461848756</span><span class="p">,</span>
+        <span class="mi">8237718856693</span> <span class="o">/</span> <span class="mi">13685301971492</span><span class="p">,</span>
+        <span class="mi">57731312506979</span> <span class="o">/</span> <span class="mi">19404895981398</span><span class="p">,</span>
+        <span class="o">-</span><span class="mi">101169746363290</span> <span class="o">/</span> <span class="mi">37734290219643</span>
+    <span class="p">]</span>
+
+    <span class="n">bhat</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="mi">15763415370699</span> <span class="o">/</span> <span class="mi">46270243929542</span><span class="p">,</span>
+        <span class="mi">514528521746</span> <span class="o">/</span> <span class="mi">5659431552419</span><span class="p">,</span>
+        <span class="mi">27030193851939</span> <span class="o">/</span> <span class="mi">9429696342944</span><span class="p">,</span>
+        <span class="o">-</span><span class="mi">69544964788955</span> <span class="o">/</span> <span class="mi">30262026368149</span>
+    <span class="p">]</span></div>
+
+
+
+<div class="viewcode-block" id="DualRK45PseudoStepper">
+<a class="viewcode-back" href="../../../../../developer_guide.html#pyfr.integrators.dual.pseudo.pseudosteppers.DualRK45PseudoStepper">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DualRK45PseudoStepper</span><span class="p">(</span><span class="n">DualRKVdH2RPseudoStepper</span><span class="p">):</span>
+    <span class="n">pseudo_stepper_name</span> <span class="o">=</span> <span class="s1">&#39;rk45&#39;</span>
+    <span class="n">pseudo_stepper_order</span> <span class="o">=</span> <span class="mi">4</span>
+
+    <span class="n">a</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="mi">970286171893</span> <span class="o">/</span> <span class="mi">4311952581923</span><span class="p">,</span>
+        <span class="mi">6584761158862</span> <span class="o">/</span> <span class="mi">12103376702013</span><span class="p">,</span>
+        <span class="mi">2251764453980</span> <span class="o">/</span> <span class="mi">15575788980749</span><span class="p">,</span>
+        <span class="mi">26877169314380</span> <span class="o">/</span> <span class="mi">34165994151039</span>
+    <span class="p">]</span>
+
+    <span class="n">b</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="mi">1153189308089</span> <span class="o">/</span> <span class="mi">22510343858157</span><span class="p">,</span>
+        <span class="mi">1772645290293</span> <span class="o">/</span> <span class="mi">4653164025191</span><span class="p">,</span>
+        <span class="o">-</span><span class="mi">1672844663538</span> <span class="o">/</span> <span class="mi">4480602732383</span><span class="p">,</span>
+        <span class="mi">2114624349019</span> <span class="o">/</span> <span class="mi">3568978502595</span><span class="p">,</span>
+        <span class="mi">5198255086312</span> <span class="o">/</span> <span class="mi">14908931495163</span>
+    <span class="p">]</span>
+
+    <span class="n">bhat</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="mi">1016888040809</span> <span class="o">/</span> <span class="mi">7410784769900</span><span class="p">,</span>
+        <span class="mi">11231460423587</span> <span class="o">/</span> <span class="mi">58533540763752</span><span class="p">,</span>
+        <span class="o">-</span><span class="mi">1563879915014</span> <span class="o">/</span> <span class="mi">6823010717585</span><span class="p">,</span>
+        <span class="mi">606302364029</span> <span class="o">/</span> <span class="mi">971179775848</span><span class="p">,</span>
+        <span class="mi">1097981568119</span> <span class="o">/</span> <span class="mi">3980877426909</span>
+    <span class="p">]</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

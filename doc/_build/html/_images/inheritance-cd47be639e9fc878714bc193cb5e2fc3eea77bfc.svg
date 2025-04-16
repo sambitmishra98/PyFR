@@ -1,0 +1,215 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="447pt" height="206pt" viewBox="0.00 0.00 447.00 206.00">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 202)">
+<ns0:title>inheritanced5dd974960</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>BaseCommon</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M56.5,-108C56.5,-108 8.5,-108 8.5,-108 5.5,-108 2.5,-105 2.5,-102 2.5,-102 2.5,-96 2.5,-96 2.5,-93 5.5,-90 8.5,-90 8.5,-90 56.5,-90 56.5,-90 59.5,-90 62.5,-93 62.5,-96 62.5,-96 62.5,-102 62.5,-102 62.5,-105 59.5,-108 56.5,-108" />
+<ns0:text text-anchor="middle" x="32.5" y="-97.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseCommon</ns0:text>
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>BaseStdIntegrator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M144.5,-108C144.5,-108 80.5,-108 80.5,-108 77.5,-108 74.5,-105 74.5,-102 74.5,-102 74.5,-96 74.5,-96 74.5,-93 77.5,-90 80.5,-90 80.5,-90 144.5,-90 144.5,-90 147.5,-90 150.5,-93 150.5,-96 150.5,-96 150.5,-102 150.5,-102 150.5,-105 147.5,-108 144.5,-108" />
+<ns0:text text-anchor="middle" x="112.5" y="-97.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseStdIntegrator</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>BaseCommon-&gt;BaseStdIntegrator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M62.74,-99C62.74,-99 69.39,-99 69.39,-99" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="69.39,-100.75 74.39,-99 69.39,-97.25 69.39,-100.75" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseDIRKStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M315.5,-54C315.5,-54 252.5,-54 252.5,-54 249.5,-54 246.5,-51 246.5,-48 246.5,-48 246.5,-42 246.5,-42 246.5,-39 249.5,-36 252.5,-36 252.5,-36 315.5,-36 315.5,-36 318.5,-36 321.5,-39 321.5,-42 321.5,-42 321.5,-48 321.5,-48 321.5,-51 318.5,-54 315.5,-54" />
+<ns0:text text-anchor="middle" x="284" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDIRKStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="node8" class="node">
+<ns0:title>DualBackwardEulerStepper</ns0:title>
+<ns0:g id="a_node8"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.phys.steppers.DualBackwardEulerStepper" ns1:title="DualBackwardEulerStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M433,-90C433,-90 341,-90 341,-90 338,-90 335,-87 335,-84 335,-84 335,-78 335,-78 335,-75 338,-72 341,-72 341,-72 433,-72 433,-72 436,-72 439,-75 439,-78 439,-78 439,-84 439,-84 439,-87 436,-90 433,-90" />
+<ns0:text text-anchor="middle" x="387" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualBackwardEulerStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>BaseDIRKStepper-&gt;DualBackwardEulerStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M321.7,-48C333.26,-48 343,-48 343,-48 343,-48 343,-66.98 343,-66.98" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="341.25,-66.98 343,-71.98 344.75,-66.98 341.25,-66.98" />
+</ns0:g>
+
+<ns0:g id="node9" class="node">
+<ns0:title>SDIRK33Stepper</ns0:title>
+<ns0:g id="a_node9"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.phys.steppers.SDIRK33Stepper" ns1:title="SDIRK33Stepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M417.5,-54C417.5,-54 356.5,-54 356.5,-54 353.5,-54 350.5,-51 350.5,-48 350.5,-48 350.5,-42 350.5,-42 350.5,-39 353.5,-36 356.5,-36 356.5,-36 417.5,-36 417.5,-36 420.5,-36 423.5,-39 423.5,-42 423.5,-42 423.5,-48 423.5,-48 423.5,-51 420.5,-54 417.5,-54" />
+<ns0:text text-anchor="middle" x="387" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">SDIRK33Stepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>BaseDIRKStepper-&gt;SDIRK33Stepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M321.77,-42C321.77,-42 345.27,-42 345.27,-42" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="345.27,-43.75 350.27,-42 345.27,-40.25 345.27,-43.75" />
+</ns0:g>
+
+<ns0:g id="node10" class="node">
+<ns0:title>SDIRK43Stepper</ns0:title>
+<ns0:g id="a_node10"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.phys.steppers.SDIRK43Stepper" ns1:title="SDIRK43Stepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M417.5,-18C417.5,-18 356.5,-18 356.5,-18 353.5,-18 350.5,-15 350.5,-12 350.5,-12 350.5,-6 350.5,-6 350.5,-3 353.5,0 356.5,0 356.5,0 417.5,0 417.5,0 420.5,0 423.5,-3 423.5,-6 423.5,-6 423.5,-12 423.5,-12 423.5,-15 420.5,-18 417.5,-18" />
+<ns0:text text-anchor="middle" x="387" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">SDIRK43Stepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge9" class="edge">
+<ns0:title>BaseDIRKStepper-&gt;SDIRK43Stepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M284,-35.92C284,-25.25 284,-9 284,-9 284,-9 345.4,-9 345.4,-9" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="345.4,-10.75 350.4,-9 345.4,-7.25 345.4,-10.75" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>BaseDualStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M227,-56C227,-56 166,-56 166,-56 163,-56 160,-53 160,-50 160,-50 160,-44 160,-44 160,-41 163,-38 166,-38 166,-38 227,-38 227,-38 230,-38 233,-41 233,-44 233,-44 233,-50 233,-50 233,-53 230,-56 227,-56" />
+<ns0:text text-anchor="middle" x="196.5" y="-45.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDualStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>BaseDualStepper-&gt;BaseDIRKStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M233.1,-46C233.1,-46 241.42,-46 241.42,-46" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="241.42,-47.75 246.42,-46 241.42,-44.25 241.42,-47.75" />
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>BaseDualIntegrator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M146,-60C146,-60 79,-60 79,-60 76,-60 73,-57 73,-54 73,-54 73,-48 73,-48 73,-45 76,-42 79,-42 79,-42 146,-42 146,-42 149,-42 152,-45 152,-48 152,-48 152,-54 152,-54 152,-57 149,-60 146,-60" />
+<ns0:text text-anchor="middle" x="112.5" y="-49.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDualIntegrator</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>BaseDualIntegrator-&gt;BaseDualStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M152.04,-49C152.04,-49 154.95,-49 154.95,-49" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="154.95,-50.75 159.95,-49 154.95,-47.25 154.95,-50.75" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>BaseIntegrator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M59,-69C59,-69 6,-69 6,-69 3,-69 0,-66 0,-63 0,-63 0,-57 0,-57 0,-54 3,-51 6,-51 6,-51 59,-51 59,-51 62,-51 65,-54 65,-57 65,-57 65,-63 65,-63 65,-66 62,-69 59,-69" />
+<ns0:text text-anchor="middle" x="32.5" y="-58.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseIntegrator</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseIntegrator-&gt;BaseDualIntegrator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M65.04,-55.5C65.04,-55.5 67.91,-55.5 67.91,-55.5" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="67.91,-57.25 72.91,-55.5 67.91,-53.75 67.91,-57.25" />
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>BaseIntegrator-&gt;BaseStdIntegrator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M65.24,-64.5C87.53,-64.5 113,-64.5 113,-64.5 113,-64.5 113,-84.94 113,-84.94" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="111.25,-84.94 113,-89.94 114.75,-84.94 111.25,-84.94" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>BaseStdStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M225.5,-126C225.5,-126 167.5,-126 167.5,-126 164.5,-126 161.5,-123 161.5,-120 161.5,-120 161.5,-114 161.5,-114 161.5,-111 164.5,-108 167.5,-108 167.5,-108 225.5,-108 225.5,-108 228.5,-108 231.5,-111 231.5,-114 231.5,-114 231.5,-120 231.5,-120 231.5,-123 228.5,-126 225.5,-126" />
+<ns0:text text-anchor="middle" x="196.5" y="-115.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseStdStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>BaseStdIntegrator-&gt;BaseStdStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M150.64,-99C177.61,-99 209,-99 209,-99 209,-99 209,-102.58 209,-102.58" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="207.25,-102.58 209,-107.58 210.75,-102.58 207.25,-102.58" />
+</ns0:g>
+
+<ns0:g id="node11" class="node">
+<ns0:title>StdEulerStepper</ns0:title>
+<ns0:g id="a_node11"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.std.steppers.StdEulerStepper" ns1:title="StdEulerStepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M313,-198C313,-198 255,-198 255,-198 252,-198 249,-195 249,-192 249,-192 249,-186 249,-186 249,-183 252,-180 255,-180 255,-180 313,-180 313,-180 316,-180 319,-183 319,-186 319,-186 319,-192 319,-192 319,-195 316,-198 313,-198" />
+<ns0:text text-anchor="middle" x="284" y="-187.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">StdEulerStepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge10" class="edge">
+<ns0:title>BaseStdStepper-&gt;StdEulerStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M185,-126.12C185,-145.49 185,-189 185,-189 185,-189 243.82,-189 243.82,-189" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="243.82,-190.75 248.82,-189 243.82,-187.25 243.82,-190.75" />
+</ns0:g>
+
+<ns0:g id="node13" class="node">
+<ns0:title>StdRKVdH2RStepper</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M321,-162C321,-162 247,-162 247,-162 244,-162 241,-159 241,-156 241,-156 241,-150 241,-150 241,-147 244,-144 247,-144 247,-144 321,-144 321,-144 324,-144 327,-147 327,-150 327,-150 327,-156 327,-156 327,-159 324,-162 321,-162" />
+<ns0:text text-anchor="middle" x="284" y="-151.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">StdRKVdH2RStepper</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge14" class="edge">
+<ns0:title>BaseStdStepper-&gt;StdRKVdH2RStepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M209,-126.08C209,-136.75 209,-153 209,-153 209,-153 235.81,-153 235.81,-153" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="235.81,-154.75 240.81,-153 235.81,-151.25 235.81,-154.75" />
+</ns0:g>
+
+<ns0:g id="node15" class="node">
+<ns0:title>StdRK4Stepper</ns0:title>
+<ns0:g id="a_node15"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.std.steppers.StdRK4Stepper" ns1:title="StdRK4Stepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M312,-126C312,-126 256,-126 256,-126 253,-126 250,-123 250,-120 250,-120 250,-114 250,-114 250,-111 253,-108 256,-108 256,-108 312,-108 312,-108 315,-108 318,-111 318,-114 318,-114 318,-120 318,-120 318,-123 315,-126 312,-126" />
+<ns0:text text-anchor="middle" x="284" y="-115.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">StdRK4Stepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge13" class="edge">
+<ns0:title>BaseStdStepper-&gt;StdRK4Stepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M231.59,-117C231.59,-117 244.76,-117 244.76,-117" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="244.76,-118.75 249.76,-117 244.76,-115.25 244.76,-118.75" />
+</ns0:g>
+
+<ns0:g id="node16" class="node">
+<ns0:title>StdTVDRK3Stepper</ns0:title>
+<ns0:g id="a_node16"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.std.steppers.StdTVDRK3Stepper" ns1:title="StdTVDRK3Stepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M318.5,-90C318.5,-90 249.5,-90 249.5,-90 246.5,-90 243.5,-87 243.5,-84 243.5,-84 243.5,-78 243.5,-78 243.5,-75 246.5,-72 249.5,-72 249.5,-72 318.5,-72 318.5,-72 321.5,-72 324.5,-75 324.5,-78 324.5,-78 324.5,-84 324.5,-84 324.5,-87 321.5,-90 318.5,-90" />
+<ns0:text text-anchor="middle" x="284" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">StdTVDRK3Stepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge15" class="edge">
+<ns0:title>BaseStdStepper-&gt;StdTVDRK3Stepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M185,-107.92C185,-97.25 185,-81 185,-81 185,-81 238.45,-81 238.45,-81" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="238.45,-82.75 243.45,-81 238.45,-79.25 238.45,-82.75" />
+</ns0:g>
+
+<ns0:g id="node12" class="node">
+<ns0:title>StdRK34Stepper</ns0:title>
+<ns0:g id="a_node12"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.std.steppers.StdRK34Stepper" ns1:title="StdRK34Stepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M417,-180C417,-180 357,-180 357,-180 354,-180 351,-177 351,-174 351,-174 351,-168 351,-168 351,-165 354,-162 357,-162 357,-162 417,-162 417,-162 420,-162 423,-165 423,-168 423,-168 423,-174 423,-174 423,-177 420,-180 417,-180" />
+<ns0:text text-anchor="middle" x="387" y="-169.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">StdRK34Stepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge11" class="edge">
+<ns0:title>StdRKVdH2RStepper-&gt;StdRK34Stepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M323,-162.42C323,-166.78 323,-171 323,-171 323,-171 345.89,-171 345.89,-171" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="345.89,-172.75 350.89,-171 345.89,-169.25 345.89,-172.75" />
+</ns0:g>
+
+<ns0:g id="node14" class="node">
+<ns0:title>StdRK45Stepper</ns0:title>
+<ns0:g id="a_node14"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.std.steppers.StdRK45Stepper" ns1:title="StdRK45Stepper" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M417,-144C417,-144 357,-144 357,-144 354,-144 351,-141 351,-138 351,-138 351,-132 351,-132 351,-129 354,-126 357,-126 357,-126 417,-126 417,-126 420,-126 423,-129 423,-132 423,-132 423,-138 423,-138 423,-141 420,-144 417,-144" />
+<ns0:text text-anchor="middle" x="387" y="-133.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">StdRK45Stepper</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge12" class="edge">
+<ns0:title>StdRKVdH2RStepper-&gt;StdRK45Stepper</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M327.08,-153C355.31,-153 387,-153 387,-153 387,-153 387,-149.42 387,-149.42" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="388.75,-149.42 387,-144.42 385.25,-149.42 388.75,-149.42" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

@@ -1,0 +1,325 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pyfr.integrators.std.controllers &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../../../../_static/pyfr_favicon.png"/>
+      <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../../_static/contentui.js?v=9ee86694"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../../../../index.html">
+            
+              <img src="../../../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pyfr.integrators.std.controllers</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pyfr.integrators.std.controllers</h1><div class="highlight"><pre>
+<span></span><span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.integrators.std.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseStdIntegrator</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.mpiutil</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_comm_rank_root</span><span class="p">,</span> <span class="n">mpi</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">BaseStdController</span><span class="p">(</span><span class="n">BaseStdIntegrator</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+        <span class="c1"># Ensure the system is compatible with our formulation/controller</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">elementscls</span><span class="o">.</span><span class="n">validate_formulation</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="c1"># Solution filtering frequency</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_fnsteps</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getint</span><span class="p">(</span><span class="s1">&#39;soln-filter&#39;</span><span class="p">,</span> <span class="s1">&#39;nsteps&#39;</span><span class="p">,</span> <span class="s1">&#39;0&#39;</span><span class="p">)</span>
+
+        <span class="c1"># Stats on the most recent step</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stepinfo</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="c1"># Fire off any event handlers if not restarting</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">isrestart</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_run_plugins</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_accept_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">,</span> <span class="n">idxcurr</span><span class="p">,</span> <span class="n">err</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span> <span class="o">+=</span> <span class="n">dt</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">nacptsteps</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">nacptchain</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stepinfo</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">dt</span><span class="p">,</span> <span class="s1">&#39;accept&#39;</span><span class="p">,</span> <span class="n">err</span><span class="p">))</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span> <span class="o">=</span> <span class="n">idxcurr</span>
+
+        <span class="c1"># Filter</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fnsteps</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">nacptsteps</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fnsteps</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">system</span><span class="o">.</span><span class="n">filt</span><span class="p">(</span><span class="n">idxcurr</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_invalidate_caches</span><span class="p">()</span>
+
+        <span class="c1"># Run any plugins</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_run_plugins</span><span class="p">()</span>
+
+        <span class="c1"># Clear the step info</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stepinfo</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_reject_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">,</span> <span class="n">idxold</span><span class="p">,</span> <span class="n">err</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">dt</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtmin</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s1">&#39;Minimum sized time step rejected&#39;</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">nacptchain</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">nrjctsteps</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stepinfo</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">dt</span><span class="p">,</span> <span class="s1">&#39;reject&#39;</span><span class="p">,</span> <span class="n">err</span><span class="p">))</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_idxcurr</span> <span class="o">=</span> <span class="n">idxold</span>
+
+
+<div class="viewcode-block" id="StdNoneController">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.integrators.std.controllers.StdNoneController">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">StdNoneController</span><span class="p">(</span><span class="n">BaseStdController</span><span class="p">):</span>
+    <span class="n">controller_name</span> <span class="o">=</span> <span class="s1">&#39;none&#39;</span>
+    <span class="n">controller_has_variable_dt</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">controller_needs_errest</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+<div class="viewcode-block" id="StdNoneController.advance_to">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.integrators.std.controllers.StdNoneController.advance_to">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">advance_to</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">t</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Advance time is in the past&#39;</span><span class="p">)</span>
+
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span> <span class="o">&lt;</span> <span class="n">t</span><span class="p">:</span>
+            <span class="c1"># Decide on the time step</span>
+            <span class="n">dt</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="nb">min</span><span class="p">(</span><span class="n">t</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dt</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtmin</span><span class="p">)</span>
+
+            <span class="c1"># Take the step</span>
+            <span class="n">idxcurr</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span><span class="p">,</span> <span class="n">dt</span><span class="p">)</span>
+
+            <span class="c1"># We are not adaptive, so accept every step</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_accept_step</span><span class="p">(</span><span class="n">dt</span><span class="p">,</span> <span class="n">idxcurr</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="StdPIController">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.integrators.std.controllers.StdPIController">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">StdPIController</span><span class="p">(</span><span class="n">BaseStdController</span><span class="p">):</span>
+    <span class="n">controller_name</span> <span class="o">=</span> <span class="s1">&#39;pi&#39;</span>
+    <span class="n">controller_has_variable_dt</span> <span class="o">=</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+        <span class="n">sect</span> <span class="o">=</span> <span class="s1">&#39;solver-time-integrator&#39;</span>
+
+        <span class="c1"># Maximum time step</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dtmax</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;dt-max&#39;</span><span class="p">,</span> <span class="mf">1e2</span><span class="p">)</span>
+
+        <span class="c1"># Error tolerances</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_atol</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;atol&#39;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rtol</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;rtol&#39;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_atol</span> <span class="o">&lt;</span> <span class="mi">10</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">fpdtype_eps</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Absolute tolerance too small&#39;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rtol</span> <span class="o">&lt;</span> <span class="mi">10</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">fpdtype_eps</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Relative tolerance too small&#39;</span><span class="p">)</span>
+
+        <span class="c1"># Error norm</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_norm</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;errest-norm&#39;</span><span class="p">,</span> <span class="s1">&#39;l2&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_norm</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s1">&#39;l2&#39;</span><span class="p">,</span> <span class="s1">&#39;uniform&#39;</span><span class="p">}:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Invalid error norm&#39;</span><span class="p">)</span>
+
+        <span class="c1"># PI control values</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_alpha</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;pi-alpha&#39;</span><span class="p">,</span> <span class="mf">0.58</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_beta</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;pi-beta&#39;</span><span class="p">,</span> <span class="mf">0.42</span><span class="p">)</span>
+
+        <span class="c1"># Estimate of previous error</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_errprev</span> <span class="o">=</span> <span class="mf">1.0</span>
+
+        <span class="c1"># Step size adjustment factors</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_saffac</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;safety-fact&#39;</span><span class="p">,</span> <span class="mf">0.8</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_maxfac</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;max-fact&#39;</span><span class="p">,</span> <span class="mf">2.5</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_minfac</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">getfloat</span><span class="p">(</span><span class="n">sect</span><span class="p">,</span> <span class="s1">&#39;min-fact&#39;</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_minfac</span> <span class="o">&lt;</span> <span class="mi">1</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_maxfac</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Invalid max-fact, min-fact&#39;</span><span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">controller_needs_errest</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+<div class="viewcode-block" id="StdPIController._errest">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.integrators.std.controllers.StdPIController._errest">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_errest</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rcurr</span><span class="p">,</span> <span class="n">rprev</span><span class="p">,</span> <span class="n">rerr</span><span class="p">):</span>
+        <span class="n">comm</span><span class="p">,</span> <span class="n">rank</span><span class="p">,</span> <span class="n">root</span> <span class="o">=</span> <span class="n">get_comm_rank_root</span><span class="p">()</span>
+
+        <span class="c1"># Get a set of kernels to estimate the integration error</span>
+        <span class="n">ekerns</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_reduction_kerns</span><span class="p">(</span><span class="n">rcurr</span><span class="p">,</span> <span class="n">rprev</span><span class="p">,</span> <span class="n">rerr</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s1">&#39;errest&#39;</span><span class="p">,</span>
+                                           <span class="n">norm</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_norm</span><span class="p">)</span>
+
+        <span class="c1"># Bind the dynamic arguments</span>
+        <span class="k">for</span> <span class="n">kern</span> <span class="ow">in</span> <span class="n">ekerns</span><span class="p">:</span>
+            <span class="n">kern</span><span class="o">.</span><span class="n">bind</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_atol</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rtol</span><span class="p">)</span>
+
+        <span class="c1"># Run the kernels</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">run_kernels</span><span class="p">(</span><span class="n">ekerns</span><span class="p">,</span> <span class="n">wait</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+        <span class="c1"># Pseudo L2 norm</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_norm</span> <span class="o">==</span> <span class="s1">&#39;l2&#39;</span><span class="p">:</span>
+            <span class="c1"># Reduce locally (element types + field variables)</span>
+            <span class="n">err</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="nb">sum</span><span class="p">(</span><span class="n">v</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">ekerns</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">k</span><span class="o">.</span><span class="n">retval</span><span class="p">)])</span>
+
+            <span class="c1"># Reduce globally (MPI ranks)</span>
+            <span class="n">comm</span><span class="o">.</span><span class="n">Allreduce</span><span class="p">(</span><span class="n">mpi</span><span class="o">.</span><span class="n">IN_PLACE</span><span class="p">,</span> <span class="n">err</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">mpi</span><span class="o">.</span><span class="n">SUM</span><span class="p">)</span>
+
+            <span class="c1"># Normalise</span>
+            <span class="n">err</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">_gndofs</span><span class="p">)</span>
+        <span class="c1"># Uniform norm</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Reduce locally (element types + field variables)</span>
+            <span class="n">err</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="nb">max</span><span class="p">(</span><span class="n">v</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">ekerns</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">k</span><span class="o">.</span><span class="n">retval</span><span class="p">)])</span>
+
+            <span class="c1"># Reduce globally (MPI ranks)</span>
+            <span class="n">comm</span><span class="o">.</span><span class="n">Allreduce</span><span class="p">(</span><span class="n">mpi</span><span class="o">.</span><span class="n">IN_PLACE</span><span class="p">,</span> <span class="n">err</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">mpi</span><span class="o">.</span><span class="n">MAX</span><span class="p">)</span>
+
+            <span class="c1"># Normalise</span>
+            <span class="n">err</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">err</span><span class="p">))</span>
+
+        <span class="k">return</span> <span class="n">err</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">math</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="k">else</span> <span class="mi">100</span></div>
+
+
+<div class="viewcode-block" id="StdPIController.advance_to">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.integrators.std.controllers.StdPIController.advance_to">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">advance_to</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">t</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Advance time is in the past&#39;</span><span class="p">)</span>
+
+        <span class="c1"># Constants</span>
+        <span class="n">maxf</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_maxfac</span>
+        <span class="n">minf</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_minfac</span>
+        <span class="n">saff</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_saffac</span>
+        <span class="n">sord</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">stepper_order</span>
+
+        <span class="n">expa</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_alpha</span> <span class="o">/</span> <span class="n">sord</span>
+        <span class="n">expb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_beta</span> <span class="o">/</span> <span class="n">sord</span>
+
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span> <span class="o">&lt;</span> <span class="n">t</span><span class="p">:</span>
+            <span class="c1"># Decide on the time step</span>
+            <span class="n">dt</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="nb">min</span><span class="p">(</span><span class="n">t</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dt</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtmax</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtmin</span><span class="p">)</span>
+
+            <span class="c1"># Take the step</span>
+            <span class="n">idxcurr</span><span class="p">,</span> <span class="n">idxprev</span><span class="p">,</span> <span class="n">idxerr</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tcurr</span><span class="p">,</span> <span class="n">dt</span><span class="p">)</span>
+
+            <span class="c1"># Estimate the error</span>
+            <span class="n">err</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_errest</span><span class="p">(</span><span class="n">idxcurr</span><span class="p">,</span> <span class="n">idxprev</span><span class="p">,</span> <span class="n">idxerr</span><span class="p">)</span>
+
+            <span class="c1"># Determine time step adjustment factor</span>
+            <span class="n">fac</span> <span class="o">=</span> <span class="n">err</span><span class="o">**-</span><span class="n">expa</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">_errprev</span><span class="o">**</span><span class="n">expb</span>
+            <span class="n">fac</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">maxf</span><span class="p">,</span> <span class="nb">max</span><span class="p">(</span><span class="n">minf</span><span class="p">,</span> <span class="n">saff</span><span class="o">*</span><span class="n">fac</span><span class="p">))</span>
+
+            <span class="c1"># Compute the size of the next step</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_dt</span> <span class="o">=</span> <span class="n">fac</span><span class="o">*</span><span class="n">dt</span>
+
+            <span class="c1"># Decide if to accept or reject the step</span>
+            <span class="k">if</span> <span class="n">err</span> <span class="o">&lt;</span> <span class="mf">1.0</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_errprev</span> <span class="o">=</span> <span class="n">err</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_accept_step</span><span class="p">(</span><span class="n">dt</span><span class="p">,</span> <span class="n">idxcurr</span><span class="p">,</span> <span class="n">err</span><span class="o">=</span><span class="n">err</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_reject_step</span><span class="p">(</span><span class="n">dt</span><span class="p">,</span> <span class="n">idxprev</span><span class="p">,</span> <span class="n">err</span><span class="o">=</span><span class="n">err</span><span class="p">)</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

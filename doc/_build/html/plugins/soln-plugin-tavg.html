@@ -1,0 +1,259 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>[soln-plugin-tavg] &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../_static/pyfr_favicon.png"/>
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/contentui.js?v=9ee86694"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="[soln-plugin-writer]" href="soln-plugin-writer.html" />
+    <link rel="prev" title="[soln-plugin-sampler]" href="soln-plugin-sampler.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../index.html">
+            
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../user_guide.html">User Guide</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../user_guide.html#running-pyfr">Running PyFR</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="../user_guide.html#configuration-file-ini">Configuration File (.ini)</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#backends">Backends</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#systems">Systems</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#boundary-and-initial-conditions">Boundary and Initial Conditions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#nodal-point-sets">Nodal Point Sets</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="../user_guide.html#plugins">Plugins</a><ul class="current">
+<li class="toctree-l4 current"><a class="reference internal" href="../user_guide.html#solution-plugins">Solution Plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../user_guide.html#solver-plugins">Solver Plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../user_guide.html#regions">Regions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#additional-information">Additional Information</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../user_guide.html">User Guide</a></li>
+      <li class="breadcrumb-item active">[soln-plugin-tavg]</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/plugins/soln-plugin-tavg.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="soln-plugin-tavg">
+<h1>[soln-plugin-tavg]<a class="headerlink" href="#soln-plugin-tavg" title="Link to this heading"></a></h1>
+<p>Time average quantities. Parameterised with</p>
+<ol class="arabic">
+<li><p><code class="docutils literal notranslate"><span class="pre">nsteps</span></code> — accumulate the average every <code class="docutils literal notranslate"><span class="pre">nsteps</span></code> time steps:</p>
+<blockquote>
+<div><p><em>int</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dt-out</span></code> — write to disk every <code class="docutils literal notranslate"><span class="pre">dt-out</span></code> time units:</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tstart</span></code> — time at which to start accumulating average data:</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mode</span></code> — output file accumulation mode:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">continuous</span></code> | <code class="docutils literal notranslate"><span class="pre">windowed</span></code></p>
+<p>In continuous mode each output file contains average data from
+<code class="docutils literal notranslate"><span class="pre">tstart</span></code> up until the time at which the file is written. In windowed
+mode each output file only contains average data for the preceding
+<code class="docutils literal notranslate"><span class="pre">dt-out</span></code> time units. The default is <code class="docutils literal notranslate"><span class="pre">windowed</span></code>. Average data files
+obtained using the windowed mode can be accumulated after-the-fact using
+the CLI.</p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">std-mode</span></code> — standard deviation reporting mode:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">summary</span></code> | <code class="docutils literal notranslate"><span class="pre">all</span></code></p>
+<p>If to output full standard deviation fields or just summary
+statistics.  In lieu of a complete field, summary instead reports
+the maximum and average standard deviation for each field. The
+default is <code class="docutils literal notranslate"><span class="pre">summary</span></code> with <code class="docutils literal notranslate"><span class="pre">all</span></code> doubling the size of the
+resulting files.</p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">basedir</span></code> — relative path to directory where outputs will be
+written:</p>
+<blockquote>
+<div><p><em>string</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">basename</span></code> — pattern of output names:</p>
+<blockquote>
+<div><p><em>string</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">precision</span></code> — output file number precision:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">single</span></code> | <code class="docutils literal notranslate"><span class="pre">double</span></code></p>
+<p>The default is <code class="docutils literal notranslate"><span class="pre">single</span></code>. Note that this only impacts the output,
+with statistic accumulation <em>always</em> being performed in double
+precision.</p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">region</span></code> — region to be averaged, specified as either the entire
+domain using <code class="docutils literal notranslate"><span class="pre">*</span></code>, a combination of the geometric shapes specified
+in <a class="reference internal" href="../user_guide.html#regions"><span class="std std-ref">Regions</span></a>, or a sub-region of elements that have faces on a
+specific domain boundary via the name of the domain boundary:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">*</span></code> | <code class="docutils literal notranslate"><span class="pre">shape(args,</span> <span class="pre">...)</span></code> | <em>string</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">region-type</span></code> — if to average all of the elements contained inside
+the region or only those which are on its surface:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">volume</span></code> | <code class="docutils literal notranslate"><span class="pre">surface</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">region-expand</span></code> — how many layers to grow the region by:</p>
+<blockquote>
+<div><p><em>int</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">avg</span></code>-<em>name</em> — expression to time average, written as a function
+of the primitive variables and gradients thereof; multiple
+expressions, each with their own <em>name</em>, may be specified:</p>
+<blockquote>
+<div><p><em>string</em></p>
+</div></blockquote>
+</li>
+<li><dl>
+<dt><code class="docutils literal notranslate"><span class="pre">fun-avg</span></code>-<em>name</em> — expression to compute at file output time,</dt><dd><p>written as a function of any ordinary average terms; multiple
+expressions, each with their own <em>name</em>, may be specified:</p>
+<p><em>string</em></p>
+</dd>
+</dl>
+</li>
+</ol>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">[</span><span class="n">soln</span><span class="o">-</span><span class="n">plugin</span><span class="o">-</span><span class="n">tavg</span><span class="p">]</span>
+<span class="n">nsteps</span> <span class="o">=</span> <span class="mi">10</span>
+<span class="n">dt</span><span class="o">-</span><span class="n">out</span> <span class="o">=</span> <span class="mf">2.0</span>
+<span class="n">mode</span> <span class="o">=</span> <span class="n">windowed</span>
+<span class="n">basedir</span> <span class="o">=</span> <span class="o">.</span>
+<span class="n">basename</span> <span class="o">=</span> <span class="n">files</span><span class="o">-</span><span class="p">{</span><span class="n">t</span><span class="p">:</span><span class="mf">06.2</span><span class="n">f</span><span class="p">}</span>
+
+<span class="n">avg</span><span class="o">-</span><span class="n">u</span> <span class="o">=</span> <span class="n">u</span>
+<span class="n">avg</span><span class="o">-</span><span class="n">v</span> <span class="o">=</span> <span class="n">v</span>
+<span class="n">avg</span><span class="o">-</span><span class="n">uu</span> <span class="o">=</span> <span class="n">u</span><span class="o">*</span><span class="n">u</span>
+<span class="n">avg</span><span class="o">-</span><span class="n">vv</span> <span class="o">=</span> <span class="n">v</span><span class="o">*</span><span class="n">v</span>
+<span class="n">avg</span><span class="o">-</span><span class="n">uv</span> <span class="o">=</span> <span class="n">u</span><span class="o">*</span><span class="n">v</span>
+
+<span class="n">fun</span><span class="o">-</span><span class="n">avg</span><span class="o">-</span><span class="n">upup</span> <span class="o">=</span> <span class="n">uu</span> <span class="o">-</span> <span class="n">u</span><span class="o">*</span><span class="n">u</span>
+<span class="n">fun</span><span class="o">-</span><span class="n">avg</span><span class="o">-</span><span class="n">vpvp</span> <span class="o">=</span> <span class="n">vv</span> <span class="o">-</span> <span class="n">v</span><span class="o">*</span><span class="n">v</span>
+<span class="n">fun</span><span class="o">-</span><span class="n">avg</span><span class="o">-</span><span class="n">upvp</span> <span class="o">=</span> <span class="n">uv</span> <span class="o">-</span> <span class="n">u</span><span class="o">*</span><span class="n">v</span>
+</pre></div>
+</div>
+<p>This plugin also exposes functionality via a CLI. The following
+functions are available</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">pyfr</span> <span class="pre">tavg</span> <span class="pre">merge</span></code> — average together multiple time average files
+into a single time average file. The averaging times are read from the
+file and do not need to be evenly spaced in time.  Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pyfr</span> <span class="n">tavg</span> <span class="n">merge</span> <span class="n">avg</span><span class="o">-</span><span class="mf">1.00</span><span class="o">.</span><span class="n">pyfrs</span> <span class="n">avg</span><span class="o">-</span><span class="mf">2.00</span><span class="o">.</span><span class="n">pyfrs</span> <span class="n">avg</span><span class="o">-</span><span class="mf">10.00</span><span class="o">.</span><span class="n">pyfrs</span> <span class="n">merged_avg</span><span class="o">.</span><span class="n">pyfrs</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="soln-plugin-sampler.html" class="btn btn-neutral float-left" title="[soln-plugin-sampler]" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="soln-plugin-writer.html" class="btn btn-neutral float-right" title="[soln-plugin-writer]" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

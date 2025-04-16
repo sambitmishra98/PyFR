@@ -1,0 +1,247 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Post Processing &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="_static/pyfr_favicon.png"/>
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=c4a36953"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/contentui.js?v=9ee86694"></script>
+      <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Performance Tuning" href="performance_tuning.html" />
+    <link rel="prev" title="[solver-plugin-turbulence]" href="plugins/solver-plugin-turbulence.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="index.html">
+            
+              <img src="_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user_guide.html">User Guide</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Post Processing</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#high-order-export">High-Order Export</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#clean-to-grid">Clean to Grid</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#tessellate">Tessellate</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#avoiding-seams">Avoiding Seams</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#parallel-processing">Parallel Processing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#boundary-and-stl-export">Boundary and STL Export</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Post Processing</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/post_processing.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="post-processing">
+<h1>Post Processing<a class="headerlink" href="#post-processing" title="Link to this heading"></a></h1>
+<p>The following sections contain best pratices for post processing a
+simulation using ParaView.</p>
+<section id="high-order-export">
+<h2>High-Order Export<a class="headerlink" href="#high-order-export" title="Link to this heading"></a></h2>
+<p>By default PyFR will output a high-order VTK file.  However, to take
+full advantage of this functionality it is necessary to adjust the
+<em>Nonlinear Subdivision Level</em> property in ParaView.  This property is
+configured on a per-filter basis and defaults to one.  This results in
+each high-order element being internally subdivided once by ParaView
+prior to further processing.  While this is often a reasonable first
+approximation it is typically inadequate for moderate-order simulations.
+It may therefore be necessary to move the slider to two or three levels
+of subdivision.  Note, however, that ParaView subdivides <em>recursively</em>
+and hence a quadrilateral subject to two levels of subdivision is broken
+down into 16 elements.  This is in contrast to PyFR where, when
+employing subdivision, <code class="docutils literal notranslate"><span class="pre">--eopts=divisor:2</span></code> results in each
+quadrilateral being divided into four elements.</p>
+</section>
+<section id="clean-to-grid">
+<h2>Clean to Grid<a class="headerlink" href="#clean-to-grid" title="Link to this heading"></a></h2>
+<p>Upon opening an exported file in ParaView one should <em>always</em> run the
+<em>Clean to Grid</em> filter.  This will eliminate duplicate vertices along
+the faces and edges between elements that arise as a consequence of the
+discontinuous nature of the FR approach.  For best results it is
+recommended to set the <em>Point Data Weighting Strategy</em> to <em>Average by
+Number</em>.  Running this filter will not only result in cleaner visuals
+but will also improve the performance of ParaView.</p>
+</section>
+<section id="tessellate">
+<h2>Tessellate<a class="headerlink" href="#tessellate" title="Link to this heading"></a></h2>
+<p>When working with high-order outputs an alternative to the  <em>Clean to
+Grid</em> filter is the <em>Tessellate</em> filter.  This takes a high-order grid
+with potentially discontinuous field values and <em>adaptively</em> subdivides
+it into a larger number of linear elements.  Here, there are two primary
+parameters: <em>Chord Error</em> which controls the amount of permitted
+geometrical error and the unnamed <em>Field Error</em> list-box which controls
+the amount of permitted error in the field values themselves.  Although
+not obvious from the user interface, it is possible to provide a
+separate error tolerance for each field.  Secondary parameters include
+the <em>Maximum Number of Subdivisions</em> and <em>Merge Points</em> with the latter
+subsuming the functionality of <em>Clean to Grid</em>.  Note that this filter
+can be <strong>extremely computationally expensive</strong>, especially when tight
+error tolerances are chosen.</p>
+</section>
+<section id="avoiding-seams">
+<h2>Avoiding Seams<a class="headerlink" href="#avoiding-seams" title="Link to this heading"></a></h2>
+<p>When working with mixed element meshes or with .pvtu files obtained by
+running pyfr export in parallel, it is possible for seams to appear.
+These can be avoided by adding the <em>Ghost Cells</em> plugin to the filter
+pipeline.  This filter should be added immediately after <em>Clean to Grid</em>
+and/or <em>Tessellate</em>.</p>
+</section>
+<section id="parallel-processing">
+<h2>Parallel Processing<a class="headerlink" href="#parallel-processing" title="Link to this heading"></a></h2>
+<p>When post-processing large data sets it is important to run ParaView in
+parallel.  This can be done either interactively using <em>pvserver</em> or in
+a batch capacity using <em>pvbatch</em>.  Full details can be found in the
+<a class="reference external" href="https://docs.paraview.org/en/latest/ReferenceManual/parallelDataVisualization.html">ParaView documentation</a>.  Upon opening a file the
+recommended filter stack is as follows:</p>
+<ol class="arabic simple">
+<li><p><em>Redistribute Dataset</em> which will distribute the cells such that each
+ParaView rank has a roughly equivalent amount of data.</p></li>
+<li><p><em>Clean to Grid</em> and/or <em>Tessellate</em> for the reasons described above.</p></li>
+<li><p><em>Ghost Cells</em> to avoid seams.</p></li>
+</ol>
+<p>When working with extremely large datasets in parallel it is recommended
+to use the .pvtu file format.  This has the advantage of being already
+partitioned such that there is no need to run the <em>Redistribute Dataset</em>
+filter.  Here, the number parts in the .pvtu file is equal to the number
+of ranks <em>pyfr export</em> is run with.  For optimal performance, the number
+of parts should be an integer multiple of the number of ranks <em>pvserver</em>
+or <em>pvbatch</em> will be run with.   Furthermore, it is important that each
+of these ranks have a similar number of elements.  This is not usually
+an issue except when <em>pyfr export</em> is using a weighted partitioning or
+when the .pyfrs files are subset.  In the former case the solution is to
+add a uniform partitioning to the mesh and employ this for the export.
+In the latter case the only robust solution is to use the <em>Redistribute
+Dataset</em> to rebalance the file.</p>
+</section>
+<section id="boundary-and-stl-export">
+<h2>Boundary and STL Export<a class="headerlink" href="#boundary-and-stl-export" title="Link to this heading"></a></h2>
+<p>When working with surface data, be it from a boundary or an STL file, it
+is recommended to start with the following filter pipeline:</p>
+<ol class="arabic simple">
+<li><p><em>Clean to Grid</em> for the reasons outlined above.</p></li>
+<li><p><em>Extract Surface</em> which will convert the internal representation of
+the surface from an unstructured grid to polygonal data.</p></li>
+<li><p><em>Generate Surface Normals</em> which will yield a much smoother surface.
+The normal data is also needed for computing quantities such as the
+skin-friction coefficient <span class="math notranslate nohighlight">\(C_f\)</span>.</p></li>
+</ol>
+<p>To reduce the computational cost associated with exporting boundary data
+it is recommended to use <em>regions</em>.  For example, if our ultimate goal
+is to analyse data on a boundary called <em>wall</em> then we can configure our
+solution writer as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[soln-plugin-writer]
+...
+write-gradients = true
+region = wall
+</pre></div>
+</div>
+<p>which will output the solution and gradient data for the elements on our
+boundary.  Then, we can pass this subset solution file to <code class="docutils literal notranslate"><span class="pre">pyfr</span> <span class="pre">export</span>
+<span class="pre">boundary</span></code>.  Alternatively, if our goal is to export an STL region
+called <em>rgn</em> then we can configure our solution writer as:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[soln-plugin-writer]
+...
+write-gradients = true
+region = stl(&#39;rgn&#39;)
+region-expand = 1
+region-type = surface
+</pre></div>
+</div>
+<p>which will write out approximately three layers of elements around the
+surface defined by our STL region.  The need for multiple layers is due
+to the coarse-grained nature of the region code and ensures that the
+subsequent export step will have enough elements to work with.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="plugins/solver-plugin-turbulence.html" class="btn btn-neutral float-left" title="[solver-plugin-turbulence]" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="performance_tuning.html" class="btn btn-neutral float-right" title="Performance Tuning" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

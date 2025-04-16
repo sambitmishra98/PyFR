@@ -1,0 +1,308 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pyfr.backends.openmp.provider &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../../../../_static/pyfr_favicon.png"/>
+      <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../../_static/contentui.js?v=9ee86694"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../../../../index.html">
+            
+              <img src="../../../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pyfr.backends.openmp.provider</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pyfr.backends.openmp.provider</h1><div class="highlight"><pre>
+<span></span><span class="kn">from</span><span class="w"> </span><span class="nn">ctypes</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">POINTER</span><span class="p">,</span> <span class="n">Structure</span><span class="p">,</span> <span class="n">Union</span><span class="p">,</span> <span class="n">addressof</span><span class="p">,</span> <span class="n">byref</span><span class="p">,</span> <span class="n">c_int</span><span class="p">,</span>
+                    <span class="n">c_void_p</span><span class="p">,</span> <span class="n">cast</span><span class="p">,</span> <span class="n">pointer</span><span class="p">,</span> <span class="n">sizeof</span><span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">cached_property</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.base</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">BaseKernelProvider</span><span class="p">,</span> <span class="n">BaseOrderedMetaKernel</span><span class="p">,</span>
+                                <span class="n">BasePointwiseKernelProvider</span><span class="p">,</span>
+                                <span class="n">BaseUnorderedMetaKernel</span><span class="p">,</span> <span class="n">Kernel</span><span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.openmp.generator</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenMPKernelGenerator</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.cache</span><span class="w"> </span><span class="kn">import</span> <span class="n">memoize</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.nputil</span><span class="w"> </span><span class="kn">import</span> <span class="n">npdtype_to_ctypestype</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPKernel</span><span class="p">(</span><span class="n">Kernel</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">mats</span><span class="o">=</span><span class="p">[],</span> <span class="n">views</span><span class="o">=</span><span class="p">[],</span> <span class="n">misc</span><span class="o">=</span><span class="p">[],</span> <span class="n">kernel</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">mats</span><span class="p">,</span> <span class="n">views</span><span class="p">,</span> <span class="n">misc</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">kernel</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span> <span class="o">=</span> <span class="n">kernel</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_to_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">dnodes</span><span class="p">):</span>
+        <span class="n">graph</span><span class="o">.</span><span class="n">klist</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">kernel</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="n">graph</span><span class="o">.</span><span class="n">klist</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span><span class="p">()</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_OpenMPMetaKernel</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_to_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">dnodes</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernels</span><span class="p">:</span>
+            <span class="n">k</span><span class="o">.</span><span class="n">add_to_graph</span><span class="p">(</span><span class="n">graph</span><span class="p">,</span> <span class="n">dnodes</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="n">graph</span><span class="o">.</span><span class="n">klist</span><span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPOrderedMetaKernel</span><span class="p">(</span><span class="n">_OpenMPMetaKernel</span><span class="p">,</span> <span class="n">BaseOrderedMetaKernel</span><span class="p">):</span>
+    <span class="k">pass</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPUnorderedMetaKernel</span><span class="p">(</span><span class="n">_OpenMPMetaKernel</span><span class="p">,</span> <span class="n">BaseUnorderedMetaKernel</span><span class="p">):</span>
+    <span class="k">pass</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPRegularRunArgs</span><span class="p">(</span><span class="n">Structure</span><span class="p">):</span>
+    <span class="n">_fields_</span> <span class="o">=</span> <span class="p">[(</span><span class="s1">&#39;fun&#39;</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">),</span> <span class="p">(</span><span class="s1">&#39;args&#39;</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">)]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPBlockKernelArgs</span><span class="p">(</span><span class="n">Structure</span><span class="p">):</span>
+    <span class="n">_fields_</span> <span class="o">=</span> <span class="p">[(</span><span class="s1">&#39;fun&#39;</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;args&#39;</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;argmask&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;argsz&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;offset&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">)]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPBlockRunArgs</span><span class="p">(</span><span class="n">Structure</span><span class="p">):</span>
+    <span class="n">_fields_</span> <span class="o">=</span> <span class="p">[(</span><span class="s1">&#39;nkerns&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;nblocks&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;allocsz&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;nsubs&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span>
+                <span class="p">(</span><span class="s1">&#39;subs&#39;</span><span class="p">,</span> <span class="n">POINTER</span><span class="p">(</span><span class="n">c_int</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s1">&#39;kernels&#39;</span><span class="p">,</span> <span class="n">POINTER</span><span class="p">(</span><span class="n">OpenMPBlockKernelArgs</span><span class="p">))]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_OpenMPKRunArgsUnion</span><span class="p">(</span><span class="n">Union</span><span class="p">):</span>
+    <span class="n">_fields_</span> <span class="o">=</span> <span class="p">[(</span><span class="s1">&#39;r&#39;</span><span class="p">,</span> <span class="n">OpenMPRegularRunArgs</span><span class="p">),</span> <span class="p">(</span><span class="s1">&#39;b&#39;</span><span class="p">,</span> <span class="n">OpenMPBlockRunArgs</span><span class="p">)]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPKRunArgs</span><span class="p">(</span><span class="n">Structure</span><span class="p">):</span>
+    <span class="n">KTYPE_REGULAR</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">KTYPE_BLOCK_GROUP</span> <span class="o">=</span> <span class="mi">1</span>
+
+    <span class="n">_anonymous_</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;u&#39;</span><span class="p">]</span>
+    <span class="n">_fields_</span> <span class="o">=</span> <span class="p">[(</span><span class="s1">&#39;ktype&#39;</span><span class="p">,</span> <span class="n">c_int</span><span class="p">),</span> <span class="p">(</span><span class="s1">&#39;u&#39;</span><span class="p">,</span> <span class="n">_OpenMPKRunArgsUnion</span><span class="p">)]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPKernelFunction</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">backend</span><span class="p">,</span> <span class="n">fun</span><span class="p">,</span> <span class="n">argcls</span><span class="p">,</span> <span class="n">argnames</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">krunner</span> <span class="o">=</span> <span class="n">backend</span><span class="o">.</span><span class="n">krunner</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">fun</span> <span class="o">=</span> <span class="n">fun</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">kargs</span> <span class="o">=</span> <span class="n">argcls</span><span class="p">()</span>
+
+        <span class="c1"># Blocking info</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">argnames</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">argnames</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">argsizes</span> <span class="o">=</span> <span class="p">[</span><span class="kc">None</span><span class="p">]</span><span class="o">*</span><span class="nb">len</span><span class="p">(</span><span class="n">argnames</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">nblocks</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">subs_offsets</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">*</span><span class="nb">len</span><span class="p">(</span><span class="n">argnames</span><span class="p">)</span>
+
+    <span class="nd">@cached_property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">runargs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">fun</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">fun</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">)</span>
+        <span class="n">args</span><span class="p">,</span> <span class="n">argsz</span> <span class="o">=</span> <span class="n">addressof</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">kargs</span><span class="p">),</span> <span class="n">sizeof</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">kargs</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">nblocks</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">rra</span> <span class="o">=</span> <span class="n">OpenMPRegularRunArgs</span><span class="p">(</span><span class="n">fun</span><span class="o">=</span><span class="n">fun</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="n">args</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">OpenMPKRunArgs</span><span class="p">(</span><span class="n">ktype</span><span class="o">=</span><span class="n">OpenMPKRunArgs</span><span class="o">.</span><span class="n">KTYPE_REGULAR</span><span class="p">,</span> <span class="n">r</span><span class="o">=</span><span class="n">rra</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">bka</span> <span class="o">=</span> <span class="n">OpenMPBlockKernelArgs</span><span class="p">(</span><span class="n">fun</span><span class="o">=</span><span class="n">fun</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="n">args</span><span class="p">,</span> <span class="n">argsz</span><span class="o">=</span><span class="n">argsz</span><span class="p">)</span>
+            <span class="n">bra</span> <span class="o">=</span> <span class="n">OpenMPBlockRunArgs</span><span class="p">(</span><span class="n">nkerns</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">nblocks</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">nblocks</span><span class="p">,</span>
+                                     <span class="n">kernels</span><span class="o">=</span><span class="n">pointer</span><span class="p">(</span><span class="n">bka</span><span class="p">))</span>
+            <span class="k">return</span> <span class="n">OpenMPKRunArgs</span><span class="p">(</span><span class="n">ktype</span><span class="o">=</span><span class="n">OpenMPKRunArgs</span><span class="o">.</span><span class="n">KTYPE_BLOCK_GROUP</span><span class="p">,</span>
+                                  <span class="n">b</span><span class="o">=</span><span class="n">bra</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">arg_off</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">i</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">kargs</span><span class="o">.</span><span class="vm">__class__</span><span class="p">,</span> <span class="sa">f</span><span class="s1">&#39;arg</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">offset</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">arg_idx</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">argnames</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">arg_blocksz</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">i</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">argsizes</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">subs_off</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">i</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">subs_offsets</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_arg</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">v</span><span class="p">):</span>
+        <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">kargs</span><span class="p">,</span> <span class="sa">f</span><span class="s1">&#39;arg</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">,</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="s1">&#39;_as_parameter_&#39;</span><span class="p">,</span> <span class="n">v</span><span class="p">))</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">argsizes</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">blocksz</span><span class="o">*</span><span class="n">v</span><span class="o">.</span><span class="n">itemsize</span>
+        <span class="k">except</span> <span class="p">(</span><span class="ne">AttributeError</span><span class="p">,</span> <span class="ne">IndexError</span><span class="p">):</span>
+            <span class="k">pass</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">subs_offsets</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">ra</span><span class="o">*</span><span class="n">v</span><span class="o">.</span><span class="n">leaddim</span><span class="o">*</span><span class="n">v</span><span class="o">.</span><span class="n">itemsize</span>
+        <span class="k">except</span> <span class="p">(</span><span class="ne">AttributeError</span><span class="p">,</span> <span class="ne">IndexError</span><span class="p">):</span>
+            <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_args</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">arg</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">set_arg</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">arg</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_nblocks</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">nblocks</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">nblocks</span> <span class="o">=</span> <span class="n">nblocks</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">krunner</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">byref</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">runargs</span><span class="p">))</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPKernelProvider</span><span class="p">(</span><span class="n">BaseKernelProvider</span><span class="p">):</span>
+    <span class="nd">@memoize</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_get_arg_cls</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">argtypes</span><span class="p">):</span>
+        <span class="n">fields</span> <span class="o">=</span> <span class="p">[(</span><span class="sa">f</span><span class="s1">&#39;arg</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">npdtype_to_ctypestype</span><span class="p">(</span><span class="n">arg</span><span class="p">))</span>
+                  <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">arg</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">argtypes</span><span class="p">)]</span>
+
+        <span class="k">return</span> <span class="nb">type</span><span class="p">(</span><span class="s1">&#39;ArgStruct&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">Structure</span><span class="p">,),</span> <span class="p">{</span><span class="s1">&#39;_fields_&#39;</span><span class="p">:</span> <span class="n">fields</span><span class="p">})</span>
+
+    <span class="nd">@memoize</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_library</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">src</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">compiler</span><span class="o">.</span><span class="n">build</span><span class="p">(</span><span class="n">src</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_function</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">src</span><span class="p">,</span> <span class="n">argtypes</span><span class="p">,</span> <span class="n">restype</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">lib</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_library</span><span class="p">(</span><span class="n">src</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">lib</span><span class="o">.</span><span class="n">function</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">restype</span><span class="p">,</span>
+                            <span class="p">[</span><span class="n">npdtype_to_ctypestype</span><span class="p">(</span><span class="n">arg</span><span class="p">)</span> <span class="k">for</span> <span class="n">arg</span> <span class="ow">in</span> <span class="n">argtypes</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_kernel</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">src</span><span class="p">,</span> <span class="n">argtypes</span><span class="p">,</span> <span class="n">argnames</span><span class="o">=</span><span class="p">[]):</span>
+        <span class="n">lib</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_library</span><span class="p">(</span><span class="n">src</span><span class="p">)</span>
+        <span class="n">fun</span> <span class="o">=</span> <span class="n">lib</span><span class="o">.</span><span class="n">function</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">OpenMPKernelFunction</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="p">,</span> <span class="n">fun</span><span class="p">,</span>
+                                    <span class="bp">self</span><span class="o">.</span><span class="n">_get_arg_cls</span><span class="p">(</span><span class="nb">tuple</span><span class="p">(</span><span class="n">argtypes</span><span class="p">)),</span>
+                                    <span class="n">argnames</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="OpenMPPointwiseKernelProvider">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.provider.OpenMPPointwiseKernelProvider">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPPointwiseKernelProvider</span><span class="p">(</span><span class="n">OpenMPKernelProvider</span><span class="p">,</span>
+                                    <span class="n">BasePointwiseKernelProvider</span><span class="p">):</span>
+    <span class="n">kernel_generator_cls</span> <span class="o">=</span> <span class="n">OpenMPKernelGenerator</span>
+
+<div class="viewcode-block" id="OpenMPPointwiseKernelProvider._instantiate_kernel">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.provider.OpenMPPointwiseKernelProvider._instantiate_kernel">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_instantiate_kernel</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dims</span><span class="p">,</span> <span class="n">fun</span><span class="p">,</span> <span class="n">arglst</span><span class="p">,</span> <span class="n">argm</span><span class="p">,</span> <span class="n">argv</span><span class="p">):</span>
+        <span class="n">rtargs</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="c1"># Set the number of blocks</span>
+        <span class="n">fun</span><span class="o">.</span><span class="n">set_nblocks</span><span class="p">(</span><span class="o">-</span><span class="p">(</span><span class="o">-</span><span class="n">dims</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">csubsz</span><span class="p">))</span>
+
+        <span class="c1"># Process the arguments</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">arglst</span><span class="p">):</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+                <span class="n">rtargs</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">))</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">fun</span><span class="o">.</span><span class="n">set_arg</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">)</span>
+
+        <span class="k">class</span><span class="w"> </span><span class="nc">PointwiseKernel</span><span class="p">(</span><span class="n">OpenMPKernel</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">rtargs</span><span class="p">:</span>
+                <span class="k">def</span><span class="w"> </span><span class="nf">bind</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+                    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">rtargs</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span><span class="o">.</span><span class="n">set_arg</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">[</span><span class="n">k</span><span class="p">])</span>
+
+        <span class="k">return</span> <span class="n">PointwiseKernel</span><span class="p">(</span><span class="n">argm</span><span class="p">,</span> <span class="n">argv</span><span class="p">,</span> <span class="n">kernel</span><span class="o">=</span><span class="n">fun</span><span class="p">)</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

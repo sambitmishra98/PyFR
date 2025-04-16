@@ -1,0 +1,65 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="394pt" height="62pt" viewBox="0.00 0.00 394.00 62.00">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 58)">
+<ns0:title>inheritance4f61c34e17</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>BaseCommon</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M54,-36C54,-36 6,-36 6,-36 3,-36 0,-33 0,-30 0,-30 0,-24 0,-24 0,-21 3,-18 6,-18 6,-18 54,-18 54,-18 57,-18 60,-21 60,-24 60,-24 60,-30 60,-30 60,-33 57,-36 54,-36" />
+<ns0:text text-anchor="middle" x="30" y="-25.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseCommon</ns0:text>
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>BaseDualPseudoIntegrator</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M164,-36C164,-36 74,-36 74,-36 71,-36 68,-33 68,-30 68,-30 68,-24 68,-24 68,-21 71,-18 74,-18 74,-18 164,-18 164,-18 167,-18 170,-21 170,-24 170,-24 170,-30 170,-30 170,-33 167,-36 164,-36" />
+<ns0:text text-anchor="middle" x="119" y="-25.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDualPseudoIntegrator</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseCommon-&gt;BaseDualPseudoIntegrator</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M60.13,-27C60.13,-27 62.86,-27 62.86,-27" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="62.87,-28.75 67.86,-27 62.86,-25.25 62.87,-28.75" />
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseDualPseudoController</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M272,-36C272,-36 184,-36 184,-36 181,-36 178,-33 178,-30 178,-30 178,-24 178,-24 178,-21 181,-18 184,-18 184,-18 272,-18 272,-18 275,-18 278,-21 278,-24 278,-24 278,-30 278,-30 278,-33 275,-36 272,-36" />
+<ns0:text text-anchor="middle" x="228" y="-25.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseDualPseudoController</ns0:text>
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>DualNonePseudoController</ns0:title>
+<ns0:g id="a_node4"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudocontrollers.DualNonePseudoController" ns1:title="DualNonePseudoController" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M380,-54C380,-54 292,-54 292,-54 289,-54 286,-51 286,-48 286,-48 286,-42 286,-42 286,-39 289,-36 292,-36 292,-36 380,-36 380,-36 383,-36 386,-39 386,-42 386,-42 386,-48 386,-48 386,-51 383,-54 380,-54" />
+<ns0:text text-anchor="middle" x="336" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualNonePseudoController</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>BaseDualPseudoController-&gt;DualNonePseudoController</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M278.04,-30C300.05,-30 321,-30 321,-30 321,-30 321,-30.76 321,-30.76" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="319.25,-30.76 321,-35.76 322.75,-30.76 319.25,-30.76" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>DualPIPseudoController</ns0:title>
+<ns0:g id="a_node5"><ns0:a ns1:href="../developer_guide.html#pyfr.integrators.dual.pseudo.pseudocontrollers.DualPIPseudoController" ns1:title="DualPIPseudoController" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M375,-18C375,-18 297,-18 297,-18 294,-18 291,-15 291,-12 291,-12 291,-6 291,-6 291,-3 294,0 297,0 297,0 375,0 375,0 378,0 381,-3 381,-6 381,-6 381,-12 381,-12 381,-15 378,-18 375,-18" />
+<ns0:text text-anchor="middle" x="336" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">DualPIPseudoController</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>BaseDualPseudoController-&gt;DualPIPseudoController</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M278.03,-24C312.08,-24 351,-24 351,-24 351,-24 351,-23.24 351,-23.24" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="352.75,-23.24 351,-18.24 349.25,-23.24 352.75,-23.24" />
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>BaseDualPseudoIntegrator-&gt;BaseDualPseudoController</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M170.31,-27C170.31,-27 172.93,-27 172.93,-27" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="172.93,-28.75 177.93,-27 172.93,-25.25 172.93,-28.75" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

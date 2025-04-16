@@ -1,0 +1,228 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pyfr.backends.opencl.provider &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../../../../_static/pyfr_favicon.png"/>
+      <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../../_static/contentui.js?v=9ee86694"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../../../../index.html">
+            
+              <img src="../../../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pyfr.backends.opencl.provider</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pyfr.backends.opencl.provider</h1><div class="highlight"><pre>
+<span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.base</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">BaseKernelProvider</span><span class="p">,</span> <span class="n">BaseOrderedMetaKernel</span><span class="p">,</span>
+                                <span class="n">BasePointwiseKernelProvider</span><span class="p">,</span>
+                                <span class="n">BaseUnorderedMetaKernel</span><span class="p">,</span> <span class="n">Kernel</span><span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.opencl.generator</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenCLKernelGenerator</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.cache</span><span class="w"> </span><span class="kn">import</span> <span class="n">memoize</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.nputil</span><span class="w"> </span><span class="kn">import</span> <span class="n">npdtype_to_ctypestype</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenCLKernel</span><span class="p">(</span><span class="n">Kernel</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_to_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">deps</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenCLOrderedMetaKernel</span><span class="p">(</span><span class="n">BaseOrderedMetaKernel</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_to_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">deps</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">ret_evt</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernels</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]:</span>
+            <span class="n">wait_for</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="p">,</span> <span class="kc">True</span><span class="p">)]</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernels</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="p">,</span> <span class="n">ret_evt</span><span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenCLUnorderedMetaKernel</span><span class="p">(</span><span class="n">BaseUnorderedMetaKernel</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_to_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">deps</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">ret_evt</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">ret_evt</span><span class="p">:</span>
+            <span class="n">kevts</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernels</span><span class="p">]</span>
+            <span class="k">return</span> <span class="n">queue</span><span class="o">.</span><span class="n">marker</span><span class="p">(</span><span class="n">kevts</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernels</span><span class="p">:</span>
+                <span class="n">k</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenCLKernelProvider</span><span class="p">(</span><span class="n">BaseKernelProvider</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_benchmark</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kfunc</span><span class="p">,</span> <span class="n">nbench</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">nwarmup</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="n">queue</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">cl</span><span class="o">.</span><span class="n">queue</span><span class="p">(</span><span class="n">profiling</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">nbench</span> <span class="o">+</span> <span class="n">nwarmup</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">i</span> <span class="o">==</span> <span class="n">nwarmup</span><span class="p">:</span>
+                <span class="n">start_evt</span> <span class="o">=</span> <span class="n">end_evt</span> <span class="o">=</span> <span class="n">kfunc</span><span class="p">(</span><span class="n">queue</span><span class="p">)</span>
+            <span class="k">elif</span> <span class="n">i</span> <span class="o">==</span> <span class="n">nbench</span> <span class="o">+</span> <span class="n">nwarmup</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="n">end_evt</span> <span class="o">=</span> <span class="n">kfunc</span><span class="p">(</span><span class="n">queue</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">kfunc</span><span class="p">(</span><span class="n">queue</span><span class="p">)</span>
+
+        <span class="n">queue</span><span class="o">.</span><span class="n">finish</span><span class="p">()</span>
+
+        <span class="k">return</span> <span class="p">(</span><span class="n">end_evt</span><span class="o">.</span><span class="n">end_time</span> <span class="o">-</span> <span class="n">start_evt</span><span class="o">.</span><span class="n">start_time</span><span class="p">)</span> <span class="o">/</span> <span class="n">nbench</span>
+
+    <span class="nd">@memoize</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_program</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">src</span><span class="p">):</span>
+        <span class="n">flags</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;-cl-fast-relaxed-math&#39;</span><span class="p">,</span> <span class="s1">&#39;-cl-std=CL2.0&#39;</span><span class="p">]</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">compiler</span><span class="o">.</span><span class="n">build</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">flags</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_kernel</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">src</span><span class="p">,</span> <span class="n">argtypes</span><span class="p">,</span> <span class="n">argn</span><span class="o">=</span><span class="p">[]):</span>
+        <span class="n">argtypes</span> <span class="o">=</span> <span class="p">[</span><span class="n">npdtype_to_ctypestype</span><span class="p">(</span><span class="n">arg</span><span class="p">)</span> <span class="k">for</span> <span class="n">arg</span> <span class="ow">in</span> <span class="n">argtypes</span><span class="p">]</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_program</span><span class="p">(</span><span class="n">src</span><span class="p">)</span><span class="o">.</span><span class="n">get_kernel</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">argtypes</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="OpenCLPointwiseKernelProvider">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.opencl.provider.OpenCLPointwiseKernelProvider">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenCLPointwiseKernelProvider</span><span class="p">(</span><span class="n">OpenCLKernelProvider</span><span class="p">,</span>
+                                    <span class="n">BasePointwiseKernelProvider</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ls1d</span> <span class="o">=</span> <span class="p">(</span><span class="mi">64</span><span class="p">,)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ls2d</span> <span class="o">=</span> <span class="p">(</span><span class="mi">64</span><span class="p">,</span> <span class="mi">4</span><span class="p">)</span>
+
+        <span class="c1"># Pass the local work group sizes to the generator</span>
+        <span class="k">class</span><span class="w"> </span><span class="nc">KernelGenerator</span><span class="p">(</span><span class="n">OpenCLKernelGenerator</span><span class="p">):</span>
+            <span class="n">block1d</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ls1d</span>
+            <span class="n">block2d</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ls2d</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">kernel_generator_cls</span> <span class="o">=</span> <span class="n">KernelGenerator</span>
+
+<div class="viewcode-block" id="OpenCLPointwiseKernelProvider._instantiate_kernel">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.opencl.provider.OpenCLPointwiseKernelProvider._instantiate_kernel">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_instantiate_kernel</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dims</span><span class="p">,</span> <span class="n">fun</span><span class="p">,</span> <span class="n">arglst</span><span class="p">,</span> <span class="n">argm</span><span class="p">,</span> <span class="n">argv</span><span class="p">):</span>
+        <span class="n">rtargs</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="c1"># Determine the work group sizes</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">dims</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">ls</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ls1d</span>
+            <span class="n">gs</span> <span class="o">=</span> <span class="p">(</span><span class="n">dims</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">dims</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="o">-</span><span class="n">ls</span><span class="p">[</span><span class="mi">0</span><span class="p">],)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">ls</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ls2d</span>
+            <span class="n">gs</span> <span class="o">=</span> <span class="p">(</span><span class="n">dims</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">dims</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">%</span> <span class="o">-</span><span class="n">ls</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">ls</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+
+        <span class="n">fun</span><span class="o">.</span><span class="n">set_dims</span><span class="p">(</span><span class="n">gs</span><span class="p">,</span> <span class="n">ls</span><span class="p">)</span>
+
+        <span class="c1"># Process the arguments</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">arglst</span><span class="p">):</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+                <span class="n">rtargs</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">))</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">fun</span><span class="o">.</span><span class="n">set_arg</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">)</span>
+
+        <span class="k">class</span><span class="w"> </span><span class="nc">PointwiseKernel</span><span class="p">(</span><span class="n">OpenCLKernel</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">rtargs</span><span class="p">:</span>
+                <span class="k">def</span><span class="w"> </span><span class="nf">bind</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+                    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">rtargs</span><span class="p">:</span>
+                        <span class="n">fun</span><span class="o">.</span><span class="n">set_arg</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">[</span><span class="n">k</span><span class="p">])</span>
+
+            <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">ret_evt</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+                <span class="k">return</span> <span class="n">fun</span><span class="o">.</span><span class="n">exec_async</span><span class="p">(</span><span class="n">queue</span><span class="p">,</span> <span class="n">wait_for</span><span class="p">,</span> <span class="n">ret_evt</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">PointwiseKernel</span><span class="p">(</span><span class="n">argm</span><span class="p">,</span> <span class="n">argv</span><span class="p">)</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,263 @@
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/1999/xlink" width="444pt" height="318pt" viewBox="0.00 0.00 444.00 318.00">
+<ns0:g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 314)">
+<ns0:title>inheritancec14ce1b7f7</ns0:title>
+
+<ns0:g id="node1" class="node">
+<ns0:title>ACEulerIntInters</ns0:title>
+<ns0:g id="a_node1"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.aceuler.inters.ACEulerIntInters" ns1:title="ACEulerIntInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M297,-310C297,-310 241,-310 241,-310 238,-310 235,-307 235,-304 235,-304 235,-298 235,-298 235,-295 238,-292 241,-292 241,-292 297,-292 297,-292 300,-292 303,-295 303,-298 303,-298 303,-304 303,-304 303,-307 300,-310 297,-310" />
+<ns0:text text-anchor="middle" x="269" y="-299.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">ACEulerIntInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="node2" class="node">
+<ns0:title>BaseAdvectionIntInters</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M192.5,-201C192.5,-201 113.5,-201 113.5,-201 110.5,-201 107.5,-198 107.5,-195 107.5,-195 107.5,-189 107.5,-189 107.5,-186 110.5,-183 113.5,-183 113.5,-183 192.5,-183 192.5,-183 195.5,-183 198.5,-186 198.5,-189 198.5,-189 198.5,-195 198.5,-195 198.5,-198 195.5,-201 192.5,-201" />
+<ns0:text text-anchor="middle" x="153" y="-190.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionIntInters</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge1" class="edge">
+<ns0:title>BaseAdvectionIntInters-&gt;ACEulerIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M153,-201.29C153,-227.65 153,-301 153,-301 153,-301 229.82,-301 229.82,-301" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="229.82,-302.75 234.82,-301 229.82,-299.25 229.82,-302.75" />
+</ns0:g>
+
+<ns0:g id="node6" class="node">
+<ns0:title>BaseAdvectionDiffusionIntInters</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M322.5,-274C322.5,-274 215.5,-274 215.5,-274 212.5,-274 209.5,-271 209.5,-268 209.5,-268 209.5,-262 209.5,-262 209.5,-259 212.5,-256 215.5,-256 215.5,-256 322.5,-256 322.5,-256 325.5,-256 328.5,-259 328.5,-262 328.5,-262 328.5,-268 328.5,-268 328.5,-271 325.5,-274 322.5,-274" />
+<ns0:text text-anchor="middle" x="269" y="-263.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionDiffusionIntInters</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge5" class="edge">
+<ns0:title>BaseAdvectionIntInters-&gt;BaseAdvectionDiffusionIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M198.77,-193.8C212.51,-193.8 224,-193.8 224,-193.8 224,-193.8 224,-250.98 224,-250.98" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="222.25,-250.98 224,-255.98 225.75,-250.98 222.25,-250.98" />
+</ns0:g>
+
+<ns0:g id="node11" class="node">
+<ns0:title>EulerIntInters</ns0:title>
+<ns0:g id="a_node11"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.euler.inters.EulerIntInters" ns1:title="EulerIntInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M410.5,-201C410.5,-201 363.5,-201 363.5,-201 360.5,-201 357.5,-198 357.5,-195 357.5,-195 357.5,-189 357.5,-189 357.5,-186 360.5,-183 363.5,-183 363.5,-183 410.5,-183 410.5,-183 413.5,-183 416.5,-186 416.5,-189 416.5,-189 416.5,-195 416.5,-195 416.5,-198 413.5,-201 410.5,-201" />
+<ns0:text text-anchor="middle" x="387" y="-190.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">EulerIntInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge13" class="edge">
+<ns0:title>BaseAdvectionIntInters-&gt;EulerIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M198.67,-190.2C198.67,-190.2 352.38,-190.2 352.38,-190.2" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="352.38,-191.95 357.38,-190.2 352.38,-188.45 352.38,-191.95" />
+</ns0:g>
+
+<ns0:g id="node3" class="node">
+<ns0:title>ACEulerMPIInters</ns0:title>
+<ns0:g id="a_node3"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.aceuler.inters.ACEulerMPIInters" ns1:title="ACEulerMPIInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M298.5,-54C298.5,-54 239.5,-54 239.5,-54 236.5,-54 233.5,-51 233.5,-48 233.5,-48 233.5,-42 233.5,-42 233.5,-39 236.5,-36 239.5,-36 239.5,-36 298.5,-36 298.5,-36 301.5,-36 304.5,-39 304.5,-42 304.5,-42 304.5,-48 304.5,-48 304.5,-51 301.5,-54 298.5,-54" />
+<ns0:text text-anchor="middle" x="269" y="-43.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">ACEulerMPIInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="node4" class="node">
+<ns0:title>BaseAdvectionMPIInters</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M194,-127C194,-127 112,-127 112,-127 109,-127 106,-124 106,-121 106,-121 106,-115 106,-115 106,-112 109,-109 112,-109 112,-109 194,-109 194,-109 197,-109 200,-112 200,-115 200,-115 200,-121 200,-121 200,-124 197,-127 194,-127" />
+<ns0:text text-anchor="middle" x="153" y="-116.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionMPIInters</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge2" class="edge">
+<ns0:title>BaseAdvectionMPIInters-&gt;ACEulerMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M153,-108.75C153,-89.11 153,-45 153,-45 153,-45 228.25,-45 228.25,-45" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="228.25,-46.75 233.25,-45 228.25,-43.25 228.25,-46.75" />
+</ns0:g>
+
+<ns0:g id="node8" class="node">
+<ns0:title>BaseAdvectionDiffusionMPIInters</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M324,-18C324,-18 214,-18 214,-18 211,-18 208,-15 208,-12 208,-12 208,-6 208,-6 208,-3 211,0 214,0 214,0 324,0 324,0 327,0 330,-3 330,-6 330,-6 330,-12 330,-12 330,-15 327,-18 324,-18" />
+<ns0:text text-anchor="middle" x="269" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionDiffusionMPIInters</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge6" class="edge">
+<ns0:title>BaseAdvectionMPIInters-&gt;BaseAdvectionDiffusionMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M200.18,-112.6C209.78,-112.6 217,-112.6 217,-112.6 217,-112.6 217,-23.19 217,-23.19" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="218.75,-23.19 217,-18.19 215.25,-23.19 218.75,-23.19" />
+</ns0:g>
+
+<ns0:g id="node14" class="node">
+<ns0:title>EulerMPIInters</ns0:title>
+<ns0:g id="a_node14"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.euler.inters.EulerMPIInters" ns1:title="EulerMPIInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M412,-127C412,-127 362,-127 362,-127 359,-127 356,-124 356,-121 356,-121 356,-115 356,-115 356,-112 359,-109 362,-109 362,-109 412,-109 412,-109 415,-109 418,-112 418,-115 418,-115 418,-121 418,-121 418,-124 415,-127 412,-127" />
+<ns0:text text-anchor="middle" x="387" y="-116.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">EulerMPIInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge16" class="edge">
+<ns0:title>BaseAdvectionMPIInters-&gt;EulerMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M200.07,-119.8C200.07,-119.8 350.7,-119.8 350.7,-119.8" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="350.7,-121.55 355.7,-119.8 350.7,-118.05 350.7,-121.55" />
+</ns0:g>
+
+<ns0:g id="node5" class="node">
+<ns0:title>ACNavierStokesIntInters</ns0:title>
+<ns0:g id="a_node5"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.acnavstokes.inters.ACNavierStokesIntInters" ns1:title="ACNavierStokesIntInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M428.5,-274C428.5,-274 345.5,-274 345.5,-274 342.5,-274 339.5,-271 339.5,-268 339.5,-268 339.5,-262 339.5,-262 339.5,-259 342.5,-256 345.5,-256 345.5,-256 428.5,-256 428.5,-256 431.5,-256 434.5,-259 434.5,-262 434.5,-262 434.5,-268 434.5,-268 434.5,-271 431.5,-274 428.5,-274" />
+<ns0:text text-anchor="middle" x="387" y="-263.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">ACNavierStokesIntInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge3" class="edge">
+<ns0:title>BaseAdvectionDiffusionIntInters-&gt;ACNavierStokesIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M328.69,-265C328.69,-265 334.26,-265 334.26,-265" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="334.26,-266.75 339.26,-265 334.26,-263.25 334.26,-266.75" />
+</ns0:g>
+
+<ns0:g id="node16" class="node">
+<ns0:title>NavierStokesIntInters</ns0:title>
+<ns0:g id="a_node16"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.navstokes.inters.NavierStokesIntInters" ns1:title="NavierStokesIntInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M424,-238C424,-238 350,-238 350,-238 347,-238 344,-235 344,-232 344,-232 344,-226 344,-226 344,-223 347,-220 350,-220 350,-220 424,-220 424,-220 427,-220 430,-223 430,-226 430,-226 430,-232 430,-232 430,-235 427,-238 424,-238" />
+<ns0:text text-anchor="middle" x="387" y="-227.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">NavierStokesIntInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge19" class="edge">
+<ns0:title>BaseAdvectionDiffusionIntInters-&gt;NavierStokesIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M322,-255.98C322,-246.21 322,-232 322,-232 322,-232 338.64,-232 338.64,-232" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="338.64,-233.75 343.64,-232 338.64,-230.25 338.64,-233.75" />
+</ns0:g>
+
+<ns0:g id="node7" class="node">
+<ns0:title>ACNavierStokesMPIInters</ns0:title>
+<ns0:g id="a_node7"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.acnavstokes.inters.ACNavierStokesMPIInters" ns1:title="ACNavierStokesMPIInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M430,-18C430,-18 344,-18 344,-18 341,-18 338,-15 338,-12 338,-12 338,-6 338,-6 338,-3 341,0 344,0 344,0 430,0 430,0 433,0 436,-3 436,-6 436,-6 436,-12 436,-12 436,-15 433,-18 430,-18" />
+<ns0:text text-anchor="middle" x="387" y="-7.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">ACNavierStokesMPIInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge4" class="edge">
+<ns0:title>BaseAdvectionDiffusionMPIInters-&gt;ACNavierStokesMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M330.07,-9C330.07,-9 332.8,-9 332.8,-9" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="332.8,-10.75 337.8,-9 332.8,-7.25 332.8,-10.75" />
+</ns0:g>
+
+<ns0:g id="node17" class="node">
+<ns0:title>NavierStokesMPIInters</ns0:title>
+<ns0:g id="a_node17"><ns0:a ns1:href="../developer_guide.html#pyfr.solvers.navstokes.inters.NavierStokesMPIInters" ns1:title="NavierStokesMPIInters" target="_top">
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M425.5,-90C425.5,-90 348.5,-90 348.5,-90 345.5,-90 342.5,-87 342.5,-84 342.5,-84 342.5,-78 342.5,-78 342.5,-75 345.5,-72 348.5,-72 348.5,-72 425.5,-72 425.5,-72 428.5,-72 431.5,-75 431.5,-78 431.5,-78 431.5,-84 431.5,-84 431.5,-87 428.5,-90 425.5,-90" />
+<ns0:text text-anchor="middle" x="387" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">NavierStokesMPIInters</ns0:text>
+</ns0:a>
+</ns0:g>
+</ns0:g>
+
+<ns0:g id="edge22" class="edge">
+<ns0:title>BaseAdvectionDiffusionMPIInters-&gt;NavierStokesMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M315,-18.02C315,-36.72 315,-78 315,-78 315,-78 337.22,-78 337.22,-78" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="337.22,-79.75 342.22,-78 337.22,-76.25 337.22,-79.75" />
+</ns0:g>
+
+<ns0:g id="node9" class="node">
+<ns0:title>BaseAdvectionIntersMixin</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M92,-191C92,-191 6,-191 6,-191 3,-191 0,-188 0,-185 0,-185 0,-179 0,-179 0,-176 3,-173 6,-173 6,-173 92,-173 92,-173 95,-173 98,-176 98,-179 98,-179 98,-185 98,-185 98,-188 95,-191 92,-191" />
+<ns0:text text-anchor="middle" x="49" y="-180.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseAdvectionIntersMixin</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge7" class="edge">
+<ns0:title>BaseAdvectionIntersMixin-&gt;BaseAdvectionIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M98.26,-187C98.26,-187 102.39,-187 102.39,-187" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="102.39,-188.75 107.39,-187 102.39,-185.25 102.39,-188.75" />
+</ns0:g>
+
+<ns0:g id="edge9" class="edge">
+<ns0:title>BaseAdvectionIntersMixin-&gt;BaseAdvectionMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M87,-172.94C87,-156.62 87,-124 87,-124 87,-124 100.74,-124 100.74,-124" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="100.74,-125.75 105.74,-124 100.74,-122.25 100.74,-125.75" />
+</ns0:g>
+
+<ns0:g id="node10" class="node">
+<ns0:title>BaseInters</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M70,-136C70,-136 28,-136 28,-136 25,-136 22,-133 22,-130 22,-130 22,-124 22,-124 22,-121 25,-118 28,-118 28,-118 70,-118 70,-118 73,-118 76,-121 76,-124 76,-124 76,-130 76,-130 76,-133 73,-136 70,-136" />
+<ns0:text text-anchor="middle" x="49" y="-125.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">BaseInters</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge8" class="edge">
+<ns0:title>BaseInters-&gt;BaseAdvectionIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M76.05,-131.5C106.87,-131.5 153,-131.5 153,-131.5 153,-131.5 153,-177.81 153,-177.81" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="151.25,-177.81 153,-182.81 154.75,-177.81 151.25,-177.81" />
+</ns0:g>
+
+<ns0:g id="edge10" class="edge">
+<ns0:title>BaseInters-&gt;BaseAdvectionMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M76.05,-121C76.05,-121 100.94,-121 100.94,-121" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="100.94,-122.75 105.94,-121 100.94,-119.25 100.94,-122.75" />
+</ns0:g>
+
+<ns0:g id="node12" class="node">
+<ns0:title>TplargsMixin</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M291,-164C291,-164 247,-164 247,-164 244,-164 241,-161 241,-158 241,-158 241,-152 241,-152 241,-149 244,-146 247,-146 247,-146 291,-146 291,-146 294,-146 297,-149 297,-152 297,-152 297,-158 297,-158 297,-161 294,-164 291,-164" />
+<ns0:text text-anchor="middle" x="269" y="-153.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">TplargsMixin</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge11" class="edge">
+<ns0:title>TplargsMixin-&gt;EulerIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M269,-164.31C269,-173.63 269,-186.6 269,-186.6 269,-186.6 352.22,-186.6 352.22,-186.6" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="352.22,-188.35 357.22,-186.6 352.22,-184.85 352.22,-188.35" />
+</ns0:g>
+
+<ns0:g id="edge14" class="edge">
+<ns0:title>TplargsMixin-&gt;EulerMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M269,-145.69C269,-136.37 269,-123.4 269,-123.4 269,-123.4 351,-123.4 351,-123.4" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="351,-125.15 356,-123.4 351,-121.65 351,-125.15" />
+</ns0:g>
+
+<ns0:g id="edge17" class="edge">
+<ns0:title>TplargsMixin-&gt;NavierStokesIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M297.44,-158C321.81,-158 353,-158 353,-158 353,-158 353,-214.72 353,-214.72" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="351.25,-214.72 353,-219.72 354.75,-214.72 351.25,-214.72" />
+</ns0:g>
+
+<ns0:g id="edge20" class="edge">
+<ns0:title>TplargsMixin-&gt;NavierStokesMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M297.07,-152C319.78,-152 348,-152 348,-152 348,-152 348,-95.28 348,-95.28" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="349.75,-95.28 348,-90.28 346.25,-95.28 349.75,-95.28" />
+</ns0:g>
+
+<ns0:g id="node13" class="node">
+<ns0:title>FluidIntIntersMixin</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M300,-238C300,-238 238,-238 238,-238 235,-238 232,-235 232,-232 232,-232 232,-226 232,-226 232,-223 235,-220 238,-220 238,-220 300,-220 300,-220 303,-220 306,-223 306,-226 306,-226 306,-232 306,-232 306,-235 303,-238 300,-238" />
+<ns0:text text-anchor="middle" x="269" y="-227.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">FluidIntIntersMixin</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge12" class="edge">
+<ns0:title>FluidIntIntersMixin-&gt;EulerIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M303,-219.69C303,-210.37 303,-197.4 303,-197.4 303,-197.4 352.15,-197.4 352.15,-197.4" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="352.15,-199.15 357.15,-197.4 352.15,-195.65 352.15,-199.15" />
+</ns0:g>
+
+<ns0:g id="edge18" class="edge">
+<ns0:title>FluidIntIntersMixin-&gt;NavierStokesIntInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M306.01,-226C306.01,-226 338.93,-226 338.93,-226" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="338.93,-227.75 343.93,-226 338.93,-224.25 338.93,-227.75" />
+</ns0:g>
+
+<ns0:g id="node15" class="node">
+<ns0:title>FluidMPIIntersMixin</ns0:title>
+<ns0:path fill="#d8e6b8" stroke="#333333" stroke-width="0.3" d="M301.5,-90C301.5,-90 236.5,-90 236.5,-90 233.5,-90 230.5,-87 230.5,-84 230.5,-84 230.5,-78 230.5,-78 230.5,-75 233.5,-72 236.5,-72 236.5,-72 301.5,-72 301.5,-72 304.5,-72 307.5,-75 307.5,-78 307.5,-78 307.5,-84 307.5,-84 307.5,-87 304.5,-90 301.5,-90" />
+<ns0:text text-anchor="middle" x="269" y="-79.3" font-family="Vera Sans, DejaVu Sans, Liberation Sans, Arial, Helvetica, sans" font-size="6.50">FluidMPIIntersMixin</ns0:text>
+</ns0:g>
+
+<ns0:g id="edge15" class="edge">
+<ns0:title>FluidMPIIntersMixin-&gt;EulerMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M300,-90.25C300,-100.68 300,-116.2 300,-116.2 300,-116.2 350.59,-116.2 350.59,-116.2" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="350.59,-117.95 355.59,-116.2 350.59,-114.45 350.59,-117.95" />
+</ns0:g>
+
+<ns0:g id="edge21" class="edge">
+<ns0:title>FluidMPIIntersMixin-&gt;NavierStokesMPIInters</ns0:title>
+<ns0:path fill="none" stroke="#333333" stroke-width="0.3" d="M307.64,-84C307.64,-84 337.13,-84 337.13,-84" />
+<ns0:polygon fill="#333333" stroke="#333333" stroke-width="0.3" points="337.13,-85.75 342.13,-84 337.13,-82.25 337.13,-85.75" />
+</ns0:g>
+</ns0:g>
+</ns0:svg>

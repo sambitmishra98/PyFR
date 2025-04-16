@@ -1,0 +1,346 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>[solver-time-integrator] &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../_static/pyfr_favicon.png"/>
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/contentui.js?v=9ee86694"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="[solver-dual-time-integrator-multip]" href="solver-dual-time-integrator-multip.html" />
+    <link rel="prev" title="[solver]" href="solver.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../index.html">
+            
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../user_guide.html">User Guide</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../user_guide.html#running-pyfr">Running PyFR</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="../user_guide.html#configuration-file-ini">Configuration File (.ini)</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#backends">Backends</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="../user_guide.html#systems">Systems</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="constants.html">[constants]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="solver.html">[solver]</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">[solver-time-integrator]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="solver-dual-time-integrator-multip.html">[solver-dual-time-integrator-multip]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="solver-entropy-filter.html">[solver-entropy-filter]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="solver-artificial-viscosity.html">[solver-artificial-viscosity]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="solver-interfaces.html">[solver-interfaces]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="soln-filter.html">[soln-filter]</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#boundary-and-initial-conditions">Boundary and Initial Conditions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#nodal-point-sets">Nodal Point Sets</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#plugins">Plugins</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../user_guide.html#additional-information">Additional Information</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../user_guide.html">User Guide</a></li>
+      <li class="breadcrumb-item active">[solver-time-integrator]</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/systems/solver-time-integrator.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="solver-time-integrator">
+<h1>[solver-time-integrator]<a class="headerlink" href="#solver-time-integrator" title="Link to this heading"></a></h1>
+<p>Parameterises the time-integration scheme used by the solver with</p>
+<ol class="arabic">
+<li><p><code class="docutils literal notranslate"><span class="pre">formulation</span></code> — formulation:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">std</span></code> | <code class="docutils literal notranslate"><span class="pre">dual</span></code></p>
+<p>where</p>
+<p><code class="docutils literal notranslate"><span class="pre">std</span></code> requires</p>
+<blockquote>
+<div><ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">scheme</span></code> — time-integration scheme</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">euler</span></code> | <code class="docutils literal notranslate"><span class="pre">rk34</span></code> | <code class="docutils literal notranslate"><span class="pre">rk4</span></code> | <code class="docutils literal notranslate"><span class="pre">rk45</span></code> | <code class="docutils literal notranslate"><span class="pre">tvd-rk3</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tstart</span></code> — initial time</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tend</span></code> — final time</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dt</span></code> — time-step</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">controller</span></code> — time-step controller</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">none</span></code> | <code class="docutils literal notranslate"><span class="pre">pi</span></code></p>
+<p>where</p>
+<p><code class="docutils literal notranslate"><span class="pre">pi</span></code> only works with <code class="docutils literal notranslate"><span class="pre">rk34</span></code> and <code class="docutils literal notranslate"><span class="pre">rk45</span></code> and requires</p>
+<blockquote>
+<div><ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">atol</span></code> — absolute error tolerance</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rtol</span></code> — relative error tolerance</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">errest-norm</span></code> — norm to use for estimating the error</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">uniform</span></code> | <code class="docutils literal notranslate"><span class="pre">l2</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">safety-fact</span></code> — safety factor for step size adjustment
+(suitable range 0.80-0.95)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">min-fact</span></code> — minimum factor by which the time-step can
+change between iterations (suitable range 0.1-0.5)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">max-fact</span></code> — maximum factor by which the time-step can
+change between iterations (suitable range 2.0-6.0)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dt-max</span></code> — maximum permissible time-step</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+</ul>
+</div></blockquote>
+</div></blockquote>
+</li>
+</ul>
+</div></blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">dual</span></code> requires</p>
+<blockquote>
+<div><ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">scheme</span></code> — time-integration scheme</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">backward-euler</span></code> | <code class="docutils literal notranslate"><span class="pre">sdirk33</span></code> | <code class="docutils literal notranslate"><span class="pre">sdirk43</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-scheme</span></code> — pseudo time-integration scheme</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">euler</span></code> | <code class="docutils literal notranslate"><span class="pre">rk34</span></code> | <code class="docutils literal notranslate"><span class="pre">rk4</span></code> | <code class="docutils literal notranslate"><span class="pre">rk45</span></code> | <code class="docutils literal notranslate"><span class="pre">tvd-rk3</span></code> | <code class="docutils literal notranslate"><span class="pre">vermeire</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tstart</span></code> — initial time</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tend</span></code> — final time</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dt</span></code> — time-step</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">controller</span></code> — time-step controller</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">none</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-dt</span></code> — pseudo time-step</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-niters-max</span></code> — minimum number of iterations</p>
+<blockquote>
+<div><p><em>int</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-niters-min</span></code> — maximum number of iterations</p>
+<blockquote>
+<div><p><em>int</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-resid-tol</span></code> — pseudo residual tolerance</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-resid-norm</span></code> — pseudo residual norm</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">uniform</span></code> | <code class="docutils literal notranslate"><span class="pre">l2</span></code></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-controller</span></code> — pseudo time-step controller</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">none</span></code> | <code class="docutils literal notranslate"><span class="pre">local-pi</span></code></p>
+<p>where</p>
+<p><code class="docutils literal notranslate"><span class="pre">local-pi</span></code> only works with <code class="docutils literal notranslate"><span class="pre">rk34</span></code> and <code class="docutils literal notranslate"><span class="pre">rk45</span></code> and
+requires</p>
+<blockquote>
+<div><ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">atol</span></code> — absolute error tolerance</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">safety-fact</span></code> — safety factor for pseudo time-step
+size adjustment (suitable range 0.80-0.95)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">min-fact</span></code> — minimum factor by which the local
+pseudo time-step can change between iterations
+(suitable range 0.98-0.998)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">max-fact</span></code> — maximum factor by which the local
+pseudo time-step can change between iterations
+(suitable range 1.001-1.01)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pseudo-dt-max-mult</span></code> — maximum permissible
+local pseudo time-step given as a
+multiplier of <code class="docutils literal notranslate"><span class="pre">pseudo-dt</span></code> (suitable range 2.0-5.0)</p>
+<blockquote>
+<div><p><em>float</em></p>
+</div></blockquote>
+</li>
+</ul>
+</div></blockquote>
+</div></blockquote>
+</li>
+</ul>
+</div></blockquote>
+</div></blockquote>
+</li>
+</ol>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">[</span><span class="n">solver</span><span class="o">-</span><span class="n">time</span><span class="o">-</span><span class="n">integrator</span><span class="p">]</span>
+<span class="n">formulation</span> <span class="o">=</span> <span class="n">std</span>
+<span class="n">scheme</span> <span class="o">=</span> <span class="n">rk45</span>
+<span class="n">controller</span> <span class="o">=</span> <span class="n">pi</span>
+<span class="n">tstart</span> <span class="o">=</span> <span class="mf">0.0</span>
+<span class="n">tend</span> <span class="o">=</span> <span class="mf">10.0</span>
+<span class="n">dt</span> <span class="o">=</span> <span class="mf">0.001</span>
+<span class="n">atol</span> <span class="o">=</span> <span class="mf">0.00001</span>
+<span class="n">rtol</span> <span class="o">=</span> <span class="mf">0.00001</span>
+<span class="n">errest</span><span class="o">-</span><span class="n">norm</span> <span class="o">=</span> <span class="n">l2</span>
+<span class="n">safety</span><span class="o">-</span><span class="n">fact</span> <span class="o">=</span> <span class="mf">0.9</span>
+<span class="nb">min</span><span class="o">-</span><span class="n">fact</span> <span class="o">=</span> <span class="mf">0.3</span>
+<span class="nb">max</span><span class="o">-</span><span class="n">fact</span> <span class="o">=</span> <span class="mf">2.5</span>
+</pre></div>
+</div>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="solver.html" class="btn btn-neutral float-left" title="[solver]" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="solver-dual-time-integrator-multip.html" class="btn btn-neutral float-right" title="[solver-dual-time-integrator-multip]" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

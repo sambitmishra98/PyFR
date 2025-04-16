@@ -1,0 +1,215 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pyfr.backends.openmp.base &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="../../../../_static/pyfr_favicon.png"/>
+      <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../_static/documentation_options.js?v=c4a36953"></script>
+      <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../../_static/contentui.js?v=9ee86694"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="../../../../index.html">
+            
+              <img src="../../../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../user_guide.html">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pyfr.backends.openmp.base</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pyfr.backends.openmp.base</h1><div class="highlight"><pre>
+<span></span><span class="kn">from</span><span class="w"> </span><span class="nn">ctypes</span><span class="w"> </span><span class="kn">import</span> <span class="n">c_int</span><span class="p">,</span> <span class="n">c_void_p</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">cached_property</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseBackend</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.openmp.compiler</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenMPCompiler</span>
+
+
+<div class="viewcode-block" id="OpenMPBackend">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.base.OpenMPBackend">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">OpenMPBackend</span><span class="p">(</span><span class="n">BaseBackend</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;openmp&#39;</span>
+    <span class="n">blocks</span> <span class="o">=</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cfg</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+
+        <span class="c1"># Take the default alignment requirement to be 64-bytes</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">alignb</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">getint</span><span class="p">(</span><span class="s1">&#39;backend-openmp&#39;</span><span class="p">,</span> <span class="s1">&#39;alignb&#39;</span><span class="p">,</span> <span class="mi">64</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">alignb</span> <span class="o">&lt;</span> <span class="mi">32</span> <span class="ow">or</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">alignb</span> <span class="o">&amp;</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">alignb</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Alignment must be a power of 2 and &gt;= 32&#39;</span><span class="p">)</span>
+
+        <span class="c1"># Compute the SoA and AoSoA size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">soasz</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">alignb</span> <span class="o">//</span> <span class="n">np</span><span class="o">.</span><span class="n">dtype</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">fpdtype</span><span class="p">)</span><span class="o">.</span><span class="n">itemsize</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">csubsz</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">soasz</span><span class="o">*</span><span class="n">cfg</span><span class="o">.</span><span class="n">getint</span><span class="p">(</span><span class="s1">&#39;backend-openmp&#39;</span><span class="p">,</span> <span class="s1">&#39;n-soa&#39;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="c1"># OpenMP schedule</span>
+        <span class="n">sched</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;backend-openmp&#39;</span><span class="p">,</span> <span class="s1">&#39;schedule&#39;</span><span class="p">,</span> <span class="s1">&#39;static&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">re</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;(static|(dynamic|guided)(\s*,\s*\d+)?)$&#39;</span><span class="p">,</span> <span class="n">sched</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Invalid OpenMP schedule&#39;</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">schedule</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;schedule(</span><span class="si">{</span><span class="n">sched</span><span class="si">}</span><span class="s1">)&#39;</span>
+
+        <span class="c1"># C source compiler</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">compiler</span> <span class="o">=</span> <span class="n">OpenMPCompiler</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">pyfr.backends.openmp</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">blasext</span><span class="p">,</span> <span class="n">packing</span><span class="p">,</span> <span class="n">provider</span><span class="p">,</span> <span class="n">types</span><span class="p">,</span>
+                                          <span class="n">xsmm</span><span class="p">)</span>
+
+        <span class="c1"># Register our data types and meta kernels</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">const_matrix_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPConstMatrix</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">graph_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPGraph</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">matrix_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPMatrix</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">matrix_slice_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPMatrixSlice</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">view_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPView</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">xchg_matrix_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPXchgMatrix</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">xchg_view_cls</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">OpenMPXchgView</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ordered_meta_kernel_cls</span> <span class="o">=</span> <span class="n">provider</span><span class="o">.</span><span class="n">OpenMPOrderedMetaKernel</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">unordered_meta_kernel_cls</span> <span class="o">=</span> <span class="n">provider</span><span class="o">.</span><span class="n">OpenMPUnorderedMetaKernel</span>
+
+        <span class="c1"># Instantiate mandatory kernel provider classes</span>
+        <span class="n">kprovcls</span> <span class="o">=</span> <span class="p">[</span><span class="n">provider</span><span class="o">.</span><span class="n">OpenMPPointwiseKernelProvider</span><span class="p">,</span>
+                    <span class="n">blasext</span><span class="o">.</span><span class="n">OpenMPBlasExtKernels</span><span class="p">,</span>
+                    <span class="n">packing</span><span class="o">.</span><span class="n">OpenMPPackingKernels</span><span class="p">,</span>
+                    <span class="n">xsmm</span><span class="o">.</span><span class="n">OpenMPXSMMKernels</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_providers</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">kprovcls</span><span class="p">]</span>
+
+        <span class="c1"># Pointwise kernels</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pointwise</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_providers</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+<div class="viewcode-block" id="OpenMPBackend.run_kernels">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.base.OpenMPBackend.run_kernels">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run_kernels</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kernels</span><span class="p">,</span> <span class="n">wait</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">kernels</span><span class="p">:</span>
+            <span class="n">k</span><span class="o">.</span><span class="n">run</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="OpenMPBackend.run_graph">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.base.OpenMPBackend.run_graph">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">wait</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">graph</span><span class="o">.</span><span class="n">run</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="OpenMPBackend.wait">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.base.OpenMPBackend.wait">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">wait</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">pass</span></div>
+
+
+    <span class="nd">@cached_property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">lookup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">lookup</span> <span class="o">=</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">lookup</span>
+        <span class="n">lookup</span><span class="o">.</span><span class="n">dfltargs</span><span class="p">[</span><span class="s1">&#39;schedule&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">schedule</span>
+
+        <span class="k">return</span> <span class="n">lookup</span>
+
+    <span class="nd">@cached_property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">krunner</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">ksrc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lookup</span><span class="o">.</span><span class="n">get_template</span><span class="p">(</span><span class="s1">&#39;run-kernels&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">render</span><span class="p">()</span>
+        <span class="n">klib</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">compiler</span><span class="o">.</span><span class="n">build</span><span class="p">(</span><span class="n">ksrc</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">klib</span><span class="o">.</span><span class="n">function</span><span class="p">(</span><span class="s1">&#39;run_kernels&#39;</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">[</span><span class="n">c_int</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">])</span>
+
+<div class="viewcode-block" id="OpenMPBackend._malloc_impl">
+<a class="viewcode-back" href="../../../../developer_guide.html#pyfr.backends.openmp.base.OpenMPBackend._malloc_impl">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_malloc_impl</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">nbytes</span><span class="p">):</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">nbytes</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">alignb</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
+        <span class="n">offset</span> <span class="o">=</span> <span class="o">-</span><span class="n">data</span><span class="o">.</span><span class="n">ctypes</span><span class="o">.</span><span class="n">data</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">alignb</span>
+
+        <span class="k">return</span> <span class="n">data</span><span class="p">[</span><span class="n">offset</span><span class="p">:</span><span class="n">nbytes</span> <span class="o">+</span> <span class="n">offset</span><span class="p">]</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,506 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User Guide &mdash; Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+      <link rel="stylesheet" type="text/css" href="_static/contentui.css?v=4cf5b151" />
+      <link rel="stylesheet" type="text/css" href="_static/css/custom.css?v=1b1d3830" />
+
+  
+    <link rel="shortcut icon" href="_static/pyfr_favicon.png"/>
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=c4a36953"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/contentui.js?v=9ee86694"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="[backend]" href="backends/backend.html" />
+    <link rel="prev" title="Installation" href="installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #94b24c" >
+
+          
+          
+          <a href="index.html">
+            
+              <img src="_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">User Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#running-pyfr">Running PyFR</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#configuration-file-ini">Configuration File (.ini)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#backends">Backends</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="backends/backend.html">[backend]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="backends/backend-cuda.html">[backend-cuda]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="backends/backend-hip.html">[backend-hip]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="backends/backend-metal.html">[backend-metal]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="backends/backend-opencl.html">[backend-opencl]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="backends/backend-openmp.html">[backend-openmp]</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#systems">Systems</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="systems/constants.html">[constants]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/solver.html">[solver]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/solver-time-integrator.html">[solver-time-integrator]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/solver-dual-time-integrator-multip.html">[solver-dual-time-integrator-multip]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/solver-entropy-filter.html">[solver-entropy-filter]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/solver-artificial-viscosity.html">[solver-artificial-viscosity]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/solver-interfaces.html">[solver-interfaces]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="systems/soln-filter.html">[soln-filter]</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#boundary-and-initial-conditions">Boundary and Initial Conditions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="boundary-initial-conditions/soln-bcs.html">[soln-bcs-<em>name</em>]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="boundary-initial-conditions/soln-ics.html">[soln-ics]</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#nodal-point-sets">Nodal Point Sets</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-interfaces-line.html">[solver-interfaces-line{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-interfaces-quad.html">[solver-interfaces-quad{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-interfaces-tri.html">[solver-interfaces-tri{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-elements-quad.html">[solver-elements-quad{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-elements-tri.html">[solver-elements-tri{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-elements-hex.html">[solver-elements-hex{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-elements-tet.html">[solver-elements-tet{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-elements-pri.html">[solver-elements-pri{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l4"><a class="reference internal" href="nodal-point-sets/solver-elements-pyr.html">[solver-elements-pyr{-mg-p<em>order</em>}]</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#plugins">Plugins</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#solution-plugins">Solution Plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#solver-plugins">Solver Plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#regions">Regions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#additional-information">Additional Information</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="post_processing.html">Post Processing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="performance_tuning.html">Performance Tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide.html">Developer Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="file_format.html">File Format</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #94b24c" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">PyFR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">User Guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/user_guide.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="user-guide">
+<h1>User Guide<a class="headerlink" href="#user-guide" title="Link to this heading"></a></h1>
+<p>For information on how to install PyFR see <a class="reference internal" href="installation.html#installation"><span class="std std-ref">Installation</span></a>.</p>
+<section id="running-pyfr">
+<span id="id1"></span><h2>Running PyFR<a class="headerlink" href="#running-pyfr" title="Link to this heading"></a></h2>
+<p>PyFR 2.1 uses three distinct file formats:</p>
+<ol class="arabic simple">
+<li><p>.ini — configuration file</p></li>
+<li><p>.pyfrm — mesh file</p></li>
+<li><p>.pyfrs — solution file</p></li>
+</ol>
+<p>The following core commands are available from the <code class="docutils literal notranslate"><span class="pre">pyfr</span></code> program:</p>
+<dl>
+<dt>pyfr import</dt><dd><p>Convert a <a class="reference external" href="http:http://geuz.org/gmsh/">Gmsh</a> .msh file into a PyFR
+.pyfrm file.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr import mesh.msh mesh.pyfrm
+</pre></div>
+</div>
+</dd>
+<dt>pyfr partition</dt><dd><p>Handles mesh partitioning.</p>
+<dl>
+<dt>pyfr partition add</dt><dd><p>Adds a new partitioning to mesh.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition add mesh.pyfrm 10 ten_parts
+</pre></div>
+</div>
+<p>Here, <code class="docutils literal notranslate"><span class="pre">ten_parts</span></code> is the <em>name</em> of the partitioning and is an
+arbitrary identifier.  If no name is provided it defaults to the
+number of parts.</p>
+<p>For mixed grids one must include the <code class="docutils literal notranslate"><span class="pre">-e</span></code> flag followed by
+weights for each element type, or the <code class="docutils literal notranslate"><span class="pre">balanced</span></code> argument.
+Further details can be found in the
+<a class="reference internal" href="performance_tuning.html#perf-mixed-grids"><span class="std std-ref">performance guide</span></a>.</p>
+</dd>
+<dt>pyfr partition reconstruct</dt><dd><p>Reconstructs a partitioning from a solution file.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition reconstruct mesh.pyfrm soln.pyfrm part_name
+</pre></div>
+</div>
+</dd>
+<dt>pyfr partition list</dt><dd><p>Lists partitionings in a mesh.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition list mesh.pyfrm
+</pre></div>
+</div>
+</dd>
+<dt>pyfr partition info</dt><dd><p>Shows information about a specific partitioning in a mesh.
+Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition info mesh.pyfrm ten_parts
+</pre></div>
+</div>
+</dd>
+<dt>pyfr partition remove</dt><dd><p>Deletes a partitioning from a mesh.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition remove mesh.pyfrm ten_parts
+</pre></div>
+</div>
+</dd>
+</dl>
+</dd>
+<dt>pyfr run</dt><dd><p>Start a new PyFR simulation.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr run mesh.pyfrm configuration.ini
+</pre></div>
+</div>
+</dd>
+<dt>pyfr restart</dt><dd><p>Restart a PyFR simulation from an existing solution file.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr restart mesh.pyfrm solution.pyfrs
+</pre></div>
+</div>
+<p>It is also possible to restart with a different configuration file.
+Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr restart mesh.pyfrm solution.pyfrs configuration.ini
+</pre></div>
+</div>
+</dd>
+<dt>pyfr export</dt><dd><p>Convert a PyFR <code class="docutils literal notranslate"><span class="pre">.pyfrs</span></code> file into an unstructured VTK <code class="docutils literal notranslate"><span class="pre">.vtu</span></code> or
+<code class="docutils literal notranslate"><span class="pre">.pvtu</span></code> file.</p>
+<dl>
+<dt>pyfr export volume</dt><dd><p>Exports a volume grid.  If <code class="docutils literal notranslate"><span class="pre">--eopt=order:n</span></code> is provided then
+PyFR elements are converted where possible to high-order VTK
+elements.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr export --eopt=order:4 mesh.pyfrm solution.pyfrs solution.vtu
+</pre></div>
+</div>
+<p>If a <code class="docutils literal notranslate"><span class="pre">--eopt=divisor:n</span></code> flag is provided with an integer
+argument then elements are subdivided into linear VTK cells.
+Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr export --eopt=divisor:4 mesh.pyfrm solution.pyfrs solution.vtu
+</pre></div>
+</div>
+<p>By default elements are converted to high-order VTK cells which
+are exported, where the order of the cells is equal to the order
+of the solution data in the file.</p>
+<p>Additionally, by default, all of the fields in the solution file
+will be exported. If only a specific field is desired this can be
+specified with the <code class="docutils literal notranslate"><span class="pre">-f</span></code> flag; for example <code class="docutils literal notranslate"><span class="pre">-f</span> <span class="pre">density</span> <span class="pre">-f</span>
+<span class="pre">velocity</span></code> will only export   the <em>density</em> and <em>velocity</em> fields.</p>
+</dd>
+<dt>pyfr export boundary</dt><dd><p>Exports one of more boundaries.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr export boundary mesh.pyfrm solution.pyfrms solution.vtu lower_wall upper_wall
+</pre></div>
+</div>
+<p>Note that boundary export is only supported for 3D grids.</p>
+</dd>
+<dt>pyfr export stl</dt><dd><p>Exports one or more STL surfaces.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr export boundary mesh.pyfrm solution.pyfrms solution.vtu teapot
+</pre></div>
+</div>
+<p>The STL surfaces must have already been added to the mesh with
+<code class="docutils literal notranslate"><span class="pre">pyfr</span> <span class="pre">region</span> <span class="pre">add</span></code>.</p>
+</dd>
+</dl>
+<p>All of the export commands also support a <em>batch</em> processing mode
+wherein the list of input solution files and output files are read in
+from disk.  This option is activated by passing <code class="docutils literal notranslate"><span class="pre">-</span></code> for the
+solution file and output file.  By default, the file is taken to be
+<em>stdin</em> although this can be overridden with the <code class="docutils literal notranslate"><span class="pre">--batchfile</span></code>
+option.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>for f in *.pyfrs; do echo &quot;$f ${f%.pyfrs}.vtu&quot;; done | pyfr -p export volume mesh.pyfrm - -
+</pre></div>
+</div>
+<p>This command will export each solution file in the current directory
+to a VTU file.</p>
+</dd>
+<dt>pyfr region</dt><dd><p>Handles STL region processing.</p>
+<dl>
+<dt>pyfr region add</dt><dd><p>Adds an STL region to the mesh.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition add mesh.pyfrm teapot.stl teapot
+</pre></div>
+</div>
+</dd>
+<dt>pyfr region list</dt><dd><p>Lists the STL regions in the mesh.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr partition list mesh.pyfrm
+</pre></div>
+</div>
+</dd>
+<dt>pyfr region remove</dt><dd><p>Removes an STL region from the mesh.  Example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>pyfr region remove mesh.pyfrm teapot
+</pre></div>
+</div>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>The <code class="docutils literal notranslate"><span class="pre">run</span></code>, <code class="docutils literal notranslate"><span class="pre">restart</span></code>, and <code class="docutils literal notranslate"><span class="pre">export</span></code> commands can be run in
+parallel. To do so prefix <code class="docutils literal notranslate"><span class="pre">pyfr</span></code> with <code class="docutils literal notranslate"><span class="pre">mpiexec</span> <span class="pre">-n</span> <span class="pre">&lt;cores/devices&gt;</span></code>.
+Note that there must exist a partitioning in the mesh with an
+appropriate number of parts.</p>
+</section>
+<section id="configuration-file-ini">
+<span id="configuration-file"></span><h2>Configuration File (.ini)<a class="headerlink" href="#configuration-file-ini" title="Link to this heading"></a></h2>
+<p>The .ini configuration file parameterises the simulation. It is written
+in the <a class="reference external" href="http://en.wikipedia.org/wiki/INI_file">INI</a> format.
+Parameters are grouped into sections. The roles of each section and
+their associated parameters are described below. Note that both <code class="docutils literal notranslate"><span class="pre">;</span></code>
+and <code class="docutils literal notranslate"><span class="pre">#</span></code> may be used as comment characters.  Additionally, all
+parameter values support environment variable expansion.</p>
+<section id="backends">
+<h3>Backends<a class="headerlink" href="#backends" title="Link to this heading"></a></h3>
+<p>These sections detail how the solver will be configured for a range of
+different hardware platforms. If a hardware specific backend section is
+omitted, then PyFR will fall back to built-in default settings.</p>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="backends/backend.html">[backend]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backends/backend-cuda.html">[backend-cuda]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backends/backend-hip.html">[backend-hip]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backends/backend-metal.html">[backend-metal]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backends/backend-opencl.html">[backend-opencl]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backends/backend-openmp.html">[backend-openmp]</a></li>
+</ul>
+</div>
+</section>
+<section id="systems">
+<h3>Systems<a class="headerlink" href="#systems" title="Link to this heading"></a></h3>
+<p>These sections setup and control the physical system being solved, as
+well as charateristics of the spatial and temporal schemes to be used.</p>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="systems/constants.html">[constants]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/solver.html">[solver]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/solver-time-integrator.html">[solver-time-integrator]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/solver-dual-time-integrator-multip.html">[solver-dual-time-integrator-multip]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/solver-entropy-filter.html">[solver-entropy-filter]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/solver-artificial-viscosity.html">[solver-artificial-viscosity]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/solver-interfaces.html">[solver-interfaces]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="systems/soln-filter.html">[soln-filter]</a></li>
+</ul>
+</div>
+</section>
+<section id="boundary-and-initial-conditions">
+<h3>Boundary and Initial Conditions<a class="headerlink" href="#boundary-and-initial-conditions" title="Link to this heading"></a></h3>
+<p>These sections allow users to set the boundary and initial
+conditions of calculations.</p>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="boundary-initial-conditions/soln-bcs.html">[soln-bcs-<em>name</em>]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="boundary-initial-conditions/soln-ics.html">[soln-ics]</a></li>
+</ul>
+</div>
+</section>
+<section id="nodal-point-sets">
+<h3>Nodal Point Sets<a class="headerlink" href="#nodal-point-sets" title="Link to this heading"></a></h3>
+<p>Solution point sets must be specified for each element type that is used
+and flux point sets must be specified for each interface type that is
+used. If anti-aliasing is enabled then quadrature point sets for each
+element and interface type that is used must also be specified. For
+example, a 3D mesh comprised only of prisms requires a solution point
+set for prism elements and flux point sets for quadrilateral and
+triangular interfaces.</p>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-interfaces-line.html">[solver-interfaces-line{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-interfaces-quad.html">[solver-interfaces-quad{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-interfaces-tri.html">[solver-interfaces-tri{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-elements-quad.html">[solver-elements-quad{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-elements-tri.html">[solver-elements-tri{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-elements-hex.html">[solver-elements-hex{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-elements-tet.html">[solver-elements-tet{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-elements-pri.html">[solver-elements-pri{-mg-p<em>order</em>}]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nodal-point-sets/solver-elements-pyr.html">[solver-elements-pyr{-mg-p<em>order</em>}]</a></li>
+</ul>
+</div>
+</section>
+<section id="plugins">
+<h3>Plugins<a class="headerlink" href="#plugins" title="Link to this heading"></a></h3>
+<p>Plugins allow for powerful additional functionality to be swapped in and
+out. There are two classes of plugin available; solution plugins which
+are prefixed by <code class="docutils literal notranslate"><span class="pre">soln-</span></code> and solver plugins which are prefixed by
+<code class="docutils literal notranslate"><span class="pre">solver-</span></code>. It is possible to create multiple instances of the same
+solution plugin by appending a suffix, for example:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>[soln-plugin-writer]
+...
+
+[soln-plugin-writer-2]
+...
+
+[soln-plugin-writer-three]
+...
+</pre></div>
+</div>
+<p>Certain plugins also expose functionality via a CLI, which can
+be invoked independently of a PyFR run.</p>
+<section id="solution-plugins">
+<h4>Solution Plugins<a class="headerlink" href="#solution-plugins" title="Link to this heading"></a></h4>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-ascent.html">[soln-plugin-ascent]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-dtstats.html">[soln-plugin-dtstats]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-fluid-force.html">[soln-plugin-fluidforce-<em>name</em>]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-fwh.html">[soln-plugin-fwh]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-integrate.html">[soln-plugin-integrate]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-nancheck.html">[soln-plugin-nancheck]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-pseudostats.html">[soln-plugin-pseudostats]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-residual.html">[soln-plugin-residual]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-sampler.html">[soln-plugin-sampler]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-tavg.html">[soln-plugin-tavg]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/soln-plugin-writer.html">[soln-plugin-writer]</a></li>
+</ul>
+</div>
+</section>
+<section id="solver-plugins">
+<h4>Solver Plugins<a class="headerlink" href="#solver-plugins" title="Link to this heading"></a></h4>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="plugins/solver-plugin-source.html">[solver-plugin-source]</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plugins/solver-plugin-turbulence.html">[solver-plugin-turbulence]</a></li>
+</ul>
+</div>
+</section>
+<section id="regions">
+<h4>Regions<a class="headerlink" href="#regions" title="Link to this heading"></a></h4>
+<p>Certain plugins are capable of performing operations on a subset of the
+elements inside the domain.  One means of constructing these element
+subsets is through parameterised regions.  Note that an element is
+considered part of a region if <em>any</em> of its shape points are found to be
+contained within the region.  A consequence of this is that a region may
+not strictly enclose a shape; this can be resolved through the
+<cite>region-expand</cite> directive. Supported regions:</p>
+<dl class="simple">
+<dt>Rectangular cuboid <code class="docutils literal notranslate"><span class="pre">box(x0,</span> <span class="pre">x1)</span></code></dt><dd><p>A rectangular cuboid defined by two diametrically opposed vertices.
+Valid in both 2D and 3D.</p>
+</dd>
+<dt>Conical frustum <code class="docutils literal notranslate"><span class="pre">conical_frustum(x0,</span> <span class="pre">x1,</span> <span class="pre">r0,</span> <span class="pre">r1)</span></code></dt><dd><p>A conical frustum whose end caps are at <em>x0</em> and <em>x1</em> with radii
+<em>r0</em> and <em>r1</em>, respectively. Only valid in 3D.</p>
+</dd>
+<dt>Cone <code class="docutils literal notranslate"><span class="pre">cone(x0,</span> <span class="pre">x1,</span> <span class="pre">r)</span></code></dt><dd><p>A cone of radius <em>r</em> whose centre-line is defined by <em>x0</em> and <em>x1</em>.
+Equivalent to <code class="docutils literal notranslate"><span class="pre">conical_frustum(x0,</span> <span class="pre">x1,</span> <span class="pre">r,</span> <span class="pre">0)</span></code>. Only valid in 3D.</p>
+</dd>
+<dt>Cylinder <code class="docutils literal notranslate"><span class="pre">cylinder(x0,</span> <span class="pre">x1,</span> <span class="pre">r)</span></code></dt><dd><p>A circular cylinder of radius <em>r</em> whose centre-line is defined by
+<em>x0</em> and <em>x1</em>. Equivalent to <code class="docutils literal notranslate"><span class="pre">conical_frustum(x0,</span> <span class="pre">x1,</span> <span class="pre">r,</span> <span class="pre">r)</span></code>.
+Only valid in 3D.</p>
+</dd>
+<dt>Cartesian ellipsoid <code class="docutils literal notranslate"><span class="pre">ellipsoid(x0,</span> <span class="pre">a,</span> <span class="pre">b,</span> <span class="pre">c)</span></code></dt><dd><p>An ellipsoid centred at <em>x0</em> with Cartesian coordinate axes whose
+extents in the <em>x</em>, <em>y</em>, and <em>z</em> directions are given by <em>a</em>, <em>b</em>,
+and <em>c</em>, respectively. Only valid in 3D.</p>
+</dd>
+<dt>Sphere <code class="docutils literal notranslate"><span class="pre">sphere(x0,</span> <span class="pre">r)</span></code></dt><dd><p>A sphere centred at <em>x0</em> with a radius of <em>r</em>. Equivalent to
+<code class="docutils literal notranslate"><span class="pre">ellipsoid(x0,</span> <span class="pre">r,</span> <span class="pre">r,</span> <span class="pre">r)</span></code>. Only valid in 3D.</p>
+</dd>
+<dt>STL <code class="docutils literal notranslate"><span class="pre">stl('name')</span></code></dt><dd><p>An STL region.  Note that the region <em>name</em> must have been already
+added to the mesh file with <code class="docutils literal notranslate"><span class="pre">pyfr</span> <span class="pre">region</span> <span class="pre">add</span></code>.  Only valid in 3D.
+Additionally, region itself <em>must</em> be closed.</p>
+</dd>
+</dl>
+<p>All region also support rotation.  In 2D this is accomplished by passing
+a trailing <cite>rot=angle</cite> argument where <cite>angle</cite> is a rotation angle in
+degrees; for example <code class="docutils literal notranslate"><span class="pre">box((-5,</span> <span class="pre">2),</span> <span class="pre">(2,</span> <span class="pre">0),</span> <span class="pre">rot=30)</span></code>.  In 3D the syntax
+is <cite>rot=(phi, theta, psi)</cite> and corresponds to a sequence of Euler angles
+in the so-called <em>ZYX convention</em>.  Region expressions can also be added
+and subtracted together  arbitrarily.  For example <code class="docutils literal notranslate"><span class="pre">box((-10,</span> <span class="pre">-10,</span>
+<span class="pre">-10),</span> <span class="pre">(10,</span> <span class="pre">10,</span> <span class="pre">10))</span> <span class="pre">-</span> <span class="pre">sphere((0,</span> <span class="pre">0,</span> <span class="pre">0),</span> <span class="pre">3)</span></code> will result in a
+cube-shaped region with a sphere cut out of the middle.</p>
+</section>
+</section>
+<section id="additional-information">
+<h3>Additional Information<a class="headerlink" href="#additional-information" title="Link to this heading"></a></h3>
+<p>The <a class="reference internal" href="#configuration-file"><span class="std std-ref">INI</span></a> file format is very versatile. A
+feature that can be useful in defining initial conditions is the
+substitution feature and this is demonstrated in the
+<a class="reference internal" href="plugins/soln-plugin-integrate.html#soln-plugin-integrate"><span class="std std-ref">[soln-plugin-integrate]</span></a> plugin example.</p>
+<p>To prevent situations where you have solutions files for unknown
+configurations, the contents of the <code class="docutils literal notranslate"><span class="pre">.ini</span></code> file are added as an
+attribute to <code class="docutils literal notranslate"><span class="pre">.pyfrs</span></code> files. These files use the HDF5 format and can
+be straightforwardly probed with tools such as h5dump.</p>
+<p>In several places within the <code class="docutils literal notranslate"><span class="pre">.ini</span></code> file expressions may be used. As
+well as the constant <code class="docutils literal notranslate"><span class="pre">pi</span></code>, expressions containing the following
+functions are supported:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">+,</span> <span class="pre">-,</span> <span class="pre">*,</span> <span class="pre">/</span></code> — basic arithmetic</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sin,</span> <span class="pre">cos,</span> <span class="pre">tan</span></code> — basic trigonometric functions (radians)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">asin,</span> <span class="pre">acos,</span> <span class="pre">atan,</span> <span class="pre">atan2</span></code> — inverse trigonometric functions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">exp,</span> <span class="pre">log</span></code> — exponential and the natural logarithm</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tanh</span></code> — hyperbolic tangent</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pow</span></code> — power, note <code class="docutils literal notranslate"><span class="pre">**</span></code> is not supported</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sqrt</span></code> — square root</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">abs</span></code> — absolute value</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">min,</span> <span class="pre">max</span></code> — two variable minimum and maximum functions,
+arguments can be arrays</p></li>
+</ol>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="backends/backend.html" class="btn btn-neutral float-right" title="[backend]" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2013–2025, Imperial College London.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
