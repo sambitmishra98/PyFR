@@ -7,6 +7,7 @@ from pyfr.plugins.fwh import FWHPlugin
 from pyfr.plugins.integrate import IntegratePlugin
 from pyfr.plugins.nancheck import NaNCheckPlugin
 from pyfr.plugins.pseudostats import PseudoStatsPlugin
+from pyfr.plugins.dtaustats import DtauStatsPlugin
 from pyfr.plugins.residual import ResidualPlugin
 from pyfr.plugins.sampler import SamplerCLIPlugin, SamplerPlugin
 from pyfr.plugins.source import SourcePlugin

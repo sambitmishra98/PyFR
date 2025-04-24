@@ -271,6 +271,7 @@ Solution Plugins
    plugins/soln-plugin-integrate.rst
    plugins/soln-plugin-nancheck.rst
    plugins/soln-plugin-pseudostats.rst
+   plugins/soln-plugin-dtaustats.rst
    plugins/soln-plugin-residual.rst
    plugins/soln-plugin-sampler.rst
    plugins/soln-plugin-tavg.rst
