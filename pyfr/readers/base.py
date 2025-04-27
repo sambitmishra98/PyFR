@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import chain
 from uuid import UUID
 
@@ -129,6 +129,40 @@ class NodalMeshAssembler:
         self._felespent, self._bfacespents, self._pfacespents = pents
         self._etype_map, self._petype_fnmap, self._nodemaps = maps
 
+    def modify_fpts(self, fpts_old, cutoff_frequency=50):
+ 
+         # Copy the input array to avoid modifying the original array
+         fpts = fpts_old.copy()
+ 
+         # Round off to 1e-10
+         fpts = np.round(fpts, 10)
+ 
+ 
+         for vertex_id in range(fpts.shape[0]):
+             for col in range(fpts.shape[2]):
+                 column = fpts[vertex_id, :, col]
+ 
+                 frequency_counts = Counter(column)
+                 frequent_values = [value for value, count in frequency_counts.items() if count > cutoff_frequency]
+ 
+                 if len(frequent_values) == 0:
+                     continue
+ 
+                 frequent_values = np.array(frequent_values)
+ 
+                 def find_nearest_frequent_value(val, frequent_values):
+                     return frequent_values[np.argmin(np.abs(frequent_values - val))]
+ 
+                 modified_column = np.array([
+                     find_nearest_frequent_value(val, frequent_values)
+                     if frequency_counts[val] <= cutoff_frequency else val
+                     for val in column
+                 ])
+ 
+                 fpts[vertex_id, :, col] = modified_column
+ 
+         return fpts
+
     def _check_pyr_parallelogram(self, foeles):
         # Find PyFR node map for the quad face
         fnmap = self._petype_fnmap['pyr']['quad'][0]
@@ -141,6 +175,26 @@ class NodalMeshAssembler:
         if np.any(np.abs(fpts[0] - fpts[1] - fpts[2] + fpts[3]) > 1e-10):
             raise ValueError('Pyramids with non-parallelogram bases are '
                              'currently unsupported')
+
+        fpts_old = self._nodepts[foeles[:, pfnmap]].swapaxes(0, 1)
+ 
+        # Count the total number of fpts that have nonparalellogram bases
+        tot_nons = np.sum(np.abs(fpts_old[0] - fpts_old[1] - fpts_old[2] + fpts_old[3]) > 1e-10)
+        print(f"Total number of non-parallelogram bases: {tot_nons}")
+
+        # fix the non-parallelogram bases
+        new_fpts = self.modify_fpts(fpts_old)
+
+        initial_non_parallelograms = np.sum(np.abs(fpts_old[0] - fpts_old[1] - fpts_old[2] + fpts_old[3]) > 1e-10)
+        print(f"Total non-parallelogram bases: {initial_non_parallelograms}")
+
+        modified_non_parallelograms = np.sum(np.abs(new_fpts[0] - new_fpts[1] - new_fpts[2] + new_fpts[3]) > 1e-10)
+        print(f"Total non-parallelogram bases after modification: {modified_non_parallelograms}")
+
+        # Modify self._nodepts with the new_fpts values for the quad face of the pyr element type 
+        self._nodepts[foeles[:, pfnmap]] = new_fpts.swapaxes(0, 1)
+
+        # Repeat again to be sure that the modification is correct
 
     def _to_first_order(self, elemap):
         foelemap = {}
