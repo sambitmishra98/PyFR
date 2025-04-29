@@ -152,6 +152,14 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
         return self.pintg.stage_nregs
 
     @property
+    def source_nregs(self):
+        return self.pintg.source_nregs
+
+    @property
+    def err_nregs(self):
+        return self.pintg.err_nregs
+
+    @property
     def stepper_nregs(self):
         return self.pintg.stepper_nregs
 

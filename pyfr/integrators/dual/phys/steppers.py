@@ -34,9 +34,26 @@ class BaseDIRKStepper(BaseDualStepper):
 
         self.pseudointegrator.store_current_soln()
 
+        if self.stepper_has_errest:
+            s = 5
+            sc = [(b - bh)*dt for b, bh in zip(self.b, self.bhat)]
+            self.pseudointegrator.init_stage(s, sc, dt)
+            self.pseudointegrator.pseudo_advance(t + dt)
+            self.pseudointegrator.finalise_err_stage(t + dt)
+
+            self.pseudointegrator.store_current_err()
+
+            return (self.pseudointegrator._idxcurr,         # Current  solution
+                    self.pseudointegrator._err_regidx[0],   #   Old    solution
+                    self.pseudointegrator._err_regidx[1]    # Error in solution
+                    )
+        else:
+            return self.pseudointegrator._idxcurr
+
 
 class DualBackwardEulerStepper(BaseDIRKStepper):
     stepper_name = 'backward-euler'
+    stepper_has_errest = False
     nstages = 1
     fsal = True
 
@@ -45,6 +62,7 @@ class DualBackwardEulerStepper(BaseDIRKStepper):
 
 class SDIRK33Stepper(BaseDIRKStepper):
     stepper_name = 'sdirk33'
+    stepper_has_errest = False
     nstages = 3
     fsal = True
 
@@ -60,6 +78,7 @@ class SDIRK33Stepper(BaseDIRKStepper):
 
 class SDIRK43Stepper(BaseDIRKStepper):
     stepper_name = 'sdirk43'
+    stepper_has_errest = False
     nstages = 3
     fsal = False
 
@@ -73,3 +92,31 @@ class SDIRK43Stepper(BaseDIRKStepper):
 
     _b_rlam = 1/(6*(1 - 2*_a_lam)*(1 - 2*_a_lam))
     b = [_b_rlam, 1 - 2*_b_rlam, _b_rlam]
+
+
+class ESDIRK35Stepper(BaseDIRKStepper):
+    stepper_name = 'esdirk35'
+    stepper_has_errest = True
+    nstages = 5
+    fsal = True
+
+    _w = 9/40
+    _x1 = 9*(1+math.sqrt(2))/80
+    _y1 = (22+15*math.sqrt(2))/(80*(1+math.sqrt(2)))
+    _y2 = -7/(40*(1+math.sqrt(2)))
+    _z1 =  (2398+1205*math.sqrt(2))/( 2835*(4+3*math.sqrt(2)))
+    _z2 = (-2374*(1+2*math.sqrt(2)))/(2835*(5+3*math.sqrt(2)))
+
+    a = [
+        [0],
+        [_w, _w],
+        [_x1, _x1, _w],
+        [_y1, _y1, _y2, _w],
+        [_z1, _z1, _z2, 5827/7560, _w]]
+
+    b = [_z1, _z1, _z2, 5827/7560, _w]
+    bhat = [4555948517383/24713416420891, 
+            4555948517383/24713416420891, 
+            -7107561914881/25547637784726, 
+            30698249/44052120, 
+            49563/233080]

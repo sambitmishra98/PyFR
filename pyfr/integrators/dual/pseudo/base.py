@@ -39,11 +39,14 @@ class BaseDualPseudoIntegrator(BaseCommon):
         # Amount of temp storage required by physical stepper
         self.stepper_nregs = stepper_nregs
 
-        source_nregs = 1
+        # Amount of temp storage required for adaptive physical stepper
+        self.err_nregs = 2
+        self.source_nregs = 1
 
         # Determine the amount of temp storage required in total
         self.nregs = (self.pseudo_stepper_nregs + self.stepper_nregs +
-                      self.stage_nregs + source_nregs + self.aux_nregs)
+                      self.stage_nregs + self.source_nregs + 
+                      self.err_nregs + self.aux_nregs)
 
         # Construct the relevant system
         self.system = systemcls(backend, mesh, initsoln, nregs=self.nregs,
@@ -87,6 +90,11 @@ class BaseDualPseudoIntegrator(BaseCommon):
         return self._regidx[sr]
 
     @property
+    def _err_regidx(self):
+        ser = self.pseudo_stepper_nregs + self.stepper_nregs + self.stage_nregs + self.source_nregs
+        return self._regidx[ser:ser + self.err_nregs]
+
+    @property
     def _stage_regidx(self):
         bsnregs = self.pseudo_stepper_nregs + self.stepper_nregs
         return self._regidx[bsnregs:bsnregs + self.stage_nregs]
@@ -95,6 +103,10 @@ class BaseDualPseudoIntegrator(BaseCommon):
     def _stepper_regidx(self):
         psnregs = self.pseudo_stepper_nregs
         return self._regidx[psnregs:psnregs + self.stepper_nregs]
+
+    def store_previous_soln(self):
+        # Copy the previous soln into the second error register
+        self._add(0, self._err_regidx[0], 1, self._stepper_regidx[0])
 
     def init_stage(self, currstg, stepper_coeffs, dt):
         self.stepper_coeffs = stepper_coeffs
@@ -111,6 +123,9 @@ class BaseDualPseudoIntegrator(BaseCommon):
         if self.stage_nregs > 1:
             self.system.rhs(tcurr, self._idxcurr, self._stage_regidx[currstg])
 
+    def finalise_err_stage(self, tcurr):
+        self.system.rhs(tcurr, self._idxcurr, self._err_regidx[1])
+
     def store_current_soln(self):
         # Copy the current soln into the first source register
         self._add(0, self._stepper_regidx[0], 1, self._idxcurr)
@@ -120,3 +135,7 @@ class BaseDualPseudoIntegrator(BaseCommon):
         regidxs = [self._idxcurr, self._stepper_regidx[0], *self._stage_regidx]
 
         self._addv(consts, regidxs, subdims=self._subdims)
+
+    def store_current_err(self):
+        # Copy the error into the first error register
+        self._add(0, self._err_regidx[1], 1, self._idxcurr)
