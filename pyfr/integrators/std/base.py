@@ -21,6 +21,10 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
 
         # Event handlers for advance_to
         self.plugins = self._get_plugins(initsoln)
+        self.observers = self._get_observers()
+        self.hyperparameters = self._get_hyperparameters()
+        self.modellers = self._get_modellers()
+        self.samplers = self._get_samplers()
 
         # Commit the sytem
         self.system.commit()

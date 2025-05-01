@@ -26,9 +26,13 @@ class BaseDualController(BaseDualIntegrator):
         # Run any plugins
         self._run_plugins()
 
+        self._run_samplers()
+        self._run_observers()
+        self._run_hyperparameters()
+        self._run_modellers()
+
         # Clear the pseudo step info
         self.pseudointegrator.pseudostepinfo = []
-
 
 class DualNoneController(BaseDualController):
     controller_name = 'none'

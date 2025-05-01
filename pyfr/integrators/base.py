@@ -8,6 +8,10 @@ import numpy as np
 
 from pyfr.cache import memoize
 from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
+from pyfr.optimisers.observers import get_observer
+from pyfr.optimisers.hyperparameters import get_hyperparameter
+from pyfr.optimisers.modellers import get_modeller
+from pyfr.optimisers.samplers import get_sampler
 from pyfr.plugins import get_plugin
 
 
@@ -62,11 +66,19 @@ class BaseIntegrator:
 
         self._invalidate_caches()
 
+        self.rewind_interval =  0 # cfg.getint('sampler-base', 'rewind-interval', 0)
+
         # Record the starting wall clock time
         self._wstart = time.time()
 
         # Record the total amount of time spent in each plugin
         self._plugin_wtimes = defaultdict(lambda: 0)
+
+        # Record the total amount of time spent
+        self._observer_wtimes = defaultdict(lambda: 0)
+        self._hyperparameter_wtimes = defaultdict(lambda: 0)
+        self._modeller_wtimes = defaultdict(lambda: 0)
+        self._sampler_wtimes = defaultdict(lambda: 0)
 
         # Abort computation
         self._abort = False
@@ -104,6 +116,46 @@ class BaseIntegrator:
 
         return plugins
 
+    def _get_observers(self):
+        observers = []
+
+        for s in self.cfg.sections():
+            if (m := re.match(r'observer-(.+)', s)):
+                # Instantiate directly with (name, owner, cfg_section)
+                observers.append(get_observer(m.group(1), self, s))
+
+        return observers
+
+    def _get_hyperparameters(self):
+        hyperparameters = []
+
+        for s in self.cfg.sections():
+            if (m := re.match(r'hyperparameter-(.+)', s)):
+                # Instantiate directly with (name, owner, cfg_section)
+                hyperparameters.append(get_hyperparameter(m.group(1), self, s))
+
+        return hyperparameters
+
+    def _get_modellers(self):
+        modellers = []
+
+        for s in self.cfg.sections():
+            if (m := re.match(r'modeller-(.+)', s)):
+                # Instantiate directly with (name, owner, cfg_section)
+                modellers.append(get_modeller(m.group(1), self, s))
+
+        return modellers
+
+    def _get_samplers(self):
+        samplers = []
+
+        for s in self.cfg.sections():
+            if (m := re.match(r'sampler-(.+)', s)):
+                # Instantiate directly with (name, owner, cfg_section)
+                samplers.append(get_sampler(m.group(1), self, s))
+
+        return samplers
+
     def _run_plugins(self):
         wtimes = self._plugin_wtimes
 
@@ -129,6 +181,74 @@ class BaseIntegrator:
         for plugin in self.plugins:
             if (finalise := getattr(plugin, 'finalise', None)):
                 finalise(self)
+
+    def _run_observers(self):
+        wtimes = self._observer_wtimes
+
+        self.backend.wait()
+
+        # Fire off the observers and tally up the runtime
+        for observer in self.observers:
+            tstart = time.time()
+            tcommon = wtimes['common', None]
+
+            observer(self)
+
+            dt = time.time() - tstart - wtimes['common', None] + tcommon
+
+            oname = getattr(observer, 'name', 'other')
+            wtimes[oname] += dt
+
+    def _run_hyperparameters(self):
+        wtimes = self._hyperparameter_wtimes
+
+        self.backend.wait()
+
+        # Fire off the hyperparameter and tally up the runtime
+        for hyperparameter in self.hyperparameters:
+            tstart = time.time()
+            tcommon = wtimes['common', None]
+
+            hyperparameter()
+
+            dt = time.time() - tstart - wtimes['common', None] + tcommon
+
+            oname = getattr(hyperparameter, 'name', 'other')
+            wtimes[oname] += dt
+
+    def _run_modellers(self):
+        wtimes = self._modeller_wtimes
+
+        self.backend.wait()
+
+        # Fire off the modellers and tally up the runtime
+        for modeller in self.modellers:
+            tstart = time.time()
+            tcommon = wtimes['common', None]
+
+            modeller()
+
+            dt = time.time() - tstart - wtimes['common', None] + tcommon
+
+            oname = getattr(modeller, 'name', 'other')
+            wtimes[oname] += dt
+
+    def _run_samplers(self):
+        wtimes = self._sampler_wtimes
+
+        self.backend.wait()
+
+        # Fire off the hyperparameter and tally up the runtime
+        for sampler in self.samplers:
+            tstart = time.time()
+            tcommon = wtimes['common', None]
+
+            sampler()
+
+            dt = time.time() - tstart - wtimes['common', None] + tcommon
+
+            oname = getattr(sampler, 'name', 'other')
+            wtimes[oname] += dt
 
     @staticmethod
     def get_plugin_data_prefix(name, suffix):
