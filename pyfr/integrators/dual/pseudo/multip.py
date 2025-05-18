@@ -49,6 +49,8 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
         dtau = cfg.getfloat(sect, 'pseudo-dt')
         self.dtauf = cfg.getfloat(mgsect, 'pseudo-dt-fact', 1.0)
 
+        self.rewind_iter = cfg.getint(mgsect, 'rewind-iteration')
+
         self._maxniters = cfg.getint(sect, 'pseudo-niters-max', 0)
         self._minniters = cfg.getint(sect, 'pseudo-niters-min', 0)
 
@@ -122,6 +124,9 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
 
         # Initialise the restriction and prolongation matrices
         self._init_proj_mats()
+
+        self.pintg.save_dtau_upts()
+
 
     def commit(self):
         for s in self.pintgs.values():
@@ -315,6 +320,13 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
             # Convergence monitoring
             if self.mg_convmon(self.pintg, i, self._minniters):
                 break
+
+            if i == self.rewind_iter:
+                # Save dtau_mat at highest level
+                self.pintg.save_dtau_upts()
+
+        # Rewind to last saved dtau_mats
+        self.pintg.rewind_dtau_upts()
 
     def collect_stats(self, stats):
         # Collect the stats for each level
