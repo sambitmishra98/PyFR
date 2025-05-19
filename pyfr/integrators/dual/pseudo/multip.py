@@ -1,6 +1,7 @@
 from collections import defaultdict
 import itertools as it
 import re
+from time import perf_counter
 
 import numpy as np
 
@@ -11,7 +12,7 @@ from pyfr.integrators.dual.pseudo.pseudocontrollers import (
     BaseDualPseudoController
 )
 from pyfr.util import subclass_where
-
+from pyfr.mpiutil import mpi
 
 class DualMultiPIntegrator(BaseDualPseudoIntegrator):
     def __init__(self, backend, systemcls, mesh, initsoln, cfg, stepper_nregs,
@@ -123,6 +124,8 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
         # Initialise the restriction and prolongation matrices
         self._init_proj_mats()
 
+        self._compute_time = 0.
+
     def commit(self):
         for s in self.pintgs.values():
             s.system.commit()
@@ -163,6 +166,24 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
     def _subdims(self):
         return self.pintg._subdims
 
+    def save_dtau(self):
+        return self.pintg.save_dtau()
+
+    def rewind_dtau(self):
+        return self.pintg.rewind_dtau()
+
+    def reset_dtau(self):
+        return self.pintg.reset_dtau()
+
+    # If Δτᴹᵃˣ array given ...
+    @property
+    def dtau_maxs(self): return self.dtau_maxs
+    @dtau_maxs.setter
+    def dtau_maxs(self, y): 
+        for l in self.levels:
+            self.pintgs[l].Δτᴹ = y[l]        
+        self.dtau_maxs = y
+
     @property
     def pintg(self):
         return self.pintgs[self.level]
@@ -190,13 +211,13 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
         return projk
 
     @memoize
-    def dtauproject(self, l1, l2):
+    def dtauproject(self, l1, l2, dtauf):
         projk = []
         for i, a in enumerate(self.projmats[l1, l2]):
             b = self.pintgs[l1].dtau_upts[i]
             c = self.pintgs[l2].dtau_upts[i]
             projk.append(self.backend.kernel('mul', a, b, out=c,
-                                             alpha=self.dtauf))
+                                             alpha=dtauf))
 
         return projk
 
@@ -222,7 +243,7 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
 
         # Project local dtau field to lower multigrid levels
         if self.pintgs[self._order].pseudo_controller_needs_lerrest:
-            self.backend.run_kernels(self.dtauproject(l1, l2))
+            self.backend.run_kernels(self.dtauproject(l1, l2, self.dtauf))
 
         # rtemp = R = -∇·f - dQ/dt
         self.pintg._rhs_with_dts(self.tcurr, l1idxcurr, rtemp, mg_add=False)
@@ -292,6 +313,9 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
 
         self.tcurr = tcurr
 
+        mpi.Prequest.Waitall
+        ctime_start = perf_counter()   
+
         for i in range(self._maxniters):
             # Choose either ⌊c⌋ or ⌈c⌉ in a way that the average is c
             csteps = [int(c + (self._fgen.random() < c % 1)) for c in cstepsf]
@@ -316,6 +340,9 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
             if self.mg_convmon(self.pintg, i, self._minniters):
                 break
 
+        mpi.Prequest.Waitall
+        self._compute_time += (perf_counter() - ctime_start)
+
     def collect_stats(self, stats):
         # Collect the stats for each level
         for l in self.levels:
@@ -326,6 +353,9 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
             # Total number of pseudo-steps
             stats.set('solver-time-integrator', f'npseudosteps-p{l}',
                       self.pintgs[l].npseudosteps)
+
+        # compute-time calculated only around p-multigrid cycles
+        stats.set('solver-time-integrator', 'compute-time',self._compute_time)
 
         # Total number of p-multigrid cycles
         stats.set('solver-time-integrator', 'npmgcycles', self.npmgcycles)

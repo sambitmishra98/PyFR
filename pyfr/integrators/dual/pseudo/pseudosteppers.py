@@ -198,6 +198,10 @@ class DualEmbeddedPairPseudoStepper(BaseDualPseudoStepper):
             'pyfr.integrators.dual.pseudo.kernels.rkvdh2pseudo'
         )
 
+    @property
+    def dtau_mats(self):
+        return [dtau_mat.get() for dtau_mat in self.dtau_upts]
+
     @memoize
     def _get_rkvdh2pseudo_kerns(self, stage, r1, r2, rold, rerr=None):
         kerns = []
@@ -220,6 +224,22 @@ class DualEmbeddedPairPseudoStepper(BaseDualPseudoStepper):
     def pseudo_stepper_has_lerrest(self):
         return self.pseudo_controller_needs_lerrest and self.bhat
 
+    @property
+    def dtau_mats(self):
+        return [Δτ_mat.get() for Δτ_mat in self.dtau_upts]
+
+    @dtau_mats.setter
+    def dtau_mats(self, y:float):
+        [Δτ_mat.set(y*np.ones_like(saved_Δτ_mat)) for Δτ_mat, saved_Δτ_mat in zip(self.dtau_upts, self.saved_Δτ_upts)]
+
+    def save_dtau(self):
+        self.saved_Δτ_upts = self.dtau_mats
+
+    def rewind_dtau(self):
+        [Δτ_mat.set(saved_Δτ_mat) for Δτ_mat, saved_Δτ_mat in zip(self.dtau_upts, self.saved_Δτ_upts)]
+
+    def reset_dtau(self):
+        self.dtau_mats = self._dtau
 
 class DualRKVdH2RPseudoStepper(DualEmbeddedPairPseudoStepper):
     @property

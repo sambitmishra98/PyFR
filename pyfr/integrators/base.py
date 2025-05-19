@@ -65,6 +65,13 @@ class BaseIntegrator:
         # Record the starting wall clock time
         self._wstart = time.time()
 
+        # Rewind computation
+        self.save = None
+        self.rewind = None
+        self.opt_type = None
+        self.reset_opt_stats = None
+        self.bad_sim = None
+
         # Record the total amount of time spent in each plugin
         self._plugin_wtimes = defaultdict(lambda: 0)
 
@@ -227,6 +234,33 @@ class BaseIntegrator:
 
             reason = self._abort_reason
             sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
+
+    def save_soln(self):
+        if self.save is True:
+            self._saved_soln = self.soln
+        else:
+            raise Exception('save is not set to true.')
+
+    @property
+    def saved_soln(self):
+        return self._saved_soln
+
+    @saved_soln.setter
+    def saved_soln(self, y):
+        self._saved_soln = y
+
+    def rewind_soln(self):
+        if self.saved_soln and self.rewind:
+            if self.cfg.get('solver-time-integrator', 'formulation') == 'dual':
+                self.system.ele_scal_upts_set(self.pseudointegrator._stepper_regidx, self.saved_soln)
+                self.system.ele_scal_upts_set(self.pseudointegrator._stage_regidx, self.saved_soln)
+                self.system.ele_scal_upts_set([self.pseudointegrator._source_regidx], self.saved_soln)
+                self.system.ele_scal_upts_set(self.pseudointegrator._pseudo_stepper_regidx, self.saved_soln)
+            else:
+                self.system.ele_scal_upts_set(self._idxcurr, self.saved_soln)
+                raise Exception('Rewind is only implemented for dual scheme.')
+        else:
+            raise Exception('No saved solution to load, or rewind is not set to True.')
 
 
 class BaseCommon:

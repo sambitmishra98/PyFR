@@ -23,6 +23,9 @@ class BaseDualController(BaseDualIntegrator):
 
         self._invalidate_caches()
 
+        if self.rewind: self.rewind = False
+        if self.save:   self.save   = False
+
         # Run any plugins
         self._run_plugins()
 

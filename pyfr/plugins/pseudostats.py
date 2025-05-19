@@ -1,4 +1,5 @@
 from pyfr.mpiutil import get_comm_rank_root
+from itertools import product
 from pyfr.plugins.base import BaseSolnPlugin, init_csv
 from pyfr.util import first
 
@@ -18,7 +19,11 @@ class PseudoStatsPlugin(BaseSolnPlugin):
         self.stats = []
         self.tprev = intg.tcurr
 
-        fvars = ','.join(first(intg.system.ele_map.values()).convars)
+
+        if self.cfg.get('solver-time-integrator','pseudo-resid-norm') != 'all':
+            fvars = ','.join(first(intg.system.ele_map.values()).convars)
+        else:
+            fvars = ','.join([ ('-').join(f) for f in list(product(['l2','li',], intg.system.elementscls.convarmap[self.ndims]))]) 
 
         # MPI info
         comm, rank, root = get_comm_rank_root()
