@@ -65,6 +65,14 @@ class BaseIntegrator:
         # Record the starting wall clock time
         self._wstart = time.time()
 
+        # Get physical times when solution is saved
+        self.rewind_interval = 200 # cfg.getint('sampler-base', 'rewind-interval', 0)
+        if self.rewind_interval:
+            self.rewind_to_latest_checkpoint = True
+            self.soln_checkpoint = {}
+        else:
+            self.rewind_to_latest_checkpoint = False
+
         # Record the total amount of time spent in each plugin
         self._plugin_wtimes = defaultdict(lambda: 0)
 
@@ -123,7 +131,7 @@ class BaseIntegrator:
             wtimes[pname, psuffix] += dt
 
         # Abort if plugins request it
-        self._check_abort()
+        self._check_abort_or_rewind()
 
     def _finalise_plugins(self):
         for plugin in self.plugins:
@@ -219,14 +227,41 @@ class BaseIntegrator:
         else:
             return {'config': cfg, 'config-0': cfg}
 
-    def _check_abort(self):
+    def _check_abort_or_rewind(self):
         comm, rank, root = get_comm_rank_root()
 
         if scal_coll(comm.Allreduce, int(self._abort), op=mpi.LOR):
-            self._finalise_plugins()
 
-            reason = self._abort_reason
-            sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
+            if self.rewind_to_latest_checkpoint:
+                self._abort = False
+                self.soln_load()
+            else:
+                self._finalise_plugins()
+                reason = self._abort_reason
+                sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
+        else:
+            if self.rewind_to_latest_checkpoint:
+                if self.nacptsteps % self.rewind_interval == 0:
+                    self.soln_save()
+
+    def soln_save(self):
+        print(f'Saving checkpoint at {self.tcurr}...', 
+              flush=True)
+        self.soln_checkpoint[self.tcurr] = self.nacptsteps, self.soln
+        
+    def soln_load(self, t=None):
+        if t is None:
+            t = max(self.soln_checkpoint.keys())
+
+        print(f'Rewinding to latest checkpoint from {self.tcurr} to {t}...', 
+              flush=True)
+
+        nacptsteps, _ = self.soln_checkpoint[t]
+
+        self.rjctsteps = self.nsteps - nacptsteps
+        self.nacptsteps = self.nsteps - self.nrjctsteps
+
+        self.tcurr = t
 
 
 class BaseCommon:

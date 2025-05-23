@@ -70,3 +70,13 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
     @entmin.setter
     def entmin(self, value):
         self.system.set_ele_entmin_int(value)
+
+    def soln_load(self, t=None):
+        super().soln_load(t)
+
+        if t is None:
+            t = max(self.soln_checkpoint.keys())
+
+        _, soln = self.soln_checkpoint[t]
+
+        self.system.ele_scal_upts_set(self._idxcurr, soln)

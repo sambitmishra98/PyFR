@@ -124,6 +124,8 @@ class DualPIPseudoController(BaseDualPseudoController):
             'pyfr.integrators.dual.pseudo.kernels.localerrest'
         )
 
+        self.dtau_checkpoint = {}
+
         for ele, shape, dtaumat in zip(self.system.ele_map.values(),
                                        self.system.ele_shapes.values(),
                                        self.dtau_upts):
@@ -145,6 +147,24 @@ class DualPIPseudoController(BaseDualPseudoController):
 
     def localerrest(self, errbank):
         self.backend.run_kernels(self.pintgkernels['localerrest', errbank])
+
+    def dtau_save(self):
+        print(f'Saving dtau checkpoint at {self.tcurr}...', flush=True)
+
+        dtau_mats = [dtau_mat.get() for dtau_mat in self.dtau_upts]
+
+        self.dtau_checkpoint[self.tcurr] = dtau_mats
+
+    def dtau_load(self):
+        print(f'Rewinding to latest dtau checkpoint from {self.tcurr}...',
+              flush=True)
+
+        [dtau_mat.set(saved_dtau_mat) for dtau_mat, saved_dtau_mat in 
+         zip(self.dtau_upts, self.dtau_checkpoint[self.tcurr])]
+
+    def dtau_reset(self, y):
+        y = self.cfg.getfloat('solver-time-integrator', 'pseudo-dt')
+        [dtau_mat.set(y*np.ones_like(dtau_mat)) for dtau_mat in self.dtau_upts]
 
     def pseudo_advance(self, tcurr):
         self.tcurr = tcurr

@@ -70,3 +70,16 @@ class BaseDualIntegrator(BaseIntegrator):
         super().collect_stats(stats)
 
         self.pseudointegrator.collect_stats(stats)
+
+    def soln_load(self, t=None):
+        super().soln_load(t)
+
+        if t is None:
+            t = max(self.soln_checkpoint.keys())
+
+        _, soln_saved = self.soln_checkpoint[t]        
+
+        self.system.ele_scal_upts_set(self.pseudointegrator._stepper_regidx, soln_saved)
+        self.system.ele_scal_upts_set(self.pseudointegrator._stage_regidx, soln_saved)
+        self.system.ele_scal_upts_set([self.pseudointegrator._source_regidx], soln_saved)
+        self.system.ele_scal_upts_set(self.pseudointegrator._pseudo_stepper_regidx, soln_saved)
