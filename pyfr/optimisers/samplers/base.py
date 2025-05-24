@@ -1,25 +1,26 @@
 class BaseSampler:
     name = None
     
-    def __init__(self, intg, cfgsect):
+    def __init__(self, intg, cfgsect, suffix=None):
         self.cfgsect = cfgsect
         self.intg = intg
-
-        # Find out modeller
         
+        self.suffix = suffix
+
         modeller_name = intg.cfg.get(self.cfgsect, 'modeller')
 
         for modeller in intg.modellers:
-            if modeller.name == modeller_name:
+            if modeller.name == modeller_name and modeller.suffix == self.suffix:
                 self.modeller = modeller
                 break
         else:
-            raise ValueError(
-                f'Modeller {modeller_name} not setup in config file.')
+            raise ValueError(f'Set up modeller-{modeller_name}-{self.suffix}.')
 
         # Get the list of hyperparameters from the modeller
 
         self.hparam = self.modeller.hparam
+
+        self.n_hparams = self.hparam.n_hparams
 
         self.interval = intg.cfg.getint(self.cfgsect, 'capture-interval')
 

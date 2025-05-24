@@ -38,7 +38,7 @@ class PseudoTimeMax(BaseHyperparameter):
 
     @property
     def hparam(self):
-        return [self.pintg.dtau_max,]
+        return np.atleast_1d(self.pintg.dtau_max)
 
     @hparam.setter
     def hparam(self, y):

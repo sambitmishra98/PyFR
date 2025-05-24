@@ -1,7 +1,6 @@
 import numpy as np
 from itertools import accumulate
 from pyfr.optimisers.hyperparameters.base import BaseHyperparameter
-from pyfr.util import subclass_where
 
 
 class CompositeHyperparameter(BaseHyperparameter):
@@ -9,32 +8,28 @@ class CompositeHyperparameter(BaseHyperparameter):
     Combine a list of *already-declared* hyper-parameter sections into one
     optimisable vector.  Example INI::
 
-        [hyperparameter-combined]
-        components = dtaumax, pmggroupedsteps
-        file       = observers/combined_params.csv
+        [hyperparameter-composite]
+        capture-interval  = 20 
+        file       = observers/composite_params.csv
+        n-hyperparameters =  5
+        components = [dtaumax, pmggroupedsteps]
+        soft-bounds = [[0,  5], [0,  5], [1, 10], [1, 10], [0.0050, 0.10], ]
+        hard-bounds = [[0, 10], [0, 10], [0, 10], [0, 10], [0.0001, 1.00], ]
+
     """
     name = 'composite'
 
     def __init__(self, intg, cfgsect):
         super().__init__(intg, cfgsect)
 
-        # List of component section names, keep declared order
-        self._comp_sects = [
-            s.strip() for s in intg.cfg.getliteral(cfgsect, 'components')
-        ]
+        # List of component section names in declared order
+        sects = [s for s in intg.cfg.getliteral(cfgsect, 'components')]
 
         # Build concrete objects *once* and cache slice indices
-        self._comps = [subclass_where('name', intg.cfg.get(s, 'type'))
-                       (intg, s) for s in self._comp_sects]
+        self._comps = [hp for hp in intg.hyperparameters if hp.name in sects]
 
         lengths = [c.n_hparams for c in self._comps]
         self._breaks = list(accumulate(lengths))
-        self._n_hparams = sum(lengths)
-
-    # ------------------------------------------------------------------ attrs
-    @property
-    def n_hparams(self):
-        return self._n_hparams
 
     @property
     def param(self):
@@ -42,7 +37,13 @@ class CompositeHyperparameter(BaseHyperparameter):
 
     @property
     def hparam(self):
-        return np.concatenate([c.hparam for c in self._comps])
+        parts = []
+        for c in self._comps:
+            # Ensure we have a NumPy array
+            arr = np.asarray(c.hparam)
+            # Flatten any extra dims into 1-D
+            parts.append(arr.ravel())
+        return np.concatenate(parts)
 
     @hparam.setter
     def hparam(self, y):
@@ -51,11 +52,3 @@ class CompositeHyperparameter(BaseHyperparameter):
         for comp, s, e in zip(self._comps, starts, self._breaks):
             comp.hparam = y[s:e]
         self.config_change = any(c.config_change for c in self._comps)
-
-    # ---------------------------------------------------------------- bounds
-    @property
-    def bounds(self):
-        """Return concatenated soft-bounds if all children define them."""
-        if any(c.bounds is None for c in self._comps):
-            return None
-        return np.concatenate([c.bounds for c in self._comps])

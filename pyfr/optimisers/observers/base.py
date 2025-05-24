@@ -9,9 +9,11 @@ class BaseObserver:
     name = None
     objective = None
     
-    def __init__(self, intg, cfgsect):
+    def __init__(self, intg, cfgsect, suffix=None):
         self.cfg = intg.cfg
         self.cfgsect = cfgsect
+        
+        self.suffix = suffix
 
         self.tprev = intg.tcurr
         self._hist = np.empty((0, 4), dtype=np.float64)

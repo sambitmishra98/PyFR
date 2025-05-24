@@ -8,14 +8,16 @@ from pyfr.plugins.base import init_csv
 class BaseHyperparameter:
     name = None
     
-    def __init__(self, intg, cfgsect):
+    def __init__(self, intg, cfgsect, suffix=None):
         self.intg = intg
         self.cfgsect = cfgsect
+        
+        self.suffix = suffix
 
         self.n_hparams = intg.cfg.getint(cfgsect, 'n-hyperparameters')
-        bounds = intg.cfg.getliteral(cfgsect, 'soft-bounds')
+        sbounds = intg.cfg.getliteral(cfgsect, 'soft-bounds')
         hbounds = intg.cfg.getliteral(cfgsect, 'hard-bounds')
-        self.bounds = np.array(bounds).transpose().reshape(2, -1)
+        self.bounds = np.array(sbounds).transpose().reshape(2, -1)
         
         print(f'Hyperparameter soft-bounds: {self.bounds}')
 
@@ -93,7 +95,8 @@ class BaseHyperparameter:
             self.tprev = self.intg.tcurr
 
         if len(self.hparam_pending_update):
-            self.hparam = float(self.hparam_pending_update.pop(0))
+            pending = self.hparam_pending_update.pop(0)
+            self.hparam = np.asarray(pending, dtype=float)
             self.config_change = True
 
     def __update_condition(self, intg):

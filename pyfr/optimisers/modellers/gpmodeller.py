@@ -1,19 +1,32 @@
 import matplotlib.pyplot as plt
 
-from botorch.models import SingleTaskGP
-from botorch.fit import fit_gpytorch_mll
-from botorch.models.transforms import Normalize, Standardize
-from gpytorch.mlls import ExactMarginalLogLikelihood
-
 import torch
 
+from gpytorch.mlls import ExactMarginalLogLikelihood
+
+from botorch.models import SingleTaskGP
+from botorch.models import SaasFullyBayesianSingleTaskGP
+from botorch.fit import fit_gpytorch_mll
+
+from botorch.models.transforms import Normalize, Standardize
+from botorch.utils.transforms import unnormalize
+
 from pyfr.optimisers.modellers.base import BaseModeller
+
+torch.set_default_dtype(torch.double)
 
 class GPModeller(BaseModeller):
     name = 'gpmodeller'
 
     def __init__(self, intg, cfgsect):
         super().__init__(intg, cfgsect)
+
+        d = self.n_hparams
+        self._input_tf = Normalize(d=d)      # maps to [0,1]^d
+        self._input_un = unnormalize         # will invert the transform
+
+        self._outcome_tf = Standardize(m=1)  # maps to mean=0, std=1
+
         self.plot_name = intg.cfg.get(self.cfgsect, 'plot-name', None)
 
     def __call__(self):
@@ -68,13 +81,15 @@ class GPModeller(BaseModeller):
         """
         Constructs and optimizes the GP model.
         """
-        d = x_train.size(-1)
-        gp_model = SingleTaskGP(x_train, y_train, yvar_train,
-            input_transform=Normalize(d=d), outcome_transform=Standardize(m=1)
+        gp = SingleTaskGP(train_X=x_train,
+                          train_Y=y_train,
+                          train_Yvar=yvar_train,
+                          input_transform=self._input_tf,
+                          outcome_transform=self._outcome_tf
         )
-        mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
+        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
         fit_gpytorch_mll(mll)
-        return gp_model
+        return gp
 
     def update_model(self):
         """

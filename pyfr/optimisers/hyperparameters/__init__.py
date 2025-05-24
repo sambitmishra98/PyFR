@@ -9,6 +9,6 @@ from pyfr.optimisers.hyperparameters.composite import CompositeHyperparameter
 
 from pyfr.util import subclass_where
 
-def get_hyperparameter(name, intg, cfgsect):
+def get_hyperparameter(name, *args, **kwargs):
     cls = subclass_where(BaseHyperparameter, name=name)
-    return cls(intg, cfgsect)
+    return cls(*args, **kwargs)

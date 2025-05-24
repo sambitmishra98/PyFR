@@ -3,28 +3,30 @@ import numpy as np
 class BaseModeller:
     name = None
     
-    def __init__(self, intg, cfgsect):
+    def __init__(self, intg, cfgsect, suffix=None):
         self.cfgsect = cfgsect
+        
+        self.suffix = suffix
 
         # Find out objective and hyperparameters
         observer_name = intg.cfg.get(self.cfgsect, 'observer')
         for obs in intg.observers:
-            if obs.name == observer_name:
+            if obs.name == observer_name and obs.suffix == self.suffix:
                 self.observer = obs
                 break
         else:
-            raise ValueError(
-                f'Objective {observer_name} not setup in config file.')
+            raise ValueError(f'Set up observer-{observer_name}-{suffix}.')
  
         # Get the hyperparameter
         hparam_name = intg.cfg.get(self.cfgsect, 'hyperparameter')
         for hparam in intg.hyperparameters:
-            if hparam.name == hparam_name:
+            if hparam.name == hparam_name and hparam.suffix == self.suffix:
                 self.hparam = hparam
                 break
         else:
-            raise ValueError(
-                f'Hyperparameter {hparam_name} not setup in config file.')
+            raise ValueError(f'Set up hyperparameter-{hparam_name}-{suffix}.')
+
+        self.n_hparams = self.hparam.n_hparams
 
         self.interval = intg.cfg.getint(self.cfgsect, 'capture-interval', 0)
 

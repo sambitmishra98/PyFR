@@ -20,6 +20,7 @@ class BaseDualIntegrator(BaseIntegrator):
         self.plugins = self._get_plugins(initsoln)
         self.observers = self._get_observers()
         self.hyperparameters = self._get_hyperparameters()
+        self.hyperparameters += self._get_composite_hyperparameter()
         self.modellers = self._get_modellers()
         self.samplers = self._get_samplers()
 

@@ -5,6 +5,6 @@ from pyfr.optimisers.observers.dtaumax import PseudoTimeMax
 
 from pyfr.util import subclass_where
 
-def get_observer(name, intg, cfgsect):
+def get_observer(name, *args, **kwargs):
     cls = subclass_where(BaseObserver, name=name)
-    return cls(intg, cfgsect)
+    return cls(*args, **kwargs)

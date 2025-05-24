@@ -1,9 +1,16 @@
 import numpy as np
+
 import torch
-from botorch.acquisition import LogExpectedImprovement
+from botorch.acquisition import qLogNoisyExpectedImprovement
 from botorch.optim import optimize_acqf
 
+from botorch.acquisition.objective import GenericMCObjective
+
+
+
 from pyfr.optimisers.samplers.base import BaseSampler
+
+torch.set_default_dtype(torch.double)
 
 class BayesianOptimiser(BaseSampler):
     name = 'bayesianoptimiser'
@@ -18,14 +25,7 @@ class BayesianOptimiser(BaseSampler):
 
         self.hparam = self.modeller.hparam
 
-    def _acqf(self, best_f: torch.Tensor) -> LogExpectedImprovement:
-        """
-        Build the acquisition function for EI (minimisation).
-        """
-        gp = self.modeller.model
-        return LogExpectedImprovement(model=gp, best_f=best_f, maximize=False)
-
-    def _optimize_acqf(self, acqf: LogExpectedImprovement,
+    def _optimize_acqf(self, acqf: qLogNoisyExpectedImprovement,
                        bounds: torch.Tensor,
                        num_restarts: int,
                        raw_samples: int) -> torch.Tensor:
@@ -42,31 +42,55 @@ class BayesianOptimiser(BaseSampler):
         )
         return candidate.squeeze(0)
 
-    def suggest(self, *, num_restarts: int = 5, raw_samples: int = 20
-                ) -> torch.Tensor:
-        """
-        Suggest the next hyperparameter vector (d,) that maximises EI.
-        """
+    def suggest(self, *, num_restarts: int = 5, raw_samples: int = 20) -> torch.Tensor:
         gp = self.modeller.model
         if gp is None:
             raise RuntimeError("GP model not fitted; cannot suggest.")
 
-        # Bounds for optimisation: shape (2, d)
-        bounds = self.modeller.torch_bounds
+        # 1. Build baseline set of past Xs in normalized space
+        x_np = self.modeller.x_np
+        X_baseline = self.modeller._input_tf(
+            torch.from_numpy(x_np).to(dtype=torch.float64)
+        )  # (n, d) in [0,1]^d
 
-        # Current best objective value
-        best_val = torch.tensor([self.modeller.best_y],
-                                dtype=gp.train_targets.dtype,
-                                device=gp.train_targets.device)
+        if self.objective == 'minimise':
+            minimize_obj = GenericMCObjective(lambda Y, X: -Y[..., 0])
+        else:
+            minimize_obj = GenericMCObjective(lambda Y, X: Y[..., 0])
 
-        acq = self._acqf(best_val)
-        return self._optimize_acqf(acq, bounds, num_restarts, raw_samples)
+        # 2. Create acquisition function
+        acqf = qLogNoisyExpectedImprovement(model=gp, X_baseline = X_baseline,
+                                                      objective = minimize_obj)
+
+        # 3. Define bounds in unit cube
+        bounds = torch.stack([torch.zeros(self.n_hparams, dtype=torch.double),
+                               torch.ones(self.n_hparams, dtype=torch.double)])
+
+        # 4. Optimize acquisition
+        X_next, _ = optimize_acqf(acq_function=acqf, bounds=bounds, q=1,
+                                  num_restarts=num_restarts, 
+                                  raw_samples=raw_samples
+                                 )  # Tensor of shape (1, d)
+
+        # 5. Invert normalization back to original hyperparameter scale
+        x_next = self.modeller._input_un(X_next, 
+                                         bounds=self.modeller.torch_bounds)
+
+        return x_next.cpu().numpy().ravel()
 
     def hparam_candidate(self):
         """
         Convert torch tensor → NumPy float64 row‑vector so
         `hparam.hparam_pending_update` receives the same shape it produces.
         """
-        candidate = self.suggest().cpu().double().numpy()
+
+        cand = self.suggest()
+        # If it's already a NumPy array, just ensure dtype=float64
+        if isinstance(cand, np.ndarray):
+            candidate = cand.astype(np.float64)
+        else:
+            # Otherwise assume it's a Tensor
+            candidate = cand.cpu().double().numpy()
+
         print(f"hyperparameter change: {self.hparam.hparam} -> {candidate}")
         return candidate

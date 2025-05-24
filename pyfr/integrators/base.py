@@ -116,45 +116,156 @@ class BaseIntegrator:
 
         return plugins
 
-    def _get_observers(self):
+    def _get_observers(self, initsoln):
         observers = []
 
         for s in self.cfg.sections():
-            if (m := re.match(r'observer-(.+)', s)):
-                # Instantiate directly with (name, owner, cfg_section)
-                observers.append(get_observer(m.group(1), self, s))
+            if (m := re.match('observer-(.+?)(?:-(.+))?$', s)):
+                cfgsect, name, suffix = m[0], m[1], m[2]
+
+                args = (name, self, cfgsect)
+
+                data = {}
+                if initsoln is not None:
+                    # Get the plugin data stored in the solution, if any
+                    prefix = self.get_observer_data_prefix(name, suffix)
+                    for f in initsoln:
+                        if f.startswith(f'{prefix}/'):
+                            data[f.split('/')[2]] = initsoln[f]
+
+                # Instantiate
+                observers.append(get_observer(*args, **data))
 
         return observers
 
-    def _get_hyperparameters(self):
+#     def _get_observers(self):
+#         observers = []
+# 
+#         for s in self.cfg.sections():
+#             if (m := re.match(r'observer-(.+)', s)):
+#                 # Instantiate directly with (name, owner, cfg_section)
+#                 observers.append(get_observer(m.group(1), self, s))
+# 
+#         return observers
+
+    def _get_hyperparameters(self, initsoln):
         hyperparameters = []
 
         for s in self.cfg.sections():
-            if (m := re.match(r'hyperparameter-(.+)', s)):
-                # Instantiate directly with (name, owner, cfg_section)
-                hyperparameters.append(get_hyperparameter(m.group(1), self, s))
+            if (m := re.match('hyperparameter-(.+?)(?:-(.+))?$', s)):
+                cfgsect, name, suffix = m[0], m[1], m[2]
+
+                if name == 'composite':
+                    continue
+                args = (name, self, cfgsect, suffix)
+
+                data = {}
+                if initsoln is not None:
+                    # Get the plugin data stored in the solution, if any
+                    prefix = self.get_hyperparameter_data_prefix(name, suffix)
+                    for f in initsoln:
+                        if f.startswith(f'{prefix}/'):
+                            data[f.split('/')[2]] = initsoln[f]
+
+                # Instantiate
+                hyperparameters.append(get_hyperparameter(*args, **data))
 
         return hyperparameters
+
+#    def _get_hyperparameters(self):
+#        hyperparameters = []
+#
+#        for s in self.cfg.sections():
+#            if (m := re.match(r'hyperparameter-(.+)', s)):
+#
+#                if m.group(1) == 'composite':
+#                    continue
+#
+#                # Instantiate directly with (name, owner, cfg_section)
+#                hyperparameters.append(get_hyperparameter(m.group(1), self, s))
+#
+#        return hyperparameters
+
+    def _get_composite_hyperparameters(self, initsoln):
+        hyperparameters = []
+
+        for s in self.cfg.sections():
+            if (m := re.match('hyperparameter-(.+?)(?:-(.+))?$', s)):
+                cfgsect, name, suffix = m[0], m[1], m[2]
+
+                args = (name, self, cfgsect, suffix)
+
+                data = {}
+                if initsoln is not None:
+                    # Get the plugin data stored in the solution, if any
+                    prefix = self.get_hyperparameter_data_prefix(name, suffix)
+                    for f in initsoln:
+                        if f.startswith(f'{prefix}/'):
+                            data[f.split('/')[2]] = initsoln[f]
+
+                # Instantiate
+                hyperparameters.append(get_hyperparameter(*args, **data))
+
+        return hyperparameters
+
+#     def _get_composite_hyperparameter(self):
+#         hyperparameters = []
+# 
+#         for s in self.cfg.sections():
+#             if re.match(r'composite-hyperparameter', s):
+#                 # Instantiate directly with ('composite', owner, cfg_section)
+#                 hyperparameters.append(get_hyperparameter('composite', self, s))
+# 
+#         return hyperparameters
+# 
 
     def _get_modellers(self):
         modellers = []
 
         for s in self.cfg.sections():
-            if (m := re.match(r'modeller-(.+)', s)):
-                # Instantiate directly with (name, owner, cfg_section)
-                modellers.append(get_modeller(m.group(1), self, s))
+            if (m := re.match('modeller-(.+?)(?:-(.+))?$', s)):
+                cfgsect, name, suffix = m[0], m[1], m[2]
+
+                args = (name, self, cfgsect, suffix)
+
+                # Instantiate
+                modellers.append(get_modeller(*args))
 
         return modellers
+
+#     def _get_modellers(self):
+#         modellers = []
+# 
+#         for s in self.cfg.sections():
+#             if (m := re.match('modeller-(.+)', s)):
+#                 # Instantiate directly with (name, owner, cfg_section)
+#                 modellers.append(get_modeller(m.group(1), self, s))
+# 
+#         return modellers
 
     def _get_samplers(self):
         samplers = []
 
         for s in self.cfg.sections():
-            if (m := re.match(r'sampler-(.+)', s)):
-                # Instantiate directly with (name, owner, cfg_section)
-                samplers.append(get_sampler(m.group(1), self, s))
+            if (m := re.match('sampler-(.+?)(?:-(.+))?$', s)):
+                cfgsect, name, suffix = m[0], m[1], m[2]
+
+                args = (name, self, cfgsect, suffix)
+
+                # Instantiate
+                samplers.append(get_plugin(*args))
 
         return samplers
+
+#    def _get_samplers(self):
+#        samplers = []
+#
+#        for s in self.cfg.sections():
+#            if (m := re.match('sampler-(.+)', s)):
+#                # Instantiate directly with (name, owner, cfg_section)
+#                samplers.append(get_sampler(m.group(1), self, s))
+#
+#        return samplers
 
     def _run_plugins(self):
         wtimes = self._plugin_wtimes
@@ -256,6 +367,20 @@ class BaseIntegrator:
             return f'plugins/{name}-{suffix}'
         else:
             return f'plugins/{name}'
+
+    @staticmethod
+    def get_observer_data_prefix(name, suffix):
+        if suffix:
+            return f'observer/{name}-{suffix}'
+        else:
+            return f'observer/{name}'
+
+    @staticmethod
+    def get_hyperparameter_data_prefix(name, suffix):
+        if suffix:
+            return f'hyperparameter/{name}-{suffix}'
+        else:
+            return f'hyperparameter/{name}'
 
     def call_plugin_dt(self, tstart, dt):
         ta = self.tlist
