@@ -17,10 +17,16 @@ class BaseDualPseudoController(BaseDualPseudoIntegrator):
     def convmon(self, i, minniters, dt_fac=1):
         if i >= minniters - 1:
             # Compute the normalised residual
-            resid = self._resid(self._idxcurr, self._idxprev, dt_fac)
+            resid_l2 = self._resid(self._idxcurr, self._idxprev, dt_fac, 'l2')
+            resid_li = self._resid(self._idxcurr, self._idxprev, dt_fac, 'uniform')
 
-            self._update_pseudostepinfo(i + 1, resid)
-            return all(r <= t for r, t in zip(resid, self._pseudo_residtol))
+            # Update with both norms l2 and li
+            self._update_pseudostepinfo(i + 1, resid_l2+resid_li)
+
+            l2_converged = all(r <= t for r, t in zip(resid_l2, self._pseudo_residtol_l2))
+            li_converged = all(r <= t for r, t in zip(resid_li, self._pseudo_residtol_li))
+
+            return l2_converged and li_converged
         else:
             self._update_pseudostepinfo(i + 1, None)
             return False
@@ -28,12 +34,12 @@ class BaseDualPseudoController(BaseDualPseudoIntegrator):
     def commit(self):
         self.system.commit()
 
-    def _resid(self, rcurr, rold, dt_fac):
+    def _resid(self, rcurr, rold, dt_fac, pseudo_norm):
         comm, rank, root = get_comm_rank_root()
 
         # Get a set of kernels to compute the residual
         rkerns = self._get_reduction_kerns(rcurr, rold, method='resid',
-                                           norm=self._pseudo_norm)
+                                           norm=pseudo_norm)
 
         # Bind the dynmaic arguments
         for kern in rkerns:
@@ -43,7 +49,7 @@ class BaseDualPseudoController(BaseDualPseudoIntegrator):
         self.backend.run_kernels(rkerns, wait=True)
 
         # Pseudo L2 norm
-        if self._pseudo_norm == 'l2':
+        if pseudo_norm == 'l2':
             # Reduce locally (element types) and globally (MPI ranks)
             res = np.array([sum(e) for e in zip(*[r.retval for r in rkerns])])
             comm.Allreduce(mpi.IN_PLACE, res, op=mpi.SUM)

@@ -60,16 +60,21 @@ class BaseDualPseudoIntegrator(BaseCommon):
         self._subdims = [eles.convars.index(v) for v in eles.dualcoeffs]
 
         # Convergence tolerances
-        self._pseudo_residtol = residtol = []
+        self._pseudo_residtol_l2 = residtol_l2 = []
         for v in eles.convars:
             try:
-                residtol.append(cfg.getfloat(sect, f'pseudo-resid-tol-{v}'))
+                residtol_l2.append(cfg.getfloat(sect, f'pseudo-resid-tol-l2-{v}'))
             except NoOptionError:
-                residtol.append(cfg.getfloat(sect, 'pseudo-resid-tol'))
+                residtol_l2.append(cfg.getfloat(sect, 'pseudo-resid-tol-l2'))
 
-        self._pseudo_norm = cfg.get(sect, 'pseudo-resid-norm', 'l2')
-        if self._pseudo_norm not in {'l2', 'uniform'}:
-            raise ValueError('Invalid pseudo-residual norm')
+
+        # Convergence tolerances
+        self._pseudo_residtol_li = residtol_li = []
+        for v in eles.convars:
+            try:
+                residtol_li.append(cfg.getfloat(sect, f'pseudo-resid-tol-li-{v}'))
+            except NoOptionError:
+                residtol_li.append(cfg.getfloat(sect, 'pseudo-resid-tol-li'))
 
         # Pointwise kernels for the pseudo-integrator
         self.pintgkernels = defaultdict(list)
