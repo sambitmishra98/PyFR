@@ -18,14 +18,16 @@ class PseudoStatsPlugin(BaseSolnPlugin):
         self.stats = []
         self.tprev = intg.tcurr
 
-        fvars = ','.join(first(intg.system.ele_map.values()).convars)
+        fvars = first(intg.system.ele_map.values()).convars
 
         # MPI info
         comm, rank, root = get_comm_rank_root()
 
         # The root rank needs to open the output file
         if rank == root:
-            self.outf = init_csv(self.cfg, cfgsect, 'n,t,i,' + fvars)
+            self.outf = init_csv(self.cfg, cfgsect, 'n,t,i,'
+                                         + ','.join(['l2-' + f for f in fvars]
+                                                  + ['li-' + f for f in fvars]))
         else:
             self.outf = None
 
