@@ -268,7 +268,9 @@ class _AscentRenderer:
         self._init_fields(adapter, adapter.cfgsect)
         self._init_scenes(adapter, adapter.cfgsect)
         self._init_pipelines(adapter, adapter.cfgsect)
-
+        # Ensure our 'partition' field is marked as written so meshes know it's defined
+        self._fields_write.add('partition')
+        # Validate that all fields used have been defined
         if not self._fields_read.issubset(self._fields_write):
             raise AscentError('Not all fields used are defined')
 
@@ -305,7 +307,9 @@ class _AscentRenderer:
         xd = xd[..., rgn].transpose(1, 2, 0)
         ndims, neles, nsvpts = xd.shape
 
-        mesh_n[f'{d_str}/state/domain_id'] = rank
+        dom_id = rank*len(adapter.etypes) + adapter.etypes.index(etype)
+        mesh_n[f'{d_str}/state/domain_id'] = dom_id
+
         mesh_n[f'{d_str}/state/config/keyword'] = 'Config'
         mesh_n[f'{d_str}/state/config/data'] = adapter.scfg.tostr()
         mesh_n[f'{d_str}/state/mesh_uuid/keyword'] = 'Mesh_UUID'
@@ -325,6 +329,20 @@ class _AscentRenderer:
         sconn = np.tile(snodes, (neles, 1))
         sconn += (np.arange(neles)*nsvpts)[:, None]
         mesh_n[f'{e_str}/connectivity'] = sconn
+
+        # --------------------------------------------------------------
+        #  Add a scalar element-centred field “partition”
+        # --------------------------------------------------------------
+        # Number of subdivided cells
+        ncell = sconn.shape[0]
+        part  = np.full(ncell, rank, dtype=np.int64)
+        # Define partition as a domain-level field
+        fld = f'{d_str}/fields/partition'
+        mesh_n[f'{fld}/association'] = 'element'
+        mesh_n[f'{fld}/topology']    = 'mesh'
+        mesh_n[f'{fld}/values']      = part
+        # Mark field defined
+        self._fields_write.add('partition')
 
         # Handle elements which subdivide into more than one type of element
         if len(scells := set(subdiv.subcells)) > 1:
