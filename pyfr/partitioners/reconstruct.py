@@ -8,7 +8,6 @@ import numpy as np
 
 from pyfr.inifile import Inifile
 from pyfr.partitioners.base import BasePartitioner
-from pyfr.relocator.diffuser import LoadRelocator
 from pyfr.progress import NullProgressSequence
 
 from pyfr.relocator.metamesh import MetaMesh
