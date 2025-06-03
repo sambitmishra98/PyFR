@@ -458,49 +458,40 @@ def process_partition_relocate(args):
     init_mpi()
     comm, rank, root = get_comm_rank_root()
 
-    etypes = []
-    pwts   = []
-    if rank == root:
-        with (h5py.File(args.mesh, 'r+') as mesh):
-            etypes = list(mesh['eles'])
+    # ---------- ➊ parse the *absolute* element counts -------------------
+    if ':' in args.np or '*' in args.np:
+        def rep(m):            # expand 3*4 → 4:4:4 (like other sub-commands)
+            return ':'.join([m[1]]*int(m[2]))
+        counts = re.sub(r'(\d+)\*(\d+)', rep, args.np)
+        counts = [int(c) for c in counts.split(':')]
+    else:
+        counts = [int(args.np)]*comm.size
 
-            # Partition weights
-            if ':' in args.np or '*' in args.np:
-                def psub(m): return ':'.join([m[1]]*int(m[2]))
-                pwts = re.sub(r'(\d+)\*(\d+)', psub, args.np)
-                pwts = [int(w) for w in pwts.split(':')]
-            else:
-                pwts = [1]*int(args.np)
+    counts = comm.bcast(counts, root=root)   # make every rank aware
 
-    etypes = comm.bcast(etypes, root=root)
-    pwts   = comm.bcast(pwts  , root=root)
-
-    if comm.size < 2:
-        raise ValueError('Parallel diffusion expects ranks > 1.')
-
+    # ---------- ➋ read the existing mesh partition ---------------------
     reader = NativeReader(args.mesh, pname=args.name)
     read_only_mesh = reader.mesh
     reader.close()
 
-    # Reconstruct the partitioning used in the solution
-    vparts = reconstruct_by_relocation(read_only_mesh, args.progress)
+    # ---------- ➌ relocate to the requested counts ---------------------
+    vparts = reconstruct_by_relocation(read_only_mesh, counts, args.progress)
 
+    # ---------- ➍ write out a *new* partitioning on the root rank -------
     if rank == root:
         with args.progress.start('Repartition'):
-            if rank == root:
-                with (h5py.File(args.mesh, 'r+') as mesh):
-                    # Check it does not already exist unless --force is given
-                    if args.dpname in mesh['partitionings'] and not args.force:
-                        raise ValueError('Partitioning already exists; use -f to replace')
+            with h5py.File(args.mesh, 'r+') as mesh:
 
-                    con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
+                if args.dpname in mesh['partitionings'] and not args.force:
+                    raise ValueError('Partitioning already exists; use -f to replace')
 
-                    pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps,
-                                                                con, vparts)
+                con, ecurved, edisps, _ = \
+                    BasePartitioner.construct_global_con(mesh)
 
-                    # Write out the new partitioning
-                    with args.progress.start('Write partitioning'):
-                            write_partitioning(mesh, args.dpname, pinfo)
+                pinfo = BasePartitioner.construct_partitioning(
+                    mesh, ecurved, edisps, con, vparts)
+
+                write_partitioning(mesh, args.dpname, pinfo)
 
 
 def process_partition_remove(args):

@@ -6,7 +6,7 @@ import numpy as np
 
 from pyfr.mpiutil import get_comm_rank_root, mpi
 from pyfr.readers.native import _Mesh
-from pyfr.relocator.metameshes import _MetaMesh, _MetaMeshes, MeshInterConnector
+from pyfr.relocator.metamesh import MetaMesh
 
 # Fix seed
 BASE_TAG = 47
@@ -19,11 +19,11 @@ class LoadRelocator():
     def __init__(self, base_mesh: _Mesh, *,
                  bmmesh = 'base', cmmesh = 'compute', cnmmesh = 'compute_new'):
 
-        self.mm = _MetaMeshes()
-        self.mm.add_mmesh(bmmesh, _MetaMesh.from_mesh(base_mesh), if_base=True)
+        self.mm = MetaMesh()
+        self.mm.add_mmesh(bmmesh, MetaMesh.from_mesh(base_mesh), if_base=True)
 
         # Print mmesh to check if it is added
-        print(_MetaMesh.from_mesh(base_mesh).nelems, flush=True)
+        print(MetaMesh.from_mesh(base_mesh).nelems, flush=True)
 
         self.mm.copy_mmesh(bmmesh, cmmesh)
         self.mm.copy_mmesh(cmmesh, cnmmesh)
@@ -234,7 +234,7 @@ class LoadRelocator():
         relocated_dict = dest_mmesh.interconnector[src_mesh_name].relocate(edict)
         return dest_mmesh.postproc_edict(relocated_dict, edim=edim)
 
-    def get_move_to_nrank(self, nelems_diff: int, mesh: _MetaMesh):
+    def get_move_to_nrank(self, nelems_diff: int, mesh: MetaMesh):
         '''
             Save element movements as a matrix, 
             Elements move from row-rank to column-rank.
