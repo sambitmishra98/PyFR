@@ -29,6 +29,7 @@ def _common_plugin_prop(attr):
 class BaseIntegrator:
     def __init__(self, backend, mesh, initsoln, cfg):
         self.backend = backend
+        self.mesh = mesh
         self.isrestart = initsoln is not None
         self.cfg = cfg
         self.prevcfgs = {f: initsoln[f].tostr() for f in initsoln or []
@@ -204,6 +205,53 @@ class BaseIntegrator:
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-wait-times', f'rhs-graph-{i}-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
+
+        # Mesh specifications
+        for k, v in self.mesh_specifications().items():
+            stats.set('mesh', k, v)
+
+    def mesh_specifications(self):
+        """
+            [mesh]
+            nelems-<etype> = {c_0},{c_1}, … ,{c_{P-1}}
+            interfaces-mpi = {f_00},{f_01}, … ,{f_0(P-1)},{f_10}, … ,{f_(P-1)(P-1)}
+        """
+        from itertools import chain
+
+        comm, rank, _ = get_comm_rank_root()
+        P             = comm.size
+        m             = self.mesh        # local alias
+
+        # Elements per element-type
+        loc_nelems = {et: len(m.eidxs.get(et, [])) for et in m.etypes}
+        all_nelems = comm.allgather(loc_nelems)
+
+        etypes = sorted({et for d in all_nelems for et in d})
+
+        specs = {}
+        for et in etypes:
+            counts = [all_nelems[r].get(et, 0) for r in range(P)]
+            specs[f'nelems-{et}'] = ','.join(map(str, counts))
+
+        # MPI interfaces btw ranks
+        # (i, j) --> MPI faces btw ranks i and j
+        row = [0]*P
+        for dest, arr in m.con_p.items():       # dest → ndarray of faces
+            row[dest] = len(arr)
+        # keep 0 on the diagonal by construction
+
+        # gather every row  →  list[list[int]] shape P×P
+        mat = comm.allgather(row)
+
+        # flatten row-major
+        flat = list(chain.from_iterable(mat))
+        specs['interfaces-mpi'] = ','.join(map(str, flat))
+
+        # ------------------------------------------------ debug print ------
+        print(f"[mesh_specifications] rank={rank} "
+            f"nelems={loc_nelems} mpi_row={row}")
+
+        return specs
 
     @property
     def cfgmeta(self):
