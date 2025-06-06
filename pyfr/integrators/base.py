@@ -196,6 +196,10 @@ class BaseIntegrator:
         stats.set('solver-time-integrator', 'nacptsteps', self.nacptsteps)
         stats.set('solver-time-integrator', 'nrjctsteps', self.nrjctsteps)
 
+        # Mesh specifications
+        for k, v in self.mesh_specifications().items():
+            stats.set('mesh', k, v)
+
         # MPI wait times
         if self.cfg.getbool('backend', 'collect-wait-times', False):
             comm, rank, root = get_comm_rank_root()
@@ -206,9 +210,28 @@ class BaseIntegrator:
                     stats.set('backend-wait-times', f'rhs-graph-{i}-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
 
-        # Mesh specifications
-        for k, v in self.mesh_specifications().items():
-            stats.set('mesh', k, v)
+    @property
+    def cfgmeta(self):
+        cfg = self.cfg.tostr()
+
+        if self.prevcfgs:
+            ret = dict(self.prevcfgs, config=cfg)
+
+            if cfg != ret[f'config-{len(self.prevcfgs) - 1}']:
+                ret[f'config-{len(self.prevcfgs)}'] = cfg
+
+            return ret
+        else:
+            return {'config': cfg, 'config-0': cfg}
+
+    def _check_abort(self):
+        comm, rank, root = get_comm_rank_root()
+
+        if scal_coll(comm.Allreduce, int(self._abort), op=mpi.LOR):
+            self._finalise_plugins()
+
+            reason = self._abort_reason
+            sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
 
     def mesh_specifications(self):
         """
@@ -253,28 +276,6 @@ class BaseIntegrator:
 
         return specs
 
-    @property
-    def cfgmeta(self):
-        cfg = self.cfg.tostr()
-
-        if self.prevcfgs:
-            ret = dict(self.prevcfgs, config=cfg)
-
-            if cfg != ret[f'config-{len(self.prevcfgs) - 1}']:
-                ret[f'config-{len(self.prevcfgs)}'] = cfg
-
-            return ret
-        else:
-            return {'config': cfg, 'config-0': cfg}
-
-    def _check_abort(self):
-        comm, rank, root = get_comm_rank_root()
-
-        if scal_coll(comm.Allreduce, int(self._abort), op=mpi.LOR):
-            self._finalise_plugins()
-
-            reason = self._abort_reason
-            sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
 
 
 class BaseCommon:
