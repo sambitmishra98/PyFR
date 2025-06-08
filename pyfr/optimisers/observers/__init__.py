@@ -1,6 +1,6 @@
 from pyfr.optimisers.observers.base import BaseObserver, BaseObjective
 
-from pyfr.optimisers.observers.computetimedifference import ComputeTimeDifference
+from pyfr.optimisers.observers.rankcomputetime import RankComputeTime
 from pyfr.optimisers.observers.dtaumax import PseudoTimeMax
 
 from pyfr.util import subclass_where

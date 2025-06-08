@@ -1,5 +1,3 @@
-import statistics
-
 import numpy as np
 
 from pyfr.mpiutil import get_comm_rank_root
@@ -16,7 +14,7 @@ class BaseObserver:
         self.suffix = suffix
 
         self.tprev = intg.tcurr
-        self._hist = np.empty((0, 4), dtype=np.float64)
+        self._hist = []
 
         # Initialise 
         self.cost_list = []
@@ -29,29 +27,23 @@ class BaseObserver:
         comm, rank, root = get_comm_rank_root()
 
         if rank == root and intg.cfg.hasopt(cfgsect, 'file'):
+            cols = [f'mean-{r}' for r in range(comm.size)] + \
+                   [f'sem-{r}'  for r in range(comm.size)]
             self.outf = init_csv(intg.cfg, cfgsect, 
-                                header='tprev,tcurr,count,mean,stdev,median')
+                                 header='tprev,tcurr,' + ','.join(cols),)
         else:
             self.outf = None
 
     def __call__(self, intg):
-
-        self.accumulate_cost(intg)
-
         if self.__update_condition(intg):
-            # Config change always performed by sampler
-            # If no sampler, periodically print to csv for offline optimisation            
-
-            stats = self.calculate_cost_stats()
-            self._hist = np.append(self._hist, np.array([stats]), axis=0)
+            stats = self.allgather_mean_sem(intg)   # flat list [means… sems…]
+            self._hist.append(stats)                # just append to Python list
 
             if self.outf:
                 print(self.tprev, intg.tcurr, *stats, sep=',', file=self.outf)
                 self.outf.flush()
 
-            self.cost_list = []
-
-            # Update the previous time
+            # Update
             self.tprev = intg.tcurr
 
     def __update_condition(self, intg):
@@ -83,28 +75,7 @@ class BaseObserver:
     
     @interval.setter
     def interval(self, y):
-        # Skip first 30% of the interval
-        self._skip_initial = int(0.5 * y)
-
         self._interval = y
-
-    def accumulate_cost(self, intg):
-        self.cost_list.append(self.observation(intg))
-
-    def calculate_cost_stats(self):
-        clist = self.cost_list[self._skip_initial:]
-
-        mean = statistics.mean(clist) if clist else 0
-        stdev = statistics.stdev(clist, mean) if len(clist) >= 2 else 0
-        median = statistics.median(clist) if clist else 0
-
-        stats = [len(self.cost_list), mean, stdev, median]
-
-        return stats
-
-    @property
-    def stats_hist(self) -> np.ndarray[np.float64]:
-        return self._hist
 
     def reset_cost(self):
         self.cost_list = []

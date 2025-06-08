@@ -138,16 +138,6 @@ class BaseIntegrator:
 
         return observers
 
-#     def _get_observers(self):
-#         observers = []
-# 
-#         for s in self.cfg.sections():
-#             if (m := re.match(r'observer-(.+)', s)):
-#                 # Instantiate directly with (name, owner, cfg_section)
-#                 observers.append(get_observer(m.group(1), self, s))
-# 
-#         return observers
-
     def _get_hyperparameters(self, initsoln):
         hyperparameters = []
 
@@ -172,20 +162,6 @@ class BaseIntegrator:
 
         return hyperparameters
 
-#    def _get_hyperparameters(self):
-#        hyperparameters = []
-#
-#        for s in self.cfg.sections():
-#            if (m := re.match(r'hyperparameter-(.+)', s)):
-#
-#                if m.group(1) == 'composite':
-#                    continue
-#
-#                # Instantiate directly with (name, owner, cfg_section)
-#                hyperparameters.append(get_hyperparameter(m.group(1), self, s))
-#
-#        return hyperparameters
-
     def _get_composite_hyperparameters(self, initsoln):
         hyperparameters = []
 
@@ -208,17 +184,6 @@ class BaseIntegrator:
 
         return hyperparameters
 
-#     def _get_composite_hyperparameter(self):
-#         hyperparameters = []
-# 
-#         for s in self.cfg.sections():
-#             if re.match(r'composite-hyperparameter', s):
-#                 # Instantiate directly with ('composite', owner, cfg_section)
-#                 hyperparameters.append(get_hyperparameter('composite', self, s))
-# 
-#         return hyperparameters
-# 
-
     def _get_modellers(self):
         modellers = []
 
@@ -233,16 +198,6 @@ class BaseIntegrator:
 
         return modellers
 
-#     def _get_modellers(self):
-#         modellers = []
-# 
-#         for s in self.cfg.sections():
-#             if (m := re.match('modeller-(.+)', s)):
-#                 # Instantiate directly with (name, owner, cfg_section)
-#                 modellers.append(get_modeller(m.group(1), self, s))
-# 
-#         return modellers
-
     def _get_samplers(self):
         samplers = []
 
@@ -253,19 +208,9 @@ class BaseIntegrator:
                 args = (name, self, cfgsect, suffix)
 
                 # Instantiate
-                samplers.append(get_plugin(*args))
+                samplers.append(get_sampler(*args))
 
         return samplers
-
-#    def _get_samplers(self):
-#        samplers = []
-#
-#        for s in self.cfg.sections():
-#            if (m := re.match('sampler-(.+)', s)):
-#                # Instantiate directly with (name, owner, cfg_section)
-#                samplers.append(get_sampler(m.group(1), self, s))
-#
-#        return samplers
 
     def _run_plugins(self):
         wtimes = self._plugin_wtimes
