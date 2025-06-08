@@ -270,10 +270,6 @@ class BaseIntegrator:
         flat = list(chain.from_iterable(mat))
         specs['interfaces-mpi'] = ','.join(map(str, flat))
 
-        # ------------------------------------------------ debug print ------
-        print(f"[mesh_specifications] rank={rank} "
-            f"nelems={loc_nelems} mpi_row={row}")
-
         return specs
 
 
