@@ -1,5 +1,6 @@
 from pyfr.optimisers.hyperparameters.base import BaseHyperparameter
 
+from pyfr.optimisers.hyperparameters.nelems import Nelems
 from pyfr.optimisers.hyperparameters.pmglastlevelsteps import PMGLastLevelSteps
 from pyfr.optimisers.hyperparameters.pmggroupedsteps import PMGGroupedSteps
 from pyfr.optimisers.hyperparameters.dtaumax import PseudoTimeMax
