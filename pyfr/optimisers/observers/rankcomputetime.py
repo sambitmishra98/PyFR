@@ -1,22 +1,30 @@
+# pyfr/optimisers/observers/rankcomputetime.py
 from collections import defaultdict
 import math
 import statistics
 
-from pyfr.optimisers.observers import BaseObjective
+from pyfr.optimisers.observers import BaseObserver
 from pyfr.mpiutil import get_comm_rank_root
 
-class RankComputeTime(BaseObjective):
+class RankComputeTime(BaseObserver):
     name = 'rankcomputetime'
-    objective = 'minimise'
 
-    def __init__(self, intg, cfgsect):
-        super().__init__(intg, cfgsect)
+    def __init__(self, intg, cfgsect, suffix=None):
+        super().__init__(intg, cfgsect, suffix)
 
-        # If wait-some not enabled, raise error
         if not intg.cfg.getbool('backend', 'collect-waitsome-times', False):
-            raise ValueError(
-                'rankcomputetime requires wait-some times collection.'
-                'Verify wait-split branch addition too. ')
+            raise RuntimeError('collect-waitsome-times must be True')
+
+    # initialise column names (mean-0 … sem-(N-1))
+    def _init_observer(self, intg):
+        comm, _, _ = get_comm_rank_root()
+        cols = ['tprev', 'tcurr'] + [f'mean-{r}' for r in range(comm.size)] + \
+                                    [f'sem-{r}'  for r in range(comm.size)]
+        self._init_history(len(cols), cols)
+
+    # compute one row
+    def _compute_row(self, intg):
+        return self.allgather_mean_sem(intg)   # list[float]
 
     def rhs_compute_times(self, intg):
         # Group together timings for graphs which are semantically equivalent
@@ -36,17 +44,11 @@ class RankComputeTime(BaseObjective):
 
     def compute_times(self, intg):
         """
-        Return a list of tuples (mean, sem) for all graphs.
-        This is used to compute the objective function.
+        List of tuples (mean, sem) by rank, summed across all graphs.
         """
         stats = self.rhs_compute_times(intg)
-
-        # mean overall is sum of means
         mean = sum(s[0] for s in stats)
-        
-        # sem overall is sqrt of sum of variances
         sem = math.sqrt(sum(s[1]**2 for s in stats)) if len(stats) > 1 else 0
-        
         return (mean, sem)
 
     def allgather_mean_sem(self, intg) -> list:

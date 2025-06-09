@@ -1,8 +1,5 @@
 # pyfr/optimisers/hyperparameters/nelems.py
-"""
-Hyper-parameter: number-of-elements per MPI rank (grouped).
-Author: Sambit Mishra (feature-wait-split branch)
-"""
+from __future__ import annotations
 
 import numpy as np
 from pyfr.mpiutil import get_comm_rank_root
@@ -10,50 +7,55 @@ from pyfr.optimisers.hyperparameters.base import BaseHyperparameter
 
 
 class Nelems(BaseHyperparameter):
+    """
+    Hyper-parameter: number-of-elements per MPI rank
+    (tuple[int] of length comm.size) One scalar integer hyper-parameter per rank.
+    """
     name = 'nelems'
 
-    def __init__(self, intg, cfgsect):
-        super().__init__(intg, cfgsect)
+    # ------------------------------------------------------------------ #
+    def __init__(self, intg, cfgsect: str, suffix: str | None = None):
+        super().__init__(intg, cfgsect, suffix)
 
-        # Original element counts (tuple[int]  length = comm.size)
-        self._nelems_base = tuple(intg.nelems)
-
+        # ------------------------------------------------------------------
+        # Basic consistency checks
         comm, rank, _ = get_comm_rank_root()
+
         if self.n_hparams != comm.size:
-            raise ValueError(f"[{self.name}] nhparams != {comm.size} ranks. ")
+            raise ValueError(f'[nelems] n-hyperparameters ({self.n_hparams}) '
+                             f'must equal MPI size ({comm.size})')
 
-
-        if self.bounds.shape[1] != comm.size:
-            raise ValueError(f"[{self.name}] bounds tuples "
-                             f"must cover every rank ({comm.size})")
+        if self.bounds.shape[1] != comm.size:      # bounds = (4, d)
+            raise ValueError('[nelems] soft/hard bounds must specify a pair '
+                             'for each rank')
 
         if intg.nelems is None:
-            raise ValueError(
-                f"Integrator {intg.name} must have 'nelems' set before "
-                f"hyperparameter '{self.name}' can be used."
-            )
+            raise RuntimeError('Integrator must expose .nelems before '
+                               'nelems hyper-parameter can operate')
+
+        # Keep a copy of the original distribution (may be handy later)
+        self._nelems_base = tuple(intg.nelems)
 
     @property
-    def nelems_per_rank(self) -> tuple[int, ...]:
-        ms = self.intg.mesh_specifications()
-        # gather keys once; might be 'nelems-tri', 'nelems-quad', ...
-        cols = [list(map(int, ms[k].split(',')))
-                for k in ms if k.startswith('nelems-')]
-        return tuple(int(np.sum(cols, axis=0)[i]) for i in range(len(cols[0])))        
+    def param(self) -> tuple[int, ...]:
+        """Read-only."""
+        return self.intg.nelems
 
     @property
-    def param(self):
-        return self.nelems_per_rank
-
-    @property
-    def hparam(self):
+    def hparam(self) -> tuple[int, ...]:
+        """Alias for tuning"""
         return self.intg.nelems
 
     @hparam.setter
     def hparam(self, value):
-        if len(value) != self.n_hparams:
-            raise ValueError("Length of value must equal number of ranks")
-        if any((v < 0) or (not float(v).is_integer()) for v in value):
-            raise ValueError("All element counts must be non-negative ints")
+        value = np.asarray(value, dtype=float)
+
+        if value.size != self.n_hparams:
+            raise ValueError('length mismatch: expected '
+                             f'{self.n_hparams}, got {value.size}')
+        if np.any(value < 0) or np.any(value != np.floor(value)):
+            raise ValueError('element counts must be non-negative integers')
+
+        # Apply
         self.intg.nelems = tuple(int(v) for v in value)
-        self.config_change = True
+        self.config_change = True            # shared flag → integrator notices

@@ -1,4 +1,4 @@
-from pyfr.optimisers.observers.base import BaseObserver, BaseObjective
+from pyfr.optimisers.observers.base import BaseObserver
 
 from pyfr.optimisers.observers.rankcomputetime import RankComputeTime
 from pyfr.optimisers.observers.dtaumax import PseudoTimeMax

@@ -84,6 +84,16 @@ class BaseIntegrator:
         self._abort = False
         self._abort_reason = ''
 
+        mesh_specs = self.mesh_specifications()        # dict[str,str]
+        per_type = [
+            np.fromstring(v, sep=',', dtype=int)    # → array(len = comm.size)
+            for k, v in mesh_specs.items() if k.startswith('nelems-')
+        ]
+        if not per_type:
+            raise RuntimeError('No nelems-* keys found in mesh specifications')
+        total = np.sum(per_type, axis=0)            # shape (comm.size,)
+        self.nelems = tuple(int(x) for x in total)
+
     def plugin_abort(self, reason):
         self._abort = True
         self._abort_reason = self._abort_reason or reason
@@ -147,6 +157,7 @@ class BaseIntegrator:
 
                 if name == 'composite':
                     continue
+
                 args = (name, self, cfgsect, suffix)
 
                 data = {}
@@ -168,6 +179,9 @@ class BaseIntegrator:
         for s in self.cfg.sections():
             if (m := re.match('hyperparameter-(.+?)(?:-(.+))?$', s)):
                 cfgsect, name, suffix = m[0], m[1], m[2]
+
+                if name != 'composite':
+                    continue
 
                 args = (name, self, cfgsect, suffix)
 

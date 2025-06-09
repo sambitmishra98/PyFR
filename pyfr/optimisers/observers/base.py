@@ -1,90 +1,69 @@
+# pyfr/optimisers/observers/base.py
+from __future__ import annotations
+
 import numpy as np
-
 from pyfr.mpiutil import get_comm_rank_root
-from pyfr.plugins.base import init_csv
+from pyfr.optimisers.base import HistoryMixin, FlagSyncMixin
 
-class BaseObserver:
-    name = None
-    objective = None
-    
-    def __init__(self, intg, cfgsect, suffix=None):
-        self.cfg = intg.cfg
-        self.cfgsect = cfgsect
-        
-        self.suffix = suffix
 
+class BaseObserver(FlagSyncMixin, HistoryMixin):
+    """
+    Every concrete observer computes one *row* (often per-MPI-rank data)
+    whenever `should_capture()` is true.
+
+    Row layout is decided by the child class; it must call
+    `self._init_history(n_cols, colnames)` once in __init__.
+    """
+    name = None               # plug-in identifier
+
+    # .................................................................
+    def __init__(self, intg, cfgsect: str, suffix: str | None = None):
+        FlagSyncMixin.__init__(self, intg, suffix)
+        self.cfg, self.cfgsect, self.suffix = intg.cfg, cfgsect, suffix
         self.tprev = intg.tcurr
-        self._hist = []
 
-        # Initialise 
-        self.cost_list = []
-        self.config_prepare = False 
-        self.config_change = False 
+        # let the concrete class tell us the column names right now
+        self._init_observer(intg)          # <── MUST call _init_history(...)
 
-        self.interval = self.cfg.getint(self.cfgsect, 'capture-interval', 0)
-
-        # MPI info
-        comm, rank, root = get_comm_rank_root()
-
-        if rank == root and intg.cfg.hasopt(cfgsect, 'file'):
-            cols = [f'mean-{r}' for r in range(comm.size)] + \
-                   [f'sem-{r}'  for r in range(comm.size)]
-            self.outf = init_csv(intg.cfg, cfgsect, 
-                                 header='tprev,tcurr,' + ','.join(cols),)
+        # CSV ----------------------------------------------------------
+        comm, rank, _ = get_comm_rank_root()
+        if rank == 0 and intg.cfg.hasopt(cfgsect, 'file'):
+            self._csv = self.init_csv(intg.cfg, cfgsect,
+                                      header=','.join(self._cols_hdr))
         else:
-            self.outf = None
+            self._csv = None
+
+        self._init_observer(intg)
+
+    # -----------------------------------------------------------------
+    # Public entry point called by the integrator every time-step
 
     def __call__(self, intg):
-        if self.__update_condition(intg):
-            stats = self.allgather_mean_sem(intg)   # flat list [means… sems…]
-            self._hist.append(stats)                # just append to Python list
+        """
+        Concrete observer must implement:
+            row = self._compute_row(intg)   (returns list / tuple of floats)
+        """
+        if not self.should_capture(intg.nsteps):
+            return
 
-            if self.outf:
-                print(self.tprev, intg.tcurr, *stats, sep=',', file=self.outf)
-                self.outf.flush()
+        row_body = self._compute_row(intg)
+        row = [self.tprev, intg.tcurr, *row_body]
+        self.append_row(row)
 
-            # Update
-            self.tprev = intg.tcurr
+        # dump immediately (cheap – one row only)
+        if self._csv:
+            print(*row, sep=',', file=self._csv)
+            self._csv.flush()
 
-    def __update_condition(self, intg):
+        self.tprev = intg.tcurr      # advance window
 
-        if self.interval == 0:
-            return self.config_prepare
-        else:
-            return intg.nsteps % self.interval == 0
+    # -----------------------------------------------------------------
+    # Child classes must override the following two hooks
 
-    @property
-    def config_change(self):
-        return self._config_change
+    def _init_observer(self, intg):
+        """Called once from the concrete observer __init__ if needed."""
+        pass
 
-    @config_change.setter
-    def config_change(self, y):
-        self._config_change = y
-
-    @property
-    def config_prepare(self):
-        return self._config_prepare
-    
-    @config_prepare.setter
-    def config_prepare(self, y):
-        self._config_prepare = y
-
-    @property
-    def interval(self):
-        return self._interval
-    
-    @interval.setter
-    def interval(self, y):
-        self._interval = y
-
-    def reset_cost(self):
-        self.cost_list = []
-
-class BaseObjective(BaseObserver):
-
-    def __init__(self, intg, cfgsect):
-        super().__init__(intg, cfgsect)
-
-        # Get the objective function
-        if self.objective not in ['minimise', 'maximise', 'equalise']:
-            raise ValueError(f'Invalid objective: {self.objective}')
+    def _compute_row(self, intg) -> list[float]:
+        """Return the numeric row to be stored/written."""
+        raise NotImplementedError('observer must implement _compute_row')
