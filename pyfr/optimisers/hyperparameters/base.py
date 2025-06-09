@@ -15,16 +15,8 @@ from pyfr.optimisers.base import HistoryMixin, FlagSyncMixin, BoundsMixin
 
 
 class BaseHyperparameter(FlagSyncMixin, BoundsMixin, HistoryMixin):
-    """
-    Concrete hyper-parameters inherit from this and must expose
-        .param:  read-only
-        .hparam: updates intg
-    """
+    name: str = None
 
-    # ------------------------------------------------------------------ #
-    name: str = None           # override in subclasses
-
-    # ------------------------------------------------------------------ #
     def __init__(self, intg, cfgsect: str, suffix: str | None = None):
         # Shared flags
         FlagSyncMixin.__init__(self, intg, suffix)

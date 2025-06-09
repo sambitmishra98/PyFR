@@ -31,9 +31,9 @@ class GPModeller(BaseModeller):
             transforms=[Log(m=1), Standardize(m=1)]
         )
 
-        self.plot_name = intg.cfg.get(self.cfgsect, 'plot-name', None)
+        self.plot_name = intg.cfg.get(cfgsect, 'plot-name', None)
 
-        self.model_name = intg.cfg.get(self.cfgsect, 'model', 'singletaskgp')
+        self.model_name = intg.cfg.get(cfgsect, 'model', 'singletaskgp')
 
         if self.model_name not in ['singletask', 'saasfullybayesian']:
             raise ValueError(f"Unsupported model type: {self.model_name}")

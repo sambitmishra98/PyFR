@@ -1,52 +1,46 @@
 # pyfr/optimisers/base.py
 import csv
 import pathlib
-from typing import Tuple
 
 import numpy as np
 
 
+def find_instance(seq, name, suffix):
+    for obj in seq:
+        if obj.name == name and obj.suffix == suffix:
+            return obj
+
+        print(f"Checking {obj.name}-{obj.suffix} against {name}-{suffix}")
+
+    raise ValueError(f"Instance '{name}-{suffix}' not found. Existing: {seq}")
+
+
 class HistoryMixin:
     """
-    Tiny helper:  - fixed column count
-                  - .append_row()   (list-like)
-                  - .history        (NumPy array)
-                  - .dump_csv(path) (append-mode with auto-header)
+    Collects fixed-width rows and (optionally) dumps new ones to CSV.
     """
 
-    # ----------------------------------------------------------------- #
-    # public helpers
-
+    # ------------------------------------------------------------------ #
+    # setup
     def _init_history(self, n_cols: int, colnames: list[str] | None = None):
-        self._n_cols   = int(n_cols)
         self._cols_hdr = colnames or [f'col{i}' for i in range(n_cols)]
-        self._rows     = []                            # in-memory cache
+        self._rows: list[tuple] = []      # permanent
+        self._pending: list[tuple] = []   # temp
 
     def append_row(self, row):
-        if len(row) != self._n_cols:
-            raise ValueError(f'row has {len(row)} cols, expected {self._n_cols}')
-        self._rows.append(tuple(row))
+        tup = tuple(row)
+        self._rows.append(tup)
+        self._pending.append(tup)
 
     @property
-    def history(self) -> np.ndarray:
-        if not self._rows:
-            return np.empty((0, self._n_cols))
-        return np.asarray(self._rows, dtype=float)
-
-    # ----------------------------------------------------------------- #
-    # optional convenience I/O
+    def history(self):
+        return self._rows
 
     def dump_csv(self, filepath: str | pathlib.Path, *, flush=True):
-        """
-        Appends all *new* rows since the previous dump to <filepath>.
-        Creates a header automatically on first call / new file.
-        """
-        path = pathlib.Path(filepath)
-        # collect & reset buffer
-        rows, self._rows = self._rows, []
-        if not rows:
-            return                                  # nothing to write
+        if not self._pending:
+            return
 
+        path = pathlib.Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         new_file = not path.exists()
 
@@ -54,9 +48,11 @@ class HistoryMixin:
             w = csv.writer(f)
             if new_file:
                 w.writerow(self._cols_hdr)
-            w.writerows(rows)
+            w.writerows(self._pending)
             if flush:
                 f.flush()
+
+        self._pending.clear()
 
     def init_csv(self, cfg, cfgsect, header, *, filekey='file', headerkey='header'):
         # Determine the file path

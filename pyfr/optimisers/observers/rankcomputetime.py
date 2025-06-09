@@ -23,7 +23,7 @@ class RankComputeTime(BaseObserver):
         self._init_history(len(cols), cols)
 
     # compute one row
-    def _compute_row(self, intg):
+    def observation(self, intg):
         return self.allgather_mean_sem(intg)   # list[float]
 
     def rhs_compute_times(self, intg):

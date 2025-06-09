@@ -133,7 +133,7 @@ class BaseIntegrator:
             if (m := re.match('observer-(.+?)(?:-(.+))?$', s)):
                 cfgsect, name, suffix = m[0], m[1], m[2]
 
-                args = (name, self, cfgsect)
+                args = (name, self, cfgsect, suffix)
 
                 data = {}
                 if initsoln is not None:
