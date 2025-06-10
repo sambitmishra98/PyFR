@@ -25,6 +25,11 @@ class Nelems(BaseHyperparameter):
             raise ValueError(f'[nelems] n-hyperparameters ({self.n_hparams}) '
                              f'must equal MPI size ({comm.size})')
 
+        # If 1 rank simulation, then errro
+        if comm.size == 1:
+            raise ValueError('[nelems] cannot be used with a single rank '
+                             'simulation')
+
         if self.bounds.shape[1] != comm.size:      # bounds = (4, d)
             raise ValueError('[nelems] soft/hard bounds must specify a pair '
                              'for each rank')
@@ -55,6 +60,11 @@ class Nelems(BaseHyperparameter):
                              f'{self.n_hparams}, got {value.size}')
         if np.any(value < 0) or np.any(value != np.floor(value)):
             raise ValueError('element counts must be non-negative integers')
+
+        # Check sum of elements of each type remains the same before and after
+        if np.sum(value) != np.sum(self._nelems_base):
+            raise ValueError('Inconsistent total number of elements '
+                            f'({np.sum(value)} != {np.sum(self._nelems_base)})')
 
         # Apply
         self.intg.nelems = tuple(int(v) for v in value)

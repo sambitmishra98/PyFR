@@ -1,6 +1,7 @@
 from pyfr.optimisers.modellers.base import BaseModeller, EmptyModeller
 from pyfr.util import subclass_where
 
+from pyfr.optimisers.modellers.computetimeperelement import ComputeTimePerElementModeller
 from pyfr.optimisers.modellers.gpmodeller import GPModeller
 
 def get_modeller(name, *args, **kwargs):

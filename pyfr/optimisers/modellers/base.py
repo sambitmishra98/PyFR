@@ -21,8 +21,15 @@ class BaseModeller(FlagSyncMixin, BoundsMixin, HistoryMixin):
         self.hparam   = find_instance(intg.hyperparameters, hyp_name, suffix)
         self.n_hparams = self.hparam.n_hparams
 
+        colnames = self.initialise_csv_colnames()
+
         colnames = [f"h{i}" for i in range(self.n_hparams)] + ["y", "ystd"]
         self._init_history(self.n_hparams + 2, colnames=colnames)
+
+        # processed views – subclasses may fill these
+        self.X_processed: list[tuple] = []
+        self.Y_processed: list[tuple] = []
+        self.Ystd_processed: list[tuple] = []
 
         self.interval = self.intg.cfg.getint(cfgsect, "capture-interval", 0)
 
@@ -40,6 +47,9 @@ class BaseModeller(FlagSyncMixin, BoundsMixin, HistoryMixin):
                 f"interval={self.interval}",
                 flush=True,
             )
+
+    def initialise_csv_colnames(self):
+        return [f"h{i}" for i in range(self.n_hparams)] + ["y", "ystd"]
 
     @property
     def _best_candidate(self):
@@ -62,16 +72,25 @@ class BaseModeller(FlagSyncMixin, BoundsMixin, HistoryMixin):
         if not self.hparam.history or not self.observer.history:
             return
 
-        Xs = self.hparam.history[-1]
-        Ys = self.observer.history[-1][2:]
-        
-        self.append_row([*Xs, *Ys])
+        iteration_data = self.hparam.history[-1][:2]
+        X = self.hparam.history[-1][2:]
+        Y = self.observer.history[-1][2:]
+
+        x,y,s = self.process_model(X, Y)
+        self.X_processed.append(   x)
+        self.Y_processed.append(   y)
+        self.Ystd_processed.append(s)
+
+        self.append_row([*iteration_data, *x, *y, *s])
         
         if self._csv_path:
             self.dump_csv(self._csv_path, flush=True)
 
     def fit_model(self, x, y, ystd):
         raise NotImplementedError
+
+    def process_model(self, Xs, Ys):
+        NotImplementedError(f"Must implement process_model()!")
 
 class EmptyModeller(BaseModeller):
     name = "empty"

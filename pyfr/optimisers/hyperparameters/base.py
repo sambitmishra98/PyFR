@@ -1,7 +1,4 @@
 # pyfr/optimisers/hyperparameters/base.py
-"""
-Common base-class for all hyper-parameter helpers.
-"""
 
 from __future__ import annotations
 
@@ -50,25 +47,7 @@ class BaseHyperparameter(FlagSyncMixin, BoundsMixin, HistoryMixin):
         # (Optional) external sampler pushes into this list
         self._pending_updates: list[np.ndarray] = []
 
-    # ------------------------------------------------------------------ #
-    # expected from subclasses:
-
-    #   @property
-    #   def param(self)  -> tuple[float, ...]: ...
-
-    #   @property
-    #   def hparam(self): ...
-
-    #   @hparam.setter
-    #   def hparam(self, value): ...
-
-    # ------------------------------------------------------------------ #
     def __call__(self):
-        """
-        One call per integrator step:
-            1. capture row?  → append + dump
-            2. pending update? → apply
-        """
         nsteps = self.intg.nsteps
 
         if self.should_capture(nsteps):
@@ -79,13 +58,10 @@ class BaseHyperparameter(FlagSyncMixin, BoundsMixin, HistoryMixin):
 
         # ..............................................................
         if self._pending_updates:
-            cand = np.asarray(self._pending_updates.pop(0), dtype=float)
-            print(f'[HP-{self.name}] apply candidate {cand}', flush=True)
+            cand = self._pending_updates.pop(0)
+            print(f'[HP-{self.name}]: {self.param} --> {cand}', flush=True)
             self.hparam = cand
             self.config_change = True
-
-    # ------------------------------------------------------------------ #
-    # small utility kept for subclasses relying on grouping
 
     @staticmethod
     def condense_by_group(full: Sequence[float],

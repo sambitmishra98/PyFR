@@ -26,7 +26,7 @@ class BaseSampler(FlagSyncMixin, HistoryMixin):
         self.n_hparams = self.hparam.n_hparams
 
         # history = iteration, *hparams
-        header = ['iter'] + [f'h{i}' for i in range(self.n_hparams)]
+        header = [f'h{i}' for i in range(self.n_hparams)]
         self._init_history(len(header), header)
 
         # cadence
@@ -40,21 +40,16 @@ class BaseSampler(FlagSyncMixin, HistoryMixin):
                 self.cfg.get(cfgsect, 'file')
             ).with_suffix('.csv')
 
-        if rank == root:
-            print(f"[Sampler:init] {self.name}-{suffix or ''} "
-                  f"→ modeller={mname}-{suffix or ''}  interval={self.interval}",
-                  flush=True)
-
     def __call__(self):
         if not self.should_capture(self.intg.nsteps):
             return
 
-        if not self.hparam.history or not self.observer.history:
+        if not self.observer.history:
             return
 
         # comm, rank, root = get_comm_rank_root()
 
-        candidate = self.propose
+        candidate = self.sample()
 
         self.append_row([*candidate])
         if self.csv_path:
@@ -66,14 +61,12 @@ class BaseSampler(FlagSyncMixin, HistoryMixin):
         # flag chain
         self.config_prepare = True
 
-    @property
-    def propose(self) -> List[float]:
+    def sample(self) -> List[float]:
         raise NotImplementedError
 
 
 class EmptySampler(BaseSampler):
     name = 'empty'
 
-    @property
-    def propose(self):
+    def sample(self):
         return list(self.modeller._best_candidate or self.hparam.param)
