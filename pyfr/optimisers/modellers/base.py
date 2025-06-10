@@ -41,21 +41,18 @@ class BaseModeller(FlagSyncMixin, BoundsMixin, HistoryMixin):
                 flush=True,
             )
 
+    @property
     def _best_candidate(self):
         """
-        Return the hyper-parameter vector with the smallest y seen so far.
-        If no rows have been recorded yet, return None.
+        Return the hyper-parameter vector (tuple) that achieved
+        the *lowest* y so far.  None if no data yet.
         """
+        if not self.history:
+            return None
 
-        Xs = self.hparam.history
-        Ys = self.observer.history
-        # history row = [h0 … h_{d-1}, y, ystd]
-        best_X = min(
-            (Xs[i] for i in range(len(Xs)) if Ys[i][0] is not None),
-            key=lambda x: Ys[Xs.index(x)][0],
-            default=None
-        )
-        return best_X
+        d = self.n_hparams              # last two cols are y, ystd
+        best_row = min(self.history, key=lambda r: r[d])   # r[d] is y
+        return best_row[2:2+d]             # tuple(h0, h1, …)
 
     def __call__(self):
         if not self.should_capture(self.intg.nsteps):

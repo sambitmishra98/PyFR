@@ -8,18 +8,10 @@ from pyfr.optimisers.base import FlagSyncMixin, HistoryMixin, find_instance
 
 
 class BaseSampler(FlagSyncMixin, HistoryMixin):
-    """
-    Common base class for samplers (Bayesian, random, grid, …).
+    name: str | None = None
 
-    Sub-classes must override :meth:`propose` and may override :meth:`accept`.
-    """
-    name: str | None = None   # set in subclass
-
-    # ------------------------------------------------------------------ #
-    # construction
-    # ------------------------------------------------------------------ #
     def __init__(self, intg, cfgsect: str, suffix: Optional[str] = None):
-        super().__init__(intg, suffix)          # shared flags!
+        FlagSyncMixin.__init__(self, intg, suffix)
 
         self.intg     = intg
         self.cfg      = intg.cfg
@@ -29,6 +21,7 @@ class BaseSampler(FlagSyncMixin, HistoryMixin):
         # link to modeller & hyper-parameter
         mname = self.cfg.get(cfgsect, 'modeller')
         self.modeller = find_instance(intg.modellers, mname, suffix)
+        self.observer = self.modeller.observer
         self.hparam   = self.modeller.hparam
         self.n_hparams = self.hparam.n_hparams
 
@@ -52,52 +45,35 @@ class BaseSampler(FlagSyncMixin, HistoryMixin):
                   f"→ modeller={mname}-{suffix or ''}  interval={self.interval}",
                   flush=True)
 
-    # ------------------------------------------------------------------ #
-    # runtime entry
-    # ------------------------------------------------------------------ #
     def __call__(self):
-        # capture aligned via shared FlagSyncMixin.interval
         if not self.should_capture(self.intg.nsteps):
             return
 
-        comm, rank, root = get_comm_rank_root()
+        if not self.hparam.history or not self.observer.history:
+            return
 
-        if rank == root:
-            cand = self.propose()                     # subclass method
-            if len(cand) != self.n_hparams:
-                raise ValueError('proposed vector length mismatch')
+        # comm, rank, root = get_comm_rank_root()
 
-            # record + dump
-            self.append_row([self.intg.nsteps, *cand])
-            if self.csv_path:
-                self.dump_csv(self.csv_path, flush=True)
+        candidate = self.propose
 
-        else:
-            cand = None
-
-        # broadcast candidate to all ranks
-        cand = comm.bcast(cand, root=root)
+        self.append_row([*candidate])
+        if self.csv_path:
+            self.dump_csv(self.csv_path, flush=True)
 
         # queue the update for the hyper-parameter helper
-        self.hparam._pending_updates.append(cand)
+        self.hparam._pending_updates.append(candidate)
 
         # flag chain
-        self.config_prepare = True   # shared dict → modeller + HP see it
+        self.config_prepare = True
 
-    # ------------------------------------------------------------------ #
-    # API hooks
-    # ------------------------------------------------------------------ #
+    @property
     def propose(self) -> List[float]:
-        """Return a new hyper-parameter candidate (len = n_hparams)."""
         raise NotImplementedError
-
-    def accept(self, cand: List[float], loss_old: float, loss_new: float):
-        """Optional acceptance test (e.g., MCMC)."""
-        return True
 
 
 class EmptySampler(BaseSampler):
     name = 'empty'
 
+    @property
     def propose(self):
-        return list(self.modeller._best_candidate())
+        return list(self.modeller._best_candidate or self.hparam.param)
