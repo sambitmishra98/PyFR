@@ -6,8 +6,8 @@ from pyfr.optimisers.base import HistoryMixin, FlagSyncMixin
 
 class BaseObserver(FlagSyncMixin, HistoryMixin):
     name = None
+    objective = None
 
-    # .................................................................
     def __init__(self, intg, cfgsect: str, suffix: str | None = None):
         FlagSyncMixin.__init__(self, intg, suffix)
         self.cfg, self.cfgsect, self.suffix = intg.cfg, cfgsect, suffix
@@ -17,12 +17,10 @@ class BaseObserver(FlagSyncMixin, HistoryMixin):
 
         comm, rank, root = get_comm_rank_root()
         if rank == 0 and intg.cfg.hasopt(cfgsect, 'file'):
-            self._csv = self.init_csv(intg.cfg, cfgsect,
+            self._csv = self.init_csv(intg.cfg, cfgsect, 
                                       header=','.join(self._cols_hdr))
         else:
             self._csv = None
-
-        self._init_observer(intg)
 
     def __call__(self, intg):
         if not self.should_capture(intg.nsteps):
