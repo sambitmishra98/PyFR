@@ -73,7 +73,7 @@ class BaseSystem:
         backend.commit()
 
         # Collect compute-time 
-        self.collect_ctime = 'observer-computetimedifference' in cfg.sections()
+        self.collect_ctime = 'observer-onerankcomputetime' in cfg.sections()
 
         if self.collect_ctime:
             self.ctimediff = []

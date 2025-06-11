@@ -1,5 +1,6 @@
 from pyfr.optimisers.observers.base import BaseObserver
 
+from pyfr.optimisers.observers.onerankcomputetime import OneRankComputeTime
 from pyfr.optimisers.observers.rankcomputetime import RankComputeTime
 from pyfr.optimisers.observers.rankwaittime import RankWaitTime
 from pyfr.optimisers.observers.dtaumax import PseudoTimeMax
