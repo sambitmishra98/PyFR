@@ -1,7 +1,7 @@
 from pyfr.plugins.ascent import AscentPlugin
 from pyfr.plugins.base import (BaseCLIPlugin, BasePlugin, BaseSolnPlugin,
                                BaseSolverPlugin)
-from pyfr.plugins.benchmark import BenchmarkPlugin
+from pyfr.plugins.benchmark import BenchmarkCLI
 from pyfr.plugins.dtstats import DtStatsPlugin
 from pyfr.plugins.fluidforce import FluidForcePlugin
 from pyfr.plugins.fwh import FWHPlugin
