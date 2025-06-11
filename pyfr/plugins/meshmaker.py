@@ -259,19 +259,6 @@ $EndPhysicalNames
             ele, nele = self.gmsh_boundaries_hex(nx0, nx, ny0, ny, nz0, nz, ele, nele)
             ele, nele = self.gmsh_elements_hex(  nx0, nx, ny0, ny, nz0, nz, ele, nele)
 
-        elif etype == 'hexpyr':
-            nz2 = nvertices//2 + 1 
-            ele, nele = self.gmsh_boundaries_hex(nx0, nx,      ny0, ny,      nz0, nz2,      ele, nele, boundaries = [True, True, True, True, True, False])
-            ele, nele = self.gmsh_boundaries_pyr(nx0, nx,      ny0, ny,      nz2, nz ,      ele, nele, boundaries = [True, True, True, True, False, True])
-            ele, nele = self.gmsh_elements_hex(  nx0, nx,      ny0, ny,      nz0, nz2,      ele, nele)
-            ele, nele = self.gmsh_elements_pyr(  nx0, nx, nxL, ny0, ny, nyL, nz2, nz , nzL, ele, nele)
-
-        elif etype == 'pritet':
-            nz2 = nvertices//2 + 1 
-            ele, nele = self.gmsh_boundaries_pri(nx0, nx,      ny0, ny,      nz0, nz2,      ele, nele, boundaries = [True, True, True, True, True, False])
-            ele, nele = self.gmsh_boundaries_tet(nx0, nx,      ny0, ny,      nz2, nz ,      ele, nele, boundaries = [True, True, True, True, False, True])
-            ele, nele = self.gmsh_elements_pri(  nx0, nx,      ny0, ny,      nz0, nz2,      ele, nele)
-            ele, nele = self.gmsh_elements_tet(  nx0, nx, nxL, ny0, ny, nyL, nz2, nz , nzL, ele, nele)
         else:
             raise ValueError(f"Mesh type {etype} not recognized")
 
@@ -293,22 +280,66 @@ class MeshMakerCLI(BaseCLIPlugin):
         mp.add_argument('--length', type=float, help='Length of the domain (default is 2π)', default=6.28318530718)
         mp.add_argument('--overwrite', action='store_true', help='Overwrite existing mesh files')
         mp.add_argument('-l', '--lintol', type=float, default=1e-5, help='Linearization tolerance')
+        mp.add_argument('--silent', action='store_true', help='Suppress routine status messages')
+
+        # direct-mesh arguments (optional if --options given)
+        mp.add_argument('--etype',    choices=['tet','pri','pyr','hex'],
+                       help='Element type (no CSV)')
+        mp.add_argument('--order',    type=int, help='Polynomial order')
+        mp.add_argument('--dof',      type=float, help='Target total DoFs')
+        mp.add_argument('--nvertices', type=int, help='#vertices along an edge')
+        mp.add_argument('--partitions', nargs='*', type=int,
+                       help='Space-separated list of partition counts')
 
     @cli_external
     def generate_mesh_cli(self, args):
         # Check if CSV options file is provided
         if args.options:
             self.generate_meshes_from_csv(args)
-        else:
-            print("Error: '--options' must be specified to provide mesh parameters.")
+
+        #––– single-row path –––
+        elif not args.etype:
+            print("Need either --options CSV or (at minimum) --etype for single mesh.")
             sys.exit(1)
+        else:
+            # build a file name consistent with CSV convention
+            stem_parts = [
+                f"etype-{args.etype}",
+                f"order-{args.order}"          if args.order is not None else "",
+                f"dof-{self._nice(args.dof)}"  if args.dof   is not None else "",
+                f"nvert-{args.nvertices}"      if args.nvertices is not None else "",
+            ]
+            stem = '_'.join(filter(None, stem_parts))
+            outfile = f"{stem}.pyfrm"
+
+            mesh_args = argparse.Namespace(
+                etype       = args.etype,
+                order       = args.order,
+                dofs        = args.dof,
+                nvertices   = args.nvertices,
+                partitions  = args.partitions or [],
+                output      = outfile,
+                length      = args.length,
+                overwrite   = args.overwrite,
+                lintol      = args.lintol,
+                silent      = args.silent,
+            )
+            self.generate_single_mesh(mesh_args)
+
+    @staticmethod
+    def _nice(val):
+        """Return a clean string: 1e6 → 1000000, 3.0 → 3, others untouched."""
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
+        return str(val).strip()
+
 
     def generate_meshes_from_csv(self, args):
         # Read the CSV file into a pandas DataFrame
         df = pd.read_csv(args.options[0], sep=',', skipinitialspace=True, comment='#')
 
         # Filter columns that start with 'mesh:'
-        df_mesh = df.filter(regex='mesh:')
+        df_mesh = df.filter(regex='mesh:').copy()
         if df_mesh.empty:
             print("No 'mesh:' columns found in CSV file.")
             sys.exit(1)
@@ -316,7 +347,7 @@ class MeshMakerCLI(BaseCLIPlugin):
         # Generate file names based on mesh parameters
         df_mesh['file-name'] = df_mesh.apply(
             lambda row: '_'.join(
-                [f'{column.split(":")[1]}-{str(value).strip()}' for column, value in row.items() if not pd.isna(value) and column != 'mesh:partitions']) + '.pyfrm',
+                [f'{column.split(":")[1]}-{self._nice(value)}' for column, value in row.items() if not pd.isna(value) and column != 'mesh:partitions']) + '.pyfrm',
             axis=1
         )
 
@@ -333,8 +364,9 @@ class MeshMakerCLI(BaseCLIPlugin):
             etype = row.get('mesh:etype')
             order = int(row.get('mesh:order', 0))
             dofs = float(row.get('mesh:dof', 0))
-            partitions_list = group['mesh:partitions'].astype(int).tolist()
-
+            partitions_list = (group['mesh:partitions'].astype(int).tolist()
+                               if 'mesh:partitions' in group
+                               else [])
             # Create args namespace for this mesh
             mesh_args = argparse.Namespace(
                 etype=etype,
@@ -346,6 +378,7 @@ class MeshMakerCLI(BaseCLIPlugin):
                 length=args.length,
                 overwrite=args.overwrite,
                 lintol=args.lintol,
+                silent=args.silent,
             )
 
             # Generate the mesh
@@ -372,7 +405,8 @@ class MeshMakerCLI(BaseCLIPlugin):
                 order = args.order
                 # Calculate nvertices based on target dofs
                 nvertices = self.calculate_nvertices(etype, order, args.dofs)
-                print(f"Calculated nvertices: {nvertices} to achieve target DoFs: {args.dofs}")
+                if not args.silent:
+                    print(f"Calculated nvertices: {nvertices} to achieve target DoFs: {args.dofs}")
             else:
                 print("Error: Either 'nvertices' or 'dofs' must be specified.")
                 sys.exit(1)
@@ -447,8 +481,6 @@ class MeshMakerCLI(BaseCLIPlugin):
         elif element_type == 'pri':    dofs_per_ele =   ((p + 1) ** 2 * (p + 2))          // 2                         ; eles_per_subdom = 2
         elif element_type == 'hex':    dofs_per_ele =    (p + 1) ** 3                                                  ; eles_per_subdom = 1
         elif element_type == 'pyr':    dofs_per_ele =   ((p + 1) * (p + 2) * (2 * p + 3)) // 6                         ; eles_per_subdom = 6
-        elif element_type == 'hexpyr': dofs_per_ele = ((((p + 1) * (p + 2) * (2 * p + 3)) // 6) + ((p + 1) ** 3)) / 2  ; eles_per_subdom = (6 + 1) / 2
-        elif element_type == 'pritet': dofs_per_ele = ((((p + 1) ** 2 * (p + 2)) // 2) + ((p + 1) * (p + 2) * (p + 3)) // 6) / 2 ; eles_per_subdom = (2 + 12) / 2
         else: raise ValueError(f"Unknown element type: {element_type}")
         return dofs_per_ele * eles_per_subdom
 
@@ -457,7 +489,7 @@ class MeshMakerCLI(BaseCLIPlugin):
         dofs_per_subdom = self.calculate_dofs_per_element(order, etype)
         neles_total = dofs_aim / (fvars * dofs_per_subdom)
         nedgeints_calc = neles_total ** (1 / 3)
-        nedgeints = int(np.floor(nedgeints_calc))
+        nedgeints = max(1, int(round(nedgeints_calc)))
         nvertices = nedgeints + 1
 
         if nvertices < 2:
