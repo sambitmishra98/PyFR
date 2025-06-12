@@ -270,8 +270,10 @@ class BaseIntegrator:
         flat = list(chain.from_iterable(mat))
         specs['interfaces-mpi'] = ','.join(map(str, flat))
 
-        return specs
+        # Add gndofs
+        specs['gndofs'] = self._gndofs
 
+        return specs
 
 
 class BaseCommon:
