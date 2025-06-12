@@ -2,7 +2,6 @@ from collections import defaultdict
 import inspect
 import itertools as it
 import statistics
-from time import perf_counter_ns
 
 import numpy as np
 
@@ -71,12 +70,6 @@ class BaseSystem:
         self._mpi_inters = self._load_mpi_inters(mesh, elemap)
         self._bc_inters = self._load_bc_inters(mesh, elemap)
         backend.commit()
-
-        # Collect compute-time 
-        self.collect_ctime = 'observer-onerankcomputetime' in cfg.sections()
-
-        if self.collect_ctime:
-            self.ctimediff = []
 
     def commit(self):
         # Prepare the kernels and any associated MPI requests
@@ -267,15 +260,8 @@ class BaseSystem:
         self._rhs_uin_fout.add((uinbank, foutbank))
         self._prepare_kernels(t, uinbank, foutbank)
 
-        if self.collect_ctime:
-            tstart = perf_counter_ns()
-
         for graph in self._rhs_graphs(uinbank, foutbank):
             self.backend.run_graph(graph)
-
-        if self.collect_ctime:
-            self.backend.wait()
-            self.ctimediff.append(perf_counter_ns() - tstart)
 
     def _preproc_graphs(self, uinbank):
         pass

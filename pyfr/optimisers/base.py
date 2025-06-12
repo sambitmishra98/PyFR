@@ -26,11 +26,24 @@ class HistoryMixin:
         self._cols_hdr = colnames or [f'col{i}' for i in range(n_cols)]
         self._rows: list[tuple] = []      # permanent
         self._pending: list[tuple] = []   # temp
+        self._last_row: tuple | None = None
 
     def append_row(self, row):
         tup = tuple(row)
         self._rows.append(tup)
         self._pending.append(tup)
+        self._last_row = tup
+
+
+    # helper for integrator -------------------------------------------------
+    def last_row_as_dict(self) -> dict:
+        """
+        Return {header_i: value_i, …} for the most recent row,
+        or {} if no row was ever appended.
+        """
+        if self._last_row is None:
+            return {}
+        return dict(zip(self._cols_hdr, self._last_row))
 
     @property
     def history(self):

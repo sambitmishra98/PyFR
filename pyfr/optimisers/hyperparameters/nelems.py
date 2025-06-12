@@ -25,11 +25,6 @@ class Nelems(BaseHyperparameter):
             raise ValueError(f'[nelems] n-hyperparameters ({self.n_hparams}) '
                              f'must equal MPI size ({comm.size})')
 
-        # If 1 rank simulation, then errro
-        if comm.size == 1:
-            raise ValueError('[nelems] cannot be used with a single rank '
-                             'simulation')
-
         if self.bounds.shape[1] != comm.size:      # bounds = (4, d)
             raise ValueError('[nelems] soft/hard bounds must specify a pair '
                              'for each rank')

@@ -84,16 +84,6 @@ class BaseIntegrator:
         self._abort = False
         self._abort_reason = ''
 
-        mesh_specs = self.mesh_specifications()        # dict[str,str]
-        per_type = [
-            np.fromstring(v, sep=',', dtype=int)    # → array(len = comm.size)
-            for k, v in mesh_specs.items() if k.startswith('nelems-')
-        ]
-        if not per_type:
-            raise RuntimeError('No nelems-* keys found in mesh specifications')
-        total = np.sum(per_type, axis=0)            # shape (comm.size,)
-        self.nelems = tuple(int(x) for x in total)
-
     def plugin_abort(self, reason):
         self._abort = True
         self._abort_reason = self._abort_reason or reason
@@ -267,7 +257,8 @@ class BaseIntegrator:
             dt = time.time() - tstart - wtimes['common', None] + tcommon
 
             oname = getattr(observer, 'name', 'other')
-            wtimes[oname] += dt
+            osuffix = getattr(observer, 'suffix', None)
+            wtimes[oname, osuffix] += dt
 
     def _run_hyperparameters(self):
         wtimes = self._hyperparameter_wtimes
@@ -283,8 +274,9 @@ class BaseIntegrator:
 
             dt = time.time() - tstart - wtimes['common', None] + tcommon
 
-            oname = getattr(hyperparameter, 'name', 'other')
-            wtimes[oname] += dt
+            hname = getattr(hyperparameter, 'name', 'other')
+            hsuffix = getattr(hyperparameter, 'suffix', None)
+            wtimes[hname, hsuffix] += dt
 
     def _run_modellers(self):
         wtimes = self._modeller_wtimes
@@ -300,8 +292,9 @@ class BaseIntegrator:
 
             dt = time.time() - tstart - wtimes['common', None] + tcommon
 
-            oname = getattr(modeller, 'name', 'other')
-            wtimes[oname] += dt
+            mname = getattr(modeller, 'name', 'other')
+            msuffix = getattr(modeller, 'suffix', None)
+            wtimes[mname, msuffix] += dt
 
     def _run_samplers(self):
         wtimes = self._sampler_wtimes
@@ -317,8 +310,9 @@ class BaseIntegrator:
 
             dt = time.time() - tstart - wtimes['common', None] + tcommon
 
-            oname = getattr(sampler, 'name', 'other')
-            wtimes[oname] += dt
+            sname = getattr(sampler, 'name', 'other')
+            ssuffix = getattr(sampler, 'suffix', None)
+            wtimes[sname, ssuffix] += dt
 
     @staticmethod
     def get_plugin_data_prefix(name, suffix):
@@ -393,6 +387,57 @@ class BaseIntegrator:
                 k += f'-{psuffix}'
 
             stats.set('solver-time-integrator', k, t)
+
+        # Observers wall clock times
+        for (pname, psuffix), t in self._observer_wtimes.items():
+            k = f'observer-wall-time-{pname}'
+            if psuffix:
+                k += f'-{psuffix}'
+
+            stats.set('solver-time-integrator', k, t)
+
+        # Hyperparameters wall clock times
+        for (pname, psuffix), t in self._hyperparameter_wtimes.items():
+            k = f'hyperparameter-wall-time-{pname}'
+            if psuffix:
+                k += f'-{psuffix}'
+
+            stats.set('solver-time-integrator', k, t)
+
+        # Modellers wall clock times
+        for (pname, psuffix), t in self._modeller_wtimes.items():
+            k = f'modeller-wall-time-{pname}'
+            if psuffix:
+                k += f'-{psuffix}'
+
+            stats.set('solver-time-integrator', k, t)
+
+        # Samplers wall clock times
+        for (pname, psuffix), t in self._sampler_wtimes.items():
+            k = f'sampler-wall-time-{pname}'
+            if psuffix:
+                k += f'-{psuffix}'
+
+            stats.set('solver-time-integrator', k, t)
+
+        # ---------- NEW: write last-row data per observer ------------------
+        for obs in getattr(self, 'observers', []):
+            sec = f'observer-{obs.name}'
+            if obs.suffix:
+                sec += f'-{obs.suffix}'
+    
+            for k, v in obs.last_row_as_dict().items():
+                stats.set(sec, k, v)
+    
+        # ---------- (optional) repeat for hyperparameters -------------------
+        for hp in getattr(self, 'hyperparameters', []):
+            sec = f'hyperparameter-{hp.name}'
+            if hp.suffix:
+                sec += f'-{hp.suffix}'
+    
+            if hasattr(hp, 'last_row_as_dict'):
+                for k, v in hp.last_row_as_dict().items():
+                    stats.set(sec, k, v)
 
         # Step counts
         stats.set('solver-time-integrator', 'nsteps', self.nsteps)

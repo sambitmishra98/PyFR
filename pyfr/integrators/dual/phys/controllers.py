@@ -23,13 +23,13 @@ class BaseDualController(BaseDualIntegrator):
 
         self._invalidate_caches()
 
-        # Run any plugins
-        self._run_plugins()
-
         self._run_samplers()
         self._run_observers()
         self._run_hyperparameters()
         self._run_modellers()
+
+        # Run any plugins
+        self._run_plugins()
 
         # Clear the pseudo step info
         self.pseudointegrator.pseudostepinfo = []

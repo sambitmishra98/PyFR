@@ -3,7 +3,7 @@ from pyfr.optimisers.samplers.base import BaseSampler
 from pyfr.optimisers.samplers.base import EmptySampler
 from pyfr.optimisers.samplers.rankwiseexpressionsampler import RankwiseExpressionSampler
 from pyfr.optimisers.samplers.samplebyexpression import SampleByExpression
-from pyfr.optimisers.samplers.bayesianoptimiser import BayesianOptimiser
+# from pyfr.optimisers.samplers.bayesianoptimiser import BayesianOptimiser
 
 from pyfr.util import subclass_where
 

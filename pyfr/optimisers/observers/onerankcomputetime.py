@@ -1,4 +1,5 @@
 from pyfr.optimisers.observers import BaseObserver
+from pyfr.mpiutil import get_comm_rank_root
 
 class OneRankComputeTime(BaseObserver):
     name = 'onerankcomputetime'

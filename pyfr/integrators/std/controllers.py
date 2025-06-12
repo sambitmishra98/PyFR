@@ -1,4 +1,5 @@
 import math
+from time import perf_counter_ns
 
 import numpy as np
 
@@ -23,6 +24,12 @@ class BaseStdController(BaseStdIntegrator):
         if not self.isrestart:
             self._run_plugins()
 
+        # Collect compute-time 
+        self.collect_ctime = 'observer-onerankcomputetime' in self.cfg.sections()
+
+        if self.collect_ctime:
+            self.ctimediff = []
+
     def _accept_step(self, dt, idxcurr, err=None):
         self.tcurr += dt
         self.nacptsteps += 1
@@ -36,6 +43,11 @@ class BaseStdController(BaseStdIntegrator):
             self.system.filt(idxcurr)
 
         self._invalidate_caches()
+
+        self._run_samplers()
+        self._run_observers()
+        self._run_hyperparameters()
+        self._run_modellers()
 
         # Run any plugins
         self._run_plugins()
@@ -70,8 +82,15 @@ class StdNoneController(BaseStdController):
             # Decide on the time step
             dt = max(min(t - self.tcurr, self._dt), self.dtmin)
 
+            if self.collect_ctime:
+                tstart = perf_counter_ns()
+
             # Take the step
             idxcurr = self.step(self.tcurr, dt)
+
+            if self.collect_ctime:
+                self.backend.wait()
+                self.ctimediff.append(perf_counter_ns() - tstart)
 
             # We are not adaptive, so accept every step
             self._accept_step(dt, idxcurr)
