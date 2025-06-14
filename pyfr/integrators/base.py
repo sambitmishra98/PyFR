@@ -234,16 +234,10 @@ class BaseIntegrator:
             sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
 
     def mesh_specifications(self):
-        """
-            [mesh]
-            nelems-<etype> = {c_0},{c_1}, … ,{c_{P-1}}
-            interfaces-mpi = {f_00},{f_01}, … ,{f_0(P-1)},{f_10}, … ,{f_(P-1)(P-1)}
-        """
         from itertools import chain
 
-        comm, rank, _ = get_comm_rank_root()
-        P             = comm.size
-        m             = self.mesh        # local alias
+        comm, rank, root = get_comm_rank_root()
+        m = self.mesh        # local alias
 
         # Elements per element-type
         loc_nelems = {et: len(m.eidxs.get(et, [])) for et in m.etypes}
@@ -253,25 +247,32 @@ class BaseIntegrator:
 
         specs = {}
         for et in etypes:
-            counts = [all_nelems[r].get(et, 0) for r in range(P)]
+            counts = [all_nelems[r].get(et, 0) for r in range(comm.size)]
             specs[f'nelems-{et}'] = ','.join(map(str, counts))
 
-        # MPI interfaces btw ranks
-        # (i, j) --> MPI faces btw ranks i and j
-        row = [0]*P
-        for dest, arr in m.con_p.items():       # dest → ndarray of faces
-            row[dest] = len(arr)
-        # keep 0 on the diagonal by construction
+        # ------------------------------------------------------------------
+        # Collect interface counts only for the upper‑triangle (i < j)
+        # ------------------------------------------------------------------
+        local_pairs = [(rank, dest, len(faces))
+                    for dest, faces in m.con_p.items()
+                    if rank < dest and len(faces)]
 
-        # gather every row  →  list[list[int]] shape P×P
-        mat = comm.allgather(row)
+        all_pairs = comm.allgather(local_pairs)
+        pairs = list(chain.from_iterable(all_pairs))  # [(i,j,val), ...]
 
-        # flatten row-major
-        flat = list(chain.from_iterable(mat))
-        specs['interfaces-mpi'] = ','.join(map(str, flat))
+        # Sort for a deterministic order: first by i then by j
+        pairs.sort(key=lambda t: (t[0], t[1]))
+
+        # Serialise as a Python‑literal list: [(0,1,123),(0,3,42),...]
+        specs["interfaces-mpi"] = "[" \
+                                + ",".join(f"({i},{j},{v})" for i, j, v in pairs) \
+                                + "]"
 
         # Add gndofs
         specs['gndofs'] = self._gndofs
+
+        # Add number of ranks
+        specs['nranks'] = comm.size
 
         return specs
 
