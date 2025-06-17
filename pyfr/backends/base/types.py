@@ -201,30 +201,31 @@ class ConstMatrix(MatrixBase):
 class XchgMatrix(Matrix):
     _base_tags = {'xchg'}
 
-    def recvreq(self, pid, tag):
-        comm, rank, root = get_comm_rank_root()
-
-        r = autofree(comm.Recv_init(self.hdata, pid, tag))
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
 
         if not hasattr(self.backend, '_req_info_map'):
             self.backend._req_info_map = {}
 
-        self.backend._req_info_map[id(r)] = {'type': 'recv', 
-                                             'peer': pid,
-                                             'hdata_size': self.hdata.nbytes}
+    def _info(self, kind, peer, tag):
+        return dict(type=kind, peer=peer, tag=tag, bytes=self.hdata.nbytes)
+
+    def recvreq(self, pid, tag):
+        comm, rank, root = get_comm_rank_root()
+
+        r = autofree(comm.Recv_init(self.hdata, pid, tag))
+        self.backend._req_info_map[id(r)] = self._info('recv', pid, tag)
+
+        #print(f"RECV {tag}: {rank}←{pid} bytes:{self.hdata.nbytes}")
         return r
 
     def sendreq(self, pid, tag):
         comm, rank, root = get_comm_rank_root()
 
         r = autofree(comm.Send_init(self.hdata, pid, tag))
+        self.backend._req_info_map[id(r)] = self._info('send', pid, tag)
 
-        if not hasattr(self.backend, '_req_info_map'):
-            self.backend._req_info_map = {}
-
-        self.backend._req_info_map[id(r)] = {'type': 'send', 
-                                             'peer': pid,
-                                             'hdata_size': self.hdata.nbytes}
+        #print(f"SEND {tag}: {rank}→{pid} bytes:{self.hdata.nbytes}")
         return r
 
 class View:
@@ -345,36 +346,40 @@ class Graph:
                 if not reqs:
                     return
     
-                now = time.perf_counter_ns()
-                compute_times.append((now - self._prev_end)/1e9)
+                start_ns = time.perf_counter_ns()
+                compute_times.append((start_ns - self._prev_end)*1e-9)
+
+                lreqs = list(reqs)
+
                 while True:
-                    wait_start = now
-                    statuses = [mpi.Status() for _ in reqs]
-                    idxs = mpi.Prequest.Waitsome(reqs, statuses)
-                    wait_end = time.perf_counter_ns()
-                    dt = (wait_end - wait_start) / 1e9
+                    wait_ns   = time.perf_counter_ns()
+                    idxs      = mpi.Prequest.Waitsome(lreqs)   # statuses not needed
+                    done_ns   = time.perf_counter_ns()
+                    dt        = (done_ns - wait_ns)*1e-9
 
                     if idxs is None:
                         break
 
-                    for k, idx in enumerate(idxs):
-                        if statuses[k].Get_tag() != -1:
-                            self._send_times[statuses[k].Get_source()].append(dt)
-#                            order_and_time.append(('send', statuses[k].Get_source(), dt))
-                        else:
-                            self._recv_times[self.mpi_req_info[idx]['peer']].append(dt)
-#                            order_and_time.append(('recv', int(self.mpi_req_info[idx]['peer']), dt))
-                            
-                    # Remove completed requests so that Waitsome will wait on the remaining ones
-                    reqs = [r for r in reqs if r is not None and r not in [reqs[i] for i in idxs]]
-                    if not reqs:
-                        break
-                self._prev_end = wait_end              # next compute slice starts here
+                    # request-aligned info just for remaining reqs
+                    _imap = self.backend._req_info_map
+                    info_for_req = [ _imap.get(id(r)) for r in reqs ]   # None for NULL handles
 
-#                print(f"[rank {rank}] Order and time: {order_and_time}")
-    
-                #print(f"[rank {rank}] Recv times: {[list(x) for x in self._recv_times]}")
-                #print(f"[rank {rank}] Send times: {[list(x) for x in self._send_times]}")    
+                    for idx in idxs:
+                        info = info_for_req[idx]
+                        if info is None:          # REQUEST_NULL – already accounted for
+                            continue
+                        
+                        peer = info['peer']
+                        if info['type'] == 'send':
+                            self._send_times[peer].append(dt)
+                        else:
+                            self._recv_times[peer].append(dt)
+
+                    # mark finished slots
+                    for i in idxs:
+                        lreqs[i] = mpi.REQUEST_NULL
+
+                self._prev_end = done_ns
 
             self._waitall = waitall
         elif backend.cfg.getbool('backend', 'collect-wait-times', False):
@@ -395,7 +400,6 @@ class Graph:
                     wait_times.append((tend - t) / 1e9)
 
                     self._prev_end = tend
-
 
             self._waitall = waitall
         else:
