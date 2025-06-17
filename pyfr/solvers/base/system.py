@@ -345,6 +345,22 @@ class BaseSystem:
 
         return stats
 
+    @property
+    def nbytes_send(self):
+        out = {}
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                out.setdefault(i, g.get_nbytes_send())
+        return out
+
+    @property
+    def nbytes_recv(self):
+        out = {}
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                out.setdefault(i, g.get_nbytes_recv())
+        return out
+
     def rhs_wait_times_send(self):
 
         comm, rank, root = get_comm_rank_root()

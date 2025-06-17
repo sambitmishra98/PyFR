@@ -485,8 +485,30 @@ class Graph:
     def commit(self):
         mreqs, mdeps = self.mpi_reqs, self.mpi_req_deps
 
+        from collections import defaultdict
+
+        # byte volume *per peer* for this graph (one graph == one tag)
+        comm, rank, root = get_comm_rank_root()
+        npeer            = comm.size
+
+        self._send_bytes = [0]*npeer
+        self._recv_bytes = [0]*npeer
+
+        for inf in self.mpi_req_info:
+            peer  = inf['peer']
+            if inf['type'] == 'send':
+                self._send_bytes[peer] += inf['bytes']
+            else:
+                self._recv_bytes[peer] += inf['bytes']
+
         self.committed = True
         self.mpi_root_reqs = [r for r, d in zip(mreqs, mdeps) if not d]
+
+    def get_nbytes_send(self):
+        return self._send_bytes
+
+    def get_nbytes_recv(self):
+        return self._recv_bytes
 
     def run(self, *args):
         pass
