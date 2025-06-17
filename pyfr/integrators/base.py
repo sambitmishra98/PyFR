@@ -211,8 +211,7 @@ class BaseIntegrator:
             compute_times = comm.allgather(self.system.rhs_compute_times())
             for i, ms in enumerate(zip(*compute_times)):
                 for j, k in enumerate(['mean', 'sem', 
-                                       'stdev', 'median', 
-                                       'min', 'max']):
+                                       'stdev', 'median',]):
                     stats.set('backend-compute-times', f'rhs-graph-{i}-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
 

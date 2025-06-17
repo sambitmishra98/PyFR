@@ -335,18 +335,13 @@ class BaseSystem:
         # Compute all statistics
         stats = []
         for t in times.values():
-            print(f"len(t) = {len(t)}", flush = True)
-
             mean = statistics.mean(t) if t else 0
             stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
             median = statistics.median(t) if t else 0
 
             sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
 
-            tmin   = min(t) if t else 0
-            tmax   = max(t) if t else 0
-
-            stats.append((mean, sem, stdev, median, tmin, tmax))
+            stats.append((mean, sem, stdev, median))
 
         return stats
 

@@ -379,14 +379,23 @@ class Graph:
             self._waitall = waitall
         elif backend.cfg.getbool('backend', 'collect-wait-times', False):
             n = backend.cfg.getint('backend', 'collect-wait-times-len', 10000)
+
+            self._compute_times = compute_times = deque(maxlen=n)
             self._wait_times = wait_times = deque(maxlen=n)
+
+            self._prev_end = time.perf_counter_ns()
 
             # Wrap the wait all function with a timing variant
             def waitall(reqs):
                 if reqs:
                     t = time.perf_counter_ns()
+                    compute_times.append((t - self._prev_end)/1e9)
                     mpi.Prequest.Waitall(reqs)
-                    wait_times.append((time.perf_counter_ns() - t) / 1e9)
+                    tend = time.perf_counter_ns()
+                    wait_times.append((tend - t) / 1e9)
+
+                    self._prev_end = tend
+
 
             self._waitall = waitall
         else:
