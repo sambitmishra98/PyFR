@@ -336,6 +336,7 @@ class Graph:
             n = backend.cfg.getint('backend', 'collect-waitsome-times-len', 10000)
             
             # Instead of storing sums, store deques of times (rolling buffers)
+            self._all_times = all_times = deque(maxlen=n)
             self._compute_times = compute_times = deque(maxlen=n)
             self._recv_times    = [deque(maxlen=n) for _ in range(comm.size)]
             self._send_times    = [deque(maxlen=n) for _ in range(comm.size)]    
@@ -352,21 +353,20 @@ class Graph:
                 lreqs = list(reqs)
 
                 while True:
-                    wait_ns   = time.perf_counter_ns()
-                    idxs      = mpi.Prequest.Waitsome(lreqs)   # statuses not needed
-                    done_ns   = time.perf_counter_ns()
-                    dt        = (done_ns - wait_ns)*1e-9
+                    wait_ns = time.perf_counter_ns()
+                    idxs    = mpi.Prequest.Waitsome(lreqs)
+                    tend    = time.perf_counter_ns()
+                    dt      = (tend - wait_ns)*1e-9
 
                     if idxs is None:
                         break
 
-                    # request-aligned info just for remaining reqs
                     _imap = self.backend._req_info_map
-                    info_for_req = [ _imap.get(id(r)) for r in reqs ]   # None for NULL handles
+                    info_for_req = [ _imap.get(id(r)) for r in reqs ]
 
                     for idx in idxs:
                         info = info_for_req[idx]
-                        if info is None:          # REQUEST_NULL – already accounted for
+                        if info is None:
                             continue
                         
                         peer = info['peer']
@@ -375,16 +375,17 @@ class Graph:
                         else:
                             self._recv_times[peer].append(dt)
 
-                    # mark finished slots
                     for i in idxs:
                         lreqs[i] = mpi.REQUEST_NULL
 
-                self._prev_end = done_ns
+                all_times.append((tend - self._prev_end) / 1e9)
+                self._prev_end = tend
 
             self._waitall = waitall
         elif backend.cfg.getbool('backend', 'collect-wait-times', False):
             n = backend.cfg.getint('backend', 'collect-wait-times-len', 10000)
 
+            self._all_times = all_times = deque(maxlen=n)
             self._compute_times = compute_times = deque(maxlen=n)
             self._wait_times = wait_times = deque(maxlen=n)
 
@@ -398,7 +399,7 @@ class Graph:
                     mpi.Prequest.Waitall(reqs)
                     tend = time.perf_counter_ns()
                     wait_times.append((tend - t) / 1e9)
-
+                    all_times.append((tend - self._prev_end) / 1e9)
                     self._prev_end = tend
 
             self._waitall = waitall
@@ -519,6 +520,9 @@ class Graph:
     def get_compute_times(self):
         return list(self._compute_times)
  
+    def get_all_times(self):
+        return list(self._all_times)
+    
     def get_wait_times_send(self):
         return [list(dq) for dq in self._send_times]
     

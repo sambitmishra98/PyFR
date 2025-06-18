@@ -345,6 +345,26 @@ class BaseSystem:
 
         return stats
 
+    def rhs_all_times(self):
+        # Group together timings for graphs which are semantically equivalent
+        times = defaultdict(list)
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                times[i].extend(g.get_all_times())
+
+        # Compute all statistics
+        stats = []
+        for t in times.values():
+            mean = statistics.mean(t) if t else 0
+            stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
+            median = statistics.median(t) if t else 0
+
+            sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
+
+            stats.append((mean, sem, stdev, median))
+
+        return stats
+
     @property
     def nbytes_send(self):
         out = {}

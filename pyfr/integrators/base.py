@@ -212,16 +212,12 @@ class BaseIntegrator:
                     stats.set('backend-compute-times', f'rhs-graph-{i}-compute-{k}',
                               ','.join(f'{v[j]:.6g}' for v in ms))
 
-            nbs = comm.allgather(self.system.nbytes_send)    # list-of-dicts
-            nbr = comm.allgather(self.system.nbytes_recv)
-
-            nstage = max(max(d) for d in nbs) + 1
-            for i in range(nstage):
-                send_line = ','.join(str(b) for d in nbs for b in d.get(i, []))
-                recv_line = ','.join(str(b) for d in nbr for b in d.get(i, []))
-    
-                stats.set('backend-bytes', f'rhs-graph-{i}-send', send_line)
-                stats.set('backend-bytes', f'rhs-graph-{i}-recv', recv_line)
+            all_times = comm.allgather(self.system.rhs_all_times())
+            for i, ms in enumerate(zip(*all_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median']):
+                    stats.set('backend-all-times', f'rhs-graph-{i}-all-{k}',
+                              ','.join(f'{v[j]:.6g}' for v in ms))
 
         if self.cfg.getbool('backend', 'collect-waitsome-times', False):
             comm, rank, root = get_comm_rank_root()
@@ -231,6 +227,13 @@ class BaseIntegrator:
                 for j, k in enumerate(['mean', 'sem', 
                                        'stdev', 'median']):
                     stats.set('backend-compute-times', f'rhs-graph-{i}-compute-{k}',
+                              ','.join(f'{v[j]:.6g}' for v in ms))
+
+            all_times = comm.allgather(self.system.rhs_all_times())
+            for i, ms in enumerate(zip(*all_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median']):
+                    stats.set('backend-all-times', f'rhs-graph-{i}-all-{k}',
                               ','.join(f'{v[j]:.6g}' for v in ms))
 
             waitsome_send = comm.allgather(self.system.rhs_wait_times_send())
@@ -255,11 +258,6 @@ class BaseIntegrator:
                             f'rhs-graph-{i}-recv-{k}',
                             ','.join(f'{val:.3g}' for val in coldata))
 
-            nbs_all  = comm.allgather(self.system.nbytes_send)
-
-            # -----------------------------------------------------------------
-            # 2.  Generic wait-time CSR helper  -------------------------------
-            # -----------------------------------------------------------------
             def _make_csr(stage_lists, col):
                 out = defaultdict(list)
                 for r_src, sl in enumerate(stage_lists):
@@ -277,15 +275,17 @@ class BaseIntegrator:
                 for stage, trip in sorted(_make_csr(waitsome_recv, col).items()):
                     stats.set('backend-wait-times', f'csr-rhs-graph-{stage}-recv-{label}', ','.join(trip))
 
-            stage_to_triplets = defaultdict(list)
-            for r_src, stage_dict in enumerate(nbs_all):
-                for stage, vec in stage_dict.items():
-                    for r_dst, nb in enumerate(vec):
-                        if r_src != r_dst and nb:
-                            stage_to_triplets[stage].append(f'({r_src},{r_dst},{nb})')
+        nbs_all  = comm.allgather(self.system.nbytes_send)
 
-            for stage, triplets in sorted(stage_to_triplets.items()):
-                stats.set('backend-bytes', f'rhs-graph-{stage}', ','.join(triplets))
+        stage_to_triplets = defaultdict(list)
+        for r_src, stage_dict in enumerate(nbs_all):
+            for stage, vec in stage_dict.items():
+                for r_dst, nb in enumerate(vec):
+                    if r_src != r_dst and nb:
+                        stage_to_triplets[stage].append(f'({r_src},{r_dst},{nb})')
+
+        for stage, triplets in sorted(stage_to_triplets.items()):
+            stats.set('backend-bytes', f'rhs-graph-{stage}', ','.join(triplets))
 
     @property
     def cfgmeta(self):
