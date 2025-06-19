@@ -18,7 +18,7 @@ from mpi4py import MPI
 from tabulate import tabulate
 
 if typing.TYPE_CHECKING:
-    from pyfr.relocator.metameshes import _MetaMesh, SubMesh
+    from pyfr.relocator.metamesh import MetaMesh, SubMesh
 
 # ────────────────────────────────────────────────────────────────────────
 # Convenience coloured print helpers
@@ -106,7 +106,7 @@ class _Stats:
 class TablePrinter:
     """Generate barrier‑serialised GitHub‑style tables for debug output."""
 
-    def __init__(self, mmesh: "_MetaMesh") -> None:
+    def __init__(self, mmesh: "MetaMesh") -> None:
         self.comm: MPI.Comm = mmesh.comm
         self.ranks          = list(range(self.comm.size))
         self.etypes         = sorted(mmesh.etypes)
@@ -164,7 +164,7 @@ class TablePrinter:
     # Public API
     # ----------------------------------------------------------------
 
-    def print_local_tables(self, mmesh: "_MetaMesh", colours: Dict[int, str] | None = None, ) -> None:
+    def print_local_tables(self, mmesh: "MetaMesh", colours: Dict[int, str] | None = None, ) -> None:
         """Print one coloured table per rank (barrier‑serialised)."""
         if colours is None:
             colours = {0: "blue", 1: "green", 2: "red", 3: "magenta"}
@@ -195,7 +195,7 @@ class TablePrinter:
         self.comm.Barrier()
 
     # ----------------------------------------------------------------
-    def print_global_totals(self, mmesh: "_MetaMesh", label: str = "ΣΣΣ") -> None:
+    def print_global_totals(self, mmesh: "MetaMesh", label: str = "ΣΣΣ") -> None:
         """Reduce across ranks and print a single yellow bold Σ line (rank‑0)."""
         vec_local = np.zeros(len(self.headers) - 1, dtype=np.int64)
         for sid, sm in mmesh.smeshes.items():
