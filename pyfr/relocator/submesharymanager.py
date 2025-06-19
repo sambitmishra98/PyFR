@@ -1,28 +1,11 @@
 # ─── submesharymanager.py (was array_manager.py) ──────────────────────────
 from typing import Dict
 import numpy as np
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.mpiutil import get_comm_rank_root
 
-AryEtDict = Dict[str, np.ndarray]          # etype -> ndarray
-
-class SubMeshAryManager:
-    """
-    Handles arbitrary element-centric arrays.
-
-    self.arrays      : Dict[str, AryEtDict]        # 'spts' -> {'tri': …}
-    self._ary_edim   : Dict[str, int]              # 'spts' -> 1
-    """
-
-    # ────────────────────────────────────────────────────────────────────
-    #  Registration
-    # ────────────────────────────────────────────────────────────────────
 # ── submesharymanager.py ────────────────────────────────────────────────
-from typing import Dict
 import numpy as np
-from pyfr.mpiutil import get_comm_rank_root, mpi
-
-AryEtDict = Dict[str, np.ndarray]          # etype → ndarray
-
+from pyfr.mpiutil import get_comm_rank_root
 
 class SubMeshAryManager:
     # … (rest unchanged) …
@@ -30,7 +13,7 @@ class SubMeshAryManager:
     # ───────────────────────────────────────────────────────────────────
     #  Robust, MPI-safe registration
     # ───────────────────────────────────────────────────────────────────
-    def register_array(self, name: str, *, edim: int, edict: AryEtDict) -> None:
+    def register_array(self, name: str, *, edim: int, edict) -> None:
         """
         Parameters
         ----------
@@ -68,7 +51,7 @@ class SubMeshAryManager:
         # 2)  Build a fully-populated per-etype dictionary
         #     (axis permutation done here so *all* stored arrays have edim=0)
         # -----------------------------------------------------------------
-        fixed: AryEtDict = {}
+        fixed = {}
         for et in self.etypes:
             arr = edict.get(et)
             if arr is None or arr.size == 0:

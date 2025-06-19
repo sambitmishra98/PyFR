@@ -10,7 +10,6 @@ from pprint import pformat
 from pyfr.mpiutil import get_comm_rank_root
 
 from dataclasses import dataclass
-from itertools   import chain
 from typing      import Any, Dict, List, Sequence
 
 import numpy as np
