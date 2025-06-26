@@ -167,34 +167,44 @@ class SubMeshExchanger:
         return info
 
     def pack_ary(self, mmesh, ary_name):
+        """
+        Serialise one field/array for every remote rank.
+
+        * honours the *current* 2-tuple spec:  (dtype, elem_axis)
+        * trailing shape is taken from SubMesh._trailing_shape(...)
+        """
         comm, rank, _ = get_comm_rank_root()
         info = {}
-        shape_fn, dt, _ = SubMesh.array_specs[ary_name]
+
+        dt, _elem_axis = SubMesh.array_specs[ary_name]     # <- now only two values
+        meta = mmesh.meta
 
         for et in mmesh.etypes:
-            trailing = shape_fn(et)
+            trailing = SubMesh._trailing_shape(ary_name, meta, et)
 
             pieces, counts = [], []
             for r in range(comm.size):
                 arr = mmesh.smeshes[r].arrays[ary_name][et]
 
-                # Rely on NumPy to explode if trailing dims/dtype are wrong
+                # sanity-check dtype & shape
                 if arr.dtype != dt or arr.shape[1:] != trailing:
-                    raise TypeError(f"[pack_ary] rank={rank} {ary_name}[{et}] "
-                                    f"has dtype {arr.dtype}, shape {arr.shape}; "
-                                    f"expected dtype {dt}, trailing {trailing}"
-                                )
+                    raise TypeError(
+                        f"[pack_ary] rank={rank} {ary_name}[{et}] "
+                        f"has dtype {arr.dtype}, shape {arr.shape}; "
+                        f"expected dtype {dt}, trailing {trailing}"
+                    )
 
                 if r == rank:
-                    counts.append(0)
+                    counts.append(0)          # keep local rows
                 else:
                     pieces.append(arr)
                     counts.append(arr.shape[0])
 
-            svals = (np.concatenate(pieces)
-                    if pieces else np.empty((0, *trailing), dt))
+            svals = np.concatenate(pieces) if pieces else np.empty((0, *trailing), dt)
 
-            info[et] = {'svals': svals,
-                        'scount': np.asarray(counts, np.int64)}
+            info[et] = {
+                "svals":  svals,
+                "scount": np.asarray(counts, np.int64),
+            }
 
         return info
