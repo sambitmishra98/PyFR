@@ -95,7 +95,7 @@ def reconstruct_by_relocation(mesh: _Mesh, targets: list[int],
     # ---------------- run one donor→receivers round per sweep ----------
     with progress.start('Relocate elements'):
         mmesh = MetaMesh(mesh)                            # build SubMeshes
-        mmesh.redistribute_sweeps(targets)                # exactly R-1 MPI
+        mmesh.redistribute(targets)                # exactly R-1 MPI
         mesh = mmesh.smeshes[rank]                        # local relocated
 
     # ---------------- package (gid , part) for every element -----------

@@ -1,16 +1,5 @@
 from __future__ import annotations
 
-from pyfr.relocator.utils import crpprint
-
-"""Light-weight container for a *single* sub-partition in a parallel run.
-
-This class purposefully owns **only** the data that is unique to the
-sub-partition: element-id arrays (``eidxs``) and per-face connectivity
-tensors (``con``).  All global, run-wide constants (like element-type maps)
-are injected by :class:`_MetaMesh` *once* at start-up so they never live in
-multiple places at once.
-"""
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, ClassVar
 
@@ -18,79 +7,109 @@ import numpy as np
 from pyfr.readers.native import _Mesh
 from pyfr.mpiutil import AlltoallMixin, get_comm_rank_root
 
+@dataclass(frozen=True, slots=True)
+class MeshMetadata:
+    """
+    Immutable, share-by-reference bundle of global mesh constants.
+
+    Every MetaMesh and SubMesh instance holds one pointer (`meta`)
+    instead of mutating class variables at run-time.
+    """
+    etypes: List[str]                     # present element types (sorted)
+    edim: int                             # spatial dimension
+    etype_nfaces_map: Dict[str, int]      # e.g. {'tri':3,'quad':4,…}
+    nv_map: Dict[str, int]                # #verts per element type
+    e_to_i: Dict[str, int]                # element-type → small int code
+    i_to_e: Dict[int, str]                # inverse map
+
 
 @dataclass
 class SubMesh:
     # ------------------------------------------------------------------ #
     # normal instance fields
     # ------------------------------------------------------------------ #
+    meta: MeshMetadata                     # global mesh constants
     etypes: list[str]                        = field(default_factory=list)
     eidxs:  dict[str, np.ndarray]            = field(default_factory=dict)
     arrays: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------ #
-    # class-wide constants  (not dataclass fields!)
-    # ------------------------------------------------------------------ #
-    etype_nfaces_map: ClassVar[dict[str, int]] = {'tri': 3, 'quad': 4,
-        'tet': 4, 'hex': 6, 'pri': 5, 'pyr': 5
-    }
-    e_to_i: ClassVar[dict[str, int]] = {}
-    i_to_e: ClassVar[dict[int, str]] = {}
-
     # class SubMesh  (add near other ClassVars)
-    array_specs: ClassVar[dict[str, tuple[callable, np.dtype, int]]] = {
-        # name          trailing-shape fn(et)                  dtype        elem axis in mesh
-        'con'        : (lambda et: (SubMesh.etype_nfaces_map[et], 4),  np.int64  , 0),
-        'spts_curved': (lambda et: (),                                 np.bool_  , 0),
-        'spts_nodes' : (lambda et: (SubMesh.nv_map[et],),              np.int64  , 0),
-        'spts'       : (lambda et: (SubMesh.nv_map[et], SubMesh.edim), np.float64, 1),
+    array_specs: ClassVar[dict[str, tuple[np.dtype, int]]] = {
+        # name          dtype      elem-axis in native mesh
+        'con'        : (np.int64 ,  0),
+        'spts_curved': (np.bool_ ,  0),
+        'spts_nodes' : (np.int64 ,  0),
+        'spts'       : (np.float64, 1),
     }
     
-    @staticmethod
-    def spec(name: str, et: str):
-        """Return (trailing_shape, dtype, elem_axis) for *name*,*etype*."""
-        shape_fn, dt, ax = SubMesh.array_specs[name]
-        return shape_fn(et), dt, ax
+    # pyfr/relocator/submesh.py  (near other ClassVars)
 
-    def __getattr__(self, name):
-        # Called only if normal attributes fail
-        if 'arrays' in self.__dict__ and name in self.__dict__['arrays']:
-            return self.__dict__['arrays'][name]
-        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+    etype_nfaces_map: ClassVar[dict[str, int]] = {
+        'tri': 3, 'quad': 4,
+        'tet': 4, 'hex': 6,
+        'pri': 5, 'pyr': 5,
+    }
+
+    def __getattr__(self, name: str):
+        """Shortcut: allow `self.con`, `self.spts`, … to access `arrays[name]`."""
+        arrays = self.__dict__.get("arrays")
+        if arrays and name in arrays:
+            return arrays[name]
+        raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")
+
+    # submesh.py
+    @classmethod
+    def blank(cls, meta: MeshMetadata) -> "SubMesh":
+        """
+        Allocate an *empty* sub-mesh that still knows all element types.
+        Only shape matters – content will be filled later by MetaMesh.
+        """
+        etypes        = list(meta.etypes)               # copy → immune to aliasing
+        make_empty    = lambda dt, shape: np.empty(shape, dtype=dt)
+
+        empty_eidxs   = {et: make_empty(np.int64, (0,)) for et in etypes}
+        empty_arrays  = {}
+
+        for name, (dtype, _) in cls.array_specs.items():
+            empty_arrays[name] = {
+                et: make_empty(dtype, (0, *cls._trailing_shape(name, meta, et)))
+                for et in etypes
+            }
+
+        return cls(meta=meta,
+                etypes=etypes,
+                eidxs=empty_eidxs,
+                arrays=empty_arrays)
 
     @classmethod
-    def blank(cls, etypes):
-        empty_eidxs = {et: np.empty(0, np.int64) for et in etypes}
-        empty_arrays = {}
-        for name, (shape_fn, dt, _) in cls.array_specs.items():
-            empty_arrays[name] = {et: np.empty((0, *shape_fn(et)), dt) for et in etypes}
-        return cls(etypes=etypes, eidxs=empty_eidxs, arrays=empty_arrays)
+    def from_native_mesh(cls,
+                        mesh: _Mesh,
+                        meta: MeshMetadata,
+                        bc_map: dict[str, int]) -> "SubMesh":
+        """
+        Clone *every* per-element array from ``mesh`` into a local SubMesh.
+        *   keeps axis-0 = element axis for all arrays
+        *   re-uses a common copy helper to avoid boiler-plate
+        """
+        rank = get_comm_rank_root()[1]
 
-    @staticmethod
-    def trailing_shape(name: str, et: str) -> tuple[int, ...]:
-        return SubMesh.array_specs[name][0](et)
+        def _copy(name: str, move_axis: int | None = None) -> dict[str, np.ndarray]:
+            out = {et: getattr(mesh, name)[et].copy() for et in meta.etypes}
+            if move_axis is not None:                       # e.g. spts  (Nverts, dim)
+                out = {et: np.moveaxis(a, move_axis, 0) for et, a in out.items()}
+            return out
 
-    @classmethod
-    def from_native_mesh(cls, mesh: _Mesh, etypes: list[str], bc_map) -> "SubMesh":
-        comm, rank, _ = get_comm_rank_root()
+        arrays: dict[str, dict[str, np.ndarray]] = {
+            "con"        : cls._build_con(mesh, rank, get_comm_rank_root()[0], bc_map, meta),
+            "spts_curved": _copy("spts_curved"),
+            "spts_nodes" : _copy("spts_nodes"),
+            "spts"       : _copy("spts", move_axis=1),
+        }
 
-        arrays = {}
-        for name, (shape_fn, dt, ax) in cls.array_specs.items():
-            if name == 'con':
-                arrays[name] = cls._build_con(mesh, rank, comm, bc_map)
+        # element IDs
+        eidxs = {et: mesh.eidxs[et].copy() for et in meta.etypes}
 
-            elif hasattr(mesh, name):
-                raw = {et: getattr(mesh, name)[et].copy() for et in etypes}
-                if ax != 0:                       # move element axis to the front
-                    raw = {et: np.moveaxis(a, ax, 0) for et, a in raw.items()}
-                arrays[name] = raw
-
-            else:                                # field absent ⇒ empty placeholder
-                arrays[name] = {et: np.empty((0, *shape_fn(et)), dt) for et in etypes}
-
-        return cls(etypes=etypes,
-                eidxs={et: mesh.eidxs[et].copy() for et in etypes},
-                arrays=arrays)
+        return cls(meta=meta, etypes=list(meta.etypes), eidxs=eidxs, arrays=arrays)
 
     @property
     def con(self):
@@ -160,72 +179,97 @@ class SubMesh:
             self.eidxs[et] = self.eidxs[et][order]
 
             # every array listed in array_specs
-            for name, (_, _, _) in SubMesh.array_specs.items():
+            for name in SubMesh.array_specs:
                 self.arrays[name][et] = self.arrays[name][et][order]
+
+    def _slice_out_patch(self, moved: dict[str, set[int]]) -> "SubMesh":
+        """
+        • Build a child SubMesh containing *exactly* the rows in *moved*  
+        • Remove those rows from the parent (in-place)
+        """
+        child_eidxs:  dict[str, np.ndarray]            = {}
+        child_arrays: dict[str, dict[str, np.ndarray]] = {a: {} for a in self.array_specs}
+
+        for et in self.etypes:
+            take = np.isin(self.eidxs[et], list(moved.get(et, ())), assume_unique=True)
+            keep = ~take
+
+            # --- child ---
+            child_eidxs[et] = self.eidxs[et][take].copy()
+            for ary in self.array_specs:
+                child_arrays[ary][et] = self.arrays[ary][et][take].copy()
+
+            # --- parent (shrink) ---
+            self.eidxs[et] = self.eidxs[et][keep]
+            for ary in self.array_specs:
+                self.arrays[ary][et] = self.arrays[ary][et][keep]
+
+        return SubMesh(meta=self.meta,
+                    etypes=self.etypes,
+                    eidxs=child_eidxs,
+                    arrays=child_arrays)
+
 
     def carveout_for_nrank(self, nrank: int, *, ntarget: int | None = None) -> "SubMesh":
         """
-        Return a child SubMesh containing every element that touches *nrank*.
-        All arrays listed in `array_specs` are sliced consistently.
+        Guarantee: if the interface strip contains ≥ ntarget elements the result size == ntarget.
         """
-        from pyfr.relocator.utils import crprint
+        rank = get_comm_rank_root()[1]
 
-
-        rank = get_comm_rank_root()[1]      # my rank for prints
-
-        # --- 1) FIRST interface layer (old behaviour) ------------------
+        # 1. interface layer -------------------------------------------------
         moved = self._find_elements_touching_rank(
             self.etypes, self.con, self.eidxs, nrank
         )
 
-        # --- 2) (NEW) grow to reach ntarget ----------------------------
-        moved = self._expand_patch_to_ntarget(moved, ntarget, rank)
+        iface_size = sum(len(v) for v in moved.values())
+        if ntarget is None or ntarget <= iface_size:
+            moved = self._select_top_by_iface(moved, ntarget, nrank, rank)
+        else:
+            # need more – keep the interface layer and grow further
+            moved = self._expand_patch_to_ntarget(moved, ntarget, rank)
 
         if not moved:
-            return SubMesh.blank(self.etypes)
+            return SubMesh.blank(self.meta)
 
-        # ---------------- locate rows to carve per etype -----------------
-        idx_map = {
-            et: np.nonzero(np.isin(self.eidxs[et], list(gids)))[0]
-            for et, gids in moved.items()
-        }
-
-        # ---------------- build child arrays ----------------------------
-        child_eidxs  = {}
-        child_arrays = {ary: {} for ary in SubMesh.array_specs}
-
-        for et in self.etypes:
-            ids = idx_map.get(et, np.empty(0, np.int64))
-
-            # element IDs
-            child_eidxs[et] = (
-                self.eidxs[et][ids].copy() if ids.size else np.empty(0, np.int64)
-            )
-
-            for ary in SubMesh.array_specs:
-                parent_arr = self.arrays[ary][et]
-                if ids.size:
-                    child_arrays[ary][et] = parent_arr[ids].copy()
-                else:                                           # empty slice
-                    child_arrays[ary][et] = np.empty_like(parent_arr, shape=(0, *parent_arr.shape[1:]))
-
-        for et, ids in idx_map.items():
-            keep = np.ones(len(self.eidxs[et]), bool)
-            keep[ids] = False
-
-            # eidxs
-            self.eidxs[et] = self.eidxs[et][keep]
-
-            # every array
-            for ary in SubMesh.array_specs:
-                getattr(self, ary)[et] = getattr(self, ary)[et][keep]
-
-        return SubMesh(etypes=self.etypes, eidxs=child_eidxs, arrays=child_arrays)
+        return self._slice_out_patch(moved)     # existing helper factored out
 
 
-    # ------------------------------------------------------------------
-    # static helpers – stateless, easily unit-testable
-    # ------------------------------------------------------------------
+    def _select_top_by_iface(
+        self, moved_init: dict[str, set[int]],
+        ntarget: int, nrank: int, rank: int
+    ) -> dict[str, set[int]]:
+        """
+        Return a copy of *moved_init* trimmed to exactly `ntarget`
+        using the interface-face ordering strategy.
+        """
+        if ntarget is None:
+            return moved_init
+
+        # flatten into (metric, et, gid) tuples
+        records = []
+        for et, gids in moved_init.items():
+            ten = self.con[et]                       # (Ne, Nf, 4)
+            curved = self.spts_curved[et]
+            gl2row = {int(g): i for i, g in enumerate(self.eidxs[et])}
+
+            for gid in gids:
+                row = gl2row[gid]
+                iface_faces = ((ten[row, :, 0] == nrank) & (ten[row, :, 1] >= 0)).sum()
+                records.append( (-iface_faces, curved[row], gid, et) )
+
+        # sort & pick
+        records.sort()               # python tuples sort lexicographically
+        keep = records[:ntarget]
+
+        # rebuild moved dict
+        moved = {}
+        for _, _, gid, et in keep:
+            moved.setdefault(et, set()).add(gid)
+
+        if len(keep) < ntarget:      # underflow ⇒ impossible (should not happen)
+            print(f"[select] rank={rank}: interface only {len(keep)}/{ntarget}")
+        return moved
+
     @staticmethod
     def _find_elements_touching_rank(
         etypes: List[str],
@@ -233,76 +277,99 @@ class SubMesh:
         eidxs: Dict[str, np.ndarray],
         nrank: int,
     ) -> Dict[str, set[int]]:
-        """Return {etype: {global-gid, …}} for elements that touch *nrank*."""
-        touched = {et: set() for et in etypes}
+        """
+        Elements having **at least one face whose owner-column == *nrank***.
+        """
+        hits: dict[str, set[int]] = {}
         for et in etypes:
-            ten = con[et]
-            rows = np.nonzero((ten[:, :, 0] == nrank).any(axis=1))[0]
+            ten  = con[et]
+            if ten.size == 0:
+                continue
+
+            rows = np.flatnonzero((ten[:, :, 0] == nrank).any(axis=1))
             if rows.size:
-                touched[et].update(eidxs[et][rows])
-        return {et: s for et, s in touched.items() if s}
+                hits[et] = set(map(int, eidxs[et][rows]))
 
-    # ------------------------------------------------------------------
-    # connectivity builder – unchanged except for constant refs
-    # ------------------------------------------------------------------
+        return hits
+
+
+    # ─────────────────────────────────────────────────────────────
+    # build connectivity tensors (owner, ncode, gid, face)
+    # ─────────────────────────────────────────────────────────────
     @staticmethod
-    def _build_con(mesh: _Mesh, rank: int, comm, bc_map) -> Dict[str, np.ndarray]:
-        nfaces = SubMesh.etype_nfaces_map
-        e2i = SubMesh.e_to_i
+    def _build_con(mesh: _Mesh,
+                rank: int,
+                comm,
+                bc_map: dict[str, int],
+                meta: MeshMetadata) -> dict[str, np.ndarray]:
+        """
+        Re-encode PyFR’s *triple* connectivity lists into dense tensors
+        (Ne, Nf, 4).  Columns: **owner-rank, neighbour-code, gid, face-idx**.
 
-        con = {et: np.full((len(mesh.eidxs[et]), nfaces[et], 4), -2, np.int64) for et in mesh.etypes}
-        glmap = {et: {int(g): i for i, g in enumerate(mesh.eidxs[et])} for et in mesh.etypes}
+        * interior faces  → owner == this rank
+        * MPI faces       → owner  = remote rank, neighbour-gid filled later
+        * boundary faces  → owner == -1, neighbour-code/gid == -1,
+                            face-idx stores bc-id (small positive int)
+        """
+        etypes, e2i = meta.etypes, meta.e_to_i
+        nf_map      = meta.etype_nfaces_map
 
-        # internal faces -------------------------------------------------
+        # allocate & build a quick gid→row map once per etype
+        con   = {et: np.full((len(mesh.eidxs[et]), nf_map[et], 4),
+                            -2, dtype=np.int64) for et in etypes}
+        gid2r = {et: {int(g): i for i, g in enumerate(mesh.eidxs[et])}
+                for et in etypes}
+
+        # ---------- 1) interior faces ---------------------------------------
         for (etL, lidL, fL), (etR, lidR, fR) in zip(*mesh.con):
-            gidL = int(mesh.eidxs[etL][lidL])
-            gidR = int(mesh.eidxs[etR][lidR])
-            rL, rR = glmap[etL][gidL], glmap[etR][gidR]
+            gidL, gidR = int(mesh.eidxs[etL][lidL]), int(mesh.eidxs[etR][lidR])
+            rL, rR     = gid2r[etL][gidL],            gid2r[etR][gidR]
 
             con[etL][rL, fL] = (rank, e2i[etR], gidR, fR)
             con[etR][rR, fR] = (rank, e2i[etL], gidL, fL)
 
-        # mpi faces ------------------------------------------------------
-        send_per_rank: List[List[Tuple[int, int, int]]] = [[] for _ in range(comm.size)]
-        mpi_local_rows: List[Tuple[int, str, int, int]] = []  # (nrank, et, lid, f)
+        # ---------- 2) MPI faces  (all-to-all once) -------------------------
+        send_buf: list[list[tuple[int, int, int]]] = [[] for _ in range(comm.size)]
+        local_rows: list[tuple[int, str, int, int]] = []  # (peer, et, lid, f)
 
-        for nrank, triples in mesh.con_p.items():
+        for peer, triples in mesh.con_p.items():
             for et, lid, f in triples:
-                mpi_local_rows.append((nrank, et, lid, f))
-                send_per_rank[nrank].append((e2i[et], int(mesh.eidxs[et][lid]), f))
+                local_rows.append((peer, et, lid, f))
+                send_buf[peer].append((e2i[et], int(mesh.eidxs[et][lid]), f))
 
-                gid_local = int(mesh.eidxs[et][lid])
-                r_local = glmap[et][gid_local]
-                con[et][r_local, f] = (nrank, -1, -1, -1)  # placeholder
+                # placeholder – will be overwritten after exchange
+                row = gid2r[et][int(mesh.eidxs[et][lid])]
+                con[et][row, f] = (peer, -1, -1, -1)
 
-        svals = np.array([item for sub in send_per_rank for item in sub], np.int64)
-        scount = np.array([len(sub) for sub in send_per_rank], np.int64)
+        # fixed -------------------------------------
+        flat   = np.array([t for sub in send_buf for t in sub], dtype=np.int64)  # shape (N, 3)
+        counts = np.fromiter((len(sub) for sub in send_buf), dtype=np.int64) 
 
         tx = AlltoallMixin()
-        rvals, (rcount, rdisp) = tx._alltoallcv(comm, svals, scount)
+        rbuf, (rcount, rdisp) = tx._alltoallcv(comm, flat, counts)
 
-        for src_rank in range(comm.size):
-            if rcount[src_rank] == 0:
+        for peer in range(comm.size):
+            if rcount[peer] == 0:
                 continue
-            start, stop = rdisp[src_rank], rdisp[src_rank] + rcount[src_rank]
-            chunk = rvals[start:stop]
+            chunk = rbuf[rdisp[peer]: rdisp[peer] + rcount[peer]]
 
-            for (ncode, gid_remote, f_remote), (dst_rank, etL, lidL, fL) in zip(chunk, (row for row in mpi_local_rows if row[0] == src_rank)):
-                gid_local = int(mesh.eidxs[etL][lidL])
-                r_local = glmap[etL][gid_local]
-                con[etL][r_local, fL] = (src_rank, ncode, gid_remote, f_remote)
+            # iterate in the same order as we sent
+            for (ncode, gid_remote, f_remote), (p, etL, lidL, fL) in zip(
+                    chunk, (row for row in local_rows if row[0] == peer)):
+                row = gid2r[etL][int(mesh.eidxs[etL][lidL])]
+                con[etL][row, fL] = (peer, ncode, gid_remote, f_remote)
 
-        # boundaries -----------------------------------------------------
-        for bcname, triples in mesh.bcon.items():
-            bc_id = bc_map[bcname]
+        # ---------- 3) boundary faces ---------------------------------------
+        for bc_name, triples in mesh.bcon.items():
+            bc_id = bc_map[bc_name]
             for et, lid, f in triples:
-                gid = int(mesh.eidxs[et][lid])
-                rrow = glmap[et][gid]
-                con[et][rrow, f] = (-1, -1, -1, bc_id)
+                row = gid2r[et][int(mesh.eidxs[et][lid])]
+                con[et][row, f] = (-1, -1, -1, bc_id)
 
-        # sanity ---------------------------------------------------------
+        # ---------- final sanity -------------------------------------------
         for et, arr in con.items():
-            assert (arr == -2).sum() == 0, f"unfilled entries in con[{et}]"
+            assert np.all(arr != -2), f"con[{et}] still has -2 placeholders"
+
         return con
 
     @property
@@ -317,23 +384,22 @@ class SubMesh:
         return sum(self.N_ei.values())
 
     def _compute_is_mpi(self, rank: int) -> dict[str, np.ndarray]:
-        """Return {etype: bool[Ne]} – True if element has an MPI neighbour."""
-        flags = {}
+        """
+        Element-wise flag: **True** ⇨ at least one face talks to another MPI rank.
+        """
+        out: dict[str, np.ndarray] = {}
         for et in self.etypes:
-            ten = self.con[et]                           # (Ne, Nf, 4)
+            ten = self.con[et]                                  # (Ne, Nf, 4)
             if ten.size == 0:
-                flags[et] = np.zeros(0, bool)
+                out[et] = np.zeros(0, dtype=bool)
                 continue
 
-            owner = ten[..., 0]                          # neighbour owner-rank
-            etype = ten[..., 1]                          # -1 on boundaries
-            mpi_face = (owner != rank) & (owner >= 0) & (etype >= 0)
-            flags[et] = mpi_face.any(axis=1)             # OR over faces
-        return flags
+            owner, etype = ten[..., 0], ten[..., 1]
+            mpi_mask      = (owner != rank) & (owner >= 0) & (etype >= 0)
+            out[et]       = mpi_mask.any(axis=1)
 
-    # ------------------------------------------------------------------
-    # helper – grow {etype: set(gids)} until |⋃| == ntarget   (self-contained)
-    # ------------------------------------------------------------------
+        return out
+
     def _expand_patch_to_ntarget(
         self,
         moved: dict[str, set[int]],
@@ -380,7 +446,7 @@ class SubMesh:
                     mask = (faces[:, 0] == rank) & (faces[:, 1] >= 0)
                     for ncode, ngid in faces[mask][:, 1:3]:
 
-                        net = self.i_to_e[int(ncode)]
+                        net = self.meta.i_to_e[int(ncode)]
                         ngid = int(ngid)
                         if ngid in moved.get(net, set()):
                             continue
@@ -415,10 +481,19 @@ class SubMesh:
             # 4) update patch + trace
             moved.setdefault(best_et, set()).add(best_gid)
 
-            print(f"[patch] rank={rank} add ({best_et},{best_gid})  "
-                f"shared={shared_counts[best_idx]}  "
-                f"mpi={mpi_counts[best_idx]}  "
-                f"curved={bool(curved_flags[best_idx])}  "
-                f"new_size={patch_size(moved)}/{ntarget}")
-
         return moved
+
+    @staticmethod
+    def _trailing_shape(name: str, meta: MeshMetadata, et: str | None):
+        if name == "con":
+            nf = meta.etype_nfaces_map[et] if et else next(iter(meta.etype_nfaces_map.values()))
+            return (nf, 4)
+        if name == "spts_curved":
+            return ()
+        if name == "spts_nodes":
+            nv = meta.nv_map[et] if et else next(iter(meta.nv_map.values()))
+            return (nv,)
+        if name == "spts":
+            nv = meta.nv_map[et] if et else next(iter(meta.nv_map.values()))
+            return (nv, meta.edim)
+        raise KeyError(name)
