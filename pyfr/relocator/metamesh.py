@@ -189,85 +189,182 @@ class MetaMesh:
             if dest != self.rank:
                 self.smeshes[dest] = SubMesh.blank(self.meta)
 
-    @staticmethod
-    def build_global_plan(N_i: np.ndarray, targets: np.ndarray) -> dict[int, dict[int, int]]:
-        """Return {donor: {recv: n_elem, …}, …} moving all surplus in one sweep."""
-        surplus  = N_i - targets                       # positive = donors
+
+    # ──────────────────────────────────────────────────────────
+    #  adjacency helper  (now a real method)
+    # ──────────────────────────────────────────────────────────
+    def _adjacent_ranks(self, donor: int) -> np.ndarray:
+        """Boolean mask of ranks that share ≥1 MPI face with *donor*."""
+        R    = self.comm.size
+        mask = np.zeros(R, dtype=bool)
+        for et in self.smeshes[donor].etypes:
+            nbr = self.smeshes[donor].con[et][..., 0].ravel()
+            mask[nbr[nbr >= 0]] = True
+        mask[donor] = False
+        return mask
+
+    # ──────────────────────────────────────────────────────────
+    #  helper: push bridge-donors to the back of the queue
+    # ──────────────────────────────────────────────────────────
+    def _reorder_donors_skip_bridges(
+        self, donors: list[int], deficits: list[int]
+    ) -> list[int]:
+        """
+        Return `donors` reordered so that a donor which is the **only**
+        neighbour of some current-deficit rank is moved to the tail.
+
+        This avoids the 0-1-2 oscillation pattern:
+            0 ↔ 1 ↔ 2   (no 0–2 edge) and 1 is surplus.
+        Skipping 1 *first* lets another round use 1 without ping-ponging.
+        """
+        nonbridges, bridges = [], []
+
+        # cache adjacency look-ups once
+        adj = {d: self._adjacent_ranks(d) for d in donors}
+
+        for d in donors:
+            # is d the sole adjacent donor for any deficit rank?
+            is_bridge = False
+            for r in deficits:
+                if adj[d][r]:                                    # r touches d
+                    if not any(adj[od][r] for od in donors if od != d):
+                        is_bridge = True                         # unique link
+                        break
+            (bridges if is_bridge else nonbridges).append(d)
+
+        return nonbridges + bridges          # try non-bridges first
+
+
+
+
+    # ──────────────────────────────────────────────────────────
+    #  build plan for a single redistribution round
+    # ──────────────────────────────────────────────────────────
+    def _one_round_plan(self,
+                        counts : np.ndarray,
+                        targets: np.ndarray) -> dict[int, dict[int, int]]:
+        """Adjacent-only version of the surplus → deficit assignment."""
+
+        surplus  = counts - targets                       # positive = donors
         donors   = np.where(surplus > 0)[0]
         recvs    = np.where(surplus < 0)[0]
         plan     = {d: {} for d in donors}
 
         deficits = {r: -surplus[r] for r in recvs}     # positive numbers
         donors   = sorted(donors, key=lambda d: surplus[d], reverse=True)
+        donors   = self._reorder_donors_skip_bridges(donors, list(recvs))
 
         for r in sorted(recvs, key=deficits.get, reverse=True):
             need = deficits[r]
-            for d in donors:
+            # keep only donors that really touch *r*
+            touching = [d for d in donors if self._adjacent_ranks(d)[r]]
+            for d in touching:
                 give = min(need, surplus[d])
+
+                # ---- no donor can give exactly what we still need ----
+                if give == 0 and need > 0:
+                    # take the *smallest* patch the donor can carve, even
+                    # if that will overshoot; we will repair next sweep
+                    give = self.smeshes[d].smallest_patch_touching(r)
+                    give = min(give, surplus[d])     # cap at donor surplus
+
                 if give:
                     plan[d][r] = give
                     surplus[d] -= give
                     need       -= give
                 if need == 0:
                     break
-            assert need == 0, "should be enough surplus to cover all deficits"
         return plan
 
-    def redistribute(self, targets: list[int]) -> None:
+    def redistribute(
+        self,
+        targets: list[int],
+        *,
+        max_sweeps = None          # 0 → keep sweeping until converged
+    ) -> None:
+        """
+        Re-balance until every rank owns exactly `targets[i]` elements or
+        `max_sweeps` iterations have been executed.
 
-        # perfcounter()
-        tstart = time.perf_counter()
-
-        crpprint(-1, self.smeshes[self.rank].N_i, "Local SubMesh before exchange")
-
+        Parameters
+        ----------
+        targets : list[int]
+            Desired element counts per rank (len == comm.size)
+        max_sweeps : int, optional
+            Hard cap on the number of full carve–exchange–merge sweeps.
+            *0* (default) means “no cap’’ (run until convergence).
+        """
         comm, rank, _ = get_comm_rank_root()
-        R = comm.size
+        R             = comm.size
+
+        if max_sweeps is None:
+            max_sweeps = comm.size
+
         assert len(targets) == R
 
-        def gather_Ni():
-            return np.array(comm.allgather(self.smeshes[rank].N_i), int)
+        def gather_Ni() -> np.ndarray:
+            return np.array(comm.allgather(self.smeshes[rank].N_i), dtype=int)
 
         from pyfr.relocator.submeshexchanger import SubMeshExchanger
         exchanger = SubMeshExchanger(comm)
 
-        # ─── 1. current counts & global plan ──────────────────────────────
-        N_i   = gather_Ni()
+        sweep = 0
+        while True:
+            counts = gather_Ni()
+            if np.all(counts == targets):
+                if rank == 0:
+                    print(f"[redistribute] converged in {sweep} sweep(s)")
+                break
+            if max_sweeps and sweep >= max_sweeps:
+                if rank == 0:
+                    print(f"[redistribute] stopped after {sweep} sweep(s) "
+                        "(max_sweeps reached)")
+                break
+            sweep += 1
 
-        plan  = self.build_global_plan(N_i, np.asarray(targets))
-        if rank == 0:
-            print("[global-plan]", plan)
+            # ─── 1. build donor→receiver plan for *this* sweep ───────────────
+            plan = self._one_round_plan(counts, np.asarray(targets))
 
-        # ─── 2. clear all non-local slots once ────────────────────────────
-        for dest in range(R):
-            if dest != self.rank:
-                self.smeshes[dest] = SubMesh.blank(self.meta)
+            # quick sanity
+            for donor, recvs in plan.items():
+                for recv in recvs:
+                    if not self.smeshes[donor]._find_elements_touching_rank(
+                            self.etypes, self.smeshes[donor].con,
+                            self.smeshes[donor].eidxs, recv):
+                        raise RuntimeError(
+                            f"Impossible move: donor {donor} has no interface "
+                            f"with recv {recv}"
+                        )
 
-        # ─── 3. donors build their patches ────────────────────────────────
-        for donor, sends in plan.items():
-            if rank == donor:
+            # ─── 2. clear every non-local slot once ──────────────────────────
+            for dest in range(R):
+                if dest != self.rank:
+                    self.smeshes[dest] = SubMesh.blank(self.meta)
+
+            # ─── 3. donors carve and stage patches locally ───────────────────
+            for donor, sends in plan.items():
+                if rank != donor:
+                    continue
                 for recv, want in sends.items():
                     patch, moved = self._safe_carve(donor, recv, want)
                     assert moved == want, \
                         f"donor {donor}→{recv}: asked {want}, carved {moved}"
-                    self.smeshes[recv] = patch  # one slot per recv
+                    self.smeshes[recv] = patch     # one slot per recv
 
-        # ─── 4. single all-to-all exchange ────────────────────────────────
-        eidxs, arrays = exchanger.exchange(self)
-        self.integrate_exchange(eidxs, arrays)
+            # ─── 4. single all-to-all exchange of staged slots ───────────────
+            eidxs, arrays = exchanger.exchange(self)
+            self.integrate_exchange(eidxs, arrays)
 
-        # ─── 5. owner columns + ordering ──────────────────────────────────
-        self.sync_owner_columns()
-        for r in range(R):
-            self.smeshes[r].restore_native_order(r)
+            # ─── 5. owner columns & native order restoration ─────────────────
+            self.sync_owner_columns()
+            for r in range(R):
+                self.smeshes[r].restore_native_order(r)
 
-        # ─── 6. final diagnostics ─────────────────────────────────────────
-        N_i = gather_Ni()
+        # -- end of while True loop -------------------------------------------
+        final_counts = gather_Ni()        # <-- moved outside the rank-0 guard
         if rank == 0:
-            print("[redistribute] new counts", N_i.tolist())
+            print("[redistribute] final counts", final_counts.tolist())
 
-        crpprint(-1, self.smeshes[self.rank].N_i, "Local SubMesh after exchange")
-
-        print(f"[redistribute] took {time.perf_counter() - tstart:.4f} seconds")
 
     def _safe_carve(self, donor: int, recv: int, want: int) -> tuple["SubMesh", int]:
         """Carve exactly *want* elements; raise if impossible."""

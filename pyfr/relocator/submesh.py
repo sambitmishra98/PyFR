@@ -407,81 +407,125 @@ class SubMesh:
         rank: int,
     ) -> dict[str, set[int]]:
         """
-        Greedy, deterministic growth of *moved* until the total element
-        count reaches *ntarget* (or we run out of neighbours).
+        Grow *moved* deterministically until it contains **exactly**
+        ``ntarget`` elements (provided this SubMesh still has that many
+        elements in total).
 
-        Strategy at each step
-        1.  prefer candidate sharing **more patch faces**
-        2.  break ties by **fewer MPI faces**
-        3.  break further ties by **straight before curved**
+        Strategy
+        --------
+        1.  repeatedly look for neighbours of the current patch which
+            are **still present** on this rank                   *(safe-guard)*  
+        2.  pick the candidate that  
+              • shares more internal faces with the patch  
+              • then has fewer MPI faces  
+              • then is straight before curved
+        3.  **If we can no longer find a valid neighbour but are still
+            short,** fall back to filling the deficit with *any* remaining
+            elements of this rank (straight-first, then curved).
         """
         if ntarget is None:
-            return moved
+            return moved                                         # nothing to do
 
         from collections import defaultdict
 
-        # --- helpers -------------------------------------------------------
+        # ------------------------------------------------------------------ #
         def patch_size(md: dict[str, set[int]]) -> int:
             return sum(len(v) for v in md.values())
 
-        # global-gid → local-row map for quick access
-        gl_to_row = {
-            et: {int(g): i for i, g in enumerate(self.eidxs[et])}
-            for et in self.etypes
-        }
+        con = self.con                                           # shorthand
 
-        con = self.con  # convenience alias
-
-        # ------------------------------------------------------------------
+        # ------------------------------------------------------------------ #
         while patch_size(moved) < ntarget:
+            # ─── rebuild gid→row on EACH iteration (more robust) ─────────
+            gl_to_row = {
+                et: {int(g): i for i, g in enumerate(self.eidxs[et])}
+                for et in self.etypes
+            }
+
             # 1) collect neighbour candidates + how many faces they share
-            cand_shared = defaultdict(int)             # (et,gid) → shared-face-count
+            cand_shared: dict[tuple[str, int], int] = defaultdict(int)
 
             for et in self.etypes:
                 for gid in moved.get(et, ()):
-                    row = gl_to_row[et][gid]
-                    faces = con[et][row]               # (Nf,4)
+                    row = gl_to_row[et].get(gid)                 # may be gone
+                    if row is None:
+                        continue
 
-                    # look at neighbours that stay on *this* rank
-                    mask = (faces[:, 0] == rank) & (faces[:, 1] >= 0)
+                    faces = con[et][row]                         # (Nf, 4)
+                    mask  = (faces[:, 0] == rank) & (faces[:, 1] >= 0)
                     for ncode, ngid in faces[mask][:, 1:3]:
-
-                        net = self.meta.i_to_e[int(ncode)]
+                        net  = self.meta.i_to_e[int(ncode)]
                         ngid = int(ngid)
                         if ngid in moved.get(net, set()):
                             continue
-                        cand_shared[(net, ngid)] += 1
+                        # neighbour must *still* exist
+                        if ngid in gl_to_row[net]:
+                            cand_shared[(net, ngid)] += 1
 
-            if not cand_shared:
-                print(f"[expand] rank={rank} dead-end at {patch_size(moved)}/{ntarget}")
+            # 2) if we have at least one valid neighbour → choose the best
+            if cand_shared:
+                keys          = list(cand_shared)
+                shared_cnt    = np.asarray([cand_shared[k] for k in keys])
+                mpi_cnt       = np.empty_like(shared_cnt)
+                curved_flag   = np.empty_like(shared_cnt)
+
+                for i, (et, gid) in enumerate(keys):
+                    row          = gl_to_row[et][gid]
+                    ten          = con[et][row]
+                    mpi_cnt[i]   = ((ten[:, 0] != rank) & (ten[:, 1] >= 0)).sum()
+                    curved_flag[i] = self.spts_curved[et][row]
+
+                order_mat = np.stack([shared_cnt, -mpi_cnt, -curved_flag], axis=1)
+                best      = keys[int(np.lexsort(order_mat.T)[-1])]
+                moved.setdefault(best[0], set()).add(best[1])
+                continue                                            # loop again
+
+            # 3) dead-end: no *valid* neighbours left – brute-force fill
+            deficit = ntarget - patch_size(moved)
+            if deficit <= 0:
                 break
 
-            # 2) build candidate metric arrays
-            cand_keys       = list(cand_shared.keys())             # ordered list
-            shared_counts   = np.fromiter((cand_shared[k] for k in cand_keys),
-                                        int, len(cand_keys))
+            for et in self.etypes:                                  # straight→curved
+                rows = np.arange(len(self.eidxs[et]))
+                straight = rows[~self.spts_curved[et]]
+                curved   = rows[self.spts_curved[et]]
 
-            mpi_counts      = np.empty_like(shared_counts)
-            curved_flags    = np.empty_like(shared_counts)
+                for pool in (straight, curved):
+                    for row in pool:
+                        gid = int(self.eidxs[et][row])
+                        if gid in moved.get(et, set()):
+                            continue
+                        moved.setdefault(et, set()).add(gid)
+                        deficit -= 1
+                        if deficit == 0:
+                            break
+                    if deficit == 0:
+                        break
+                if deficit == 0:
+                    break
 
-            for i, (et, gid) in enumerate(cand_keys):
-                row = gl_to_row[et][gid]
-                ten = con[et][row]                                # (Nf,4)
-
-                mpi_counts[i]   = ( (ten[:, 0] != rank) & (ten[:, 1] >= 0) ).sum()
-                curved_flags[i] = self.spts_curved[et][row]
-
-            # 3) deterministic best-candidate selection (lexsort)
-            order_key = np.stack([ shared_counts,
-                                -mpi_counts,
-                                -curved_flags ], axis=1)
-            best_idx          = int(np.lexsort(order_key.T)[-1])   # NumPy → int
-            best_et, best_gid = cand_keys[best_idx]
-
-            # 4) update patch + trace
-            moved.setdefault(best_et, set()).add(best_gid)
+            # if we STILL have a deficit, donor genuinely ran out of elements
+            # (should be impossible given the upfront surplus check)
+            if deficit > 0:
+                print(f"[expand] rank={rank}: donor exhausted "
+                      f"at {patch_size(moved)}/{ntarget}")
+                break
 
         return moved
+
+    def smallest_patch_touching(self, nrank: int) -> int:
+        """
+        Return the number of elements in the *first*-layer interface strip
+        between this sub-mesh and `nrank`.  Used by MetaMesh to decide
+        the least-overshoot it can tolerate when no exact donation is
+        possible in the current sweep.
+        """
+        moved = self._find_elements_touching_rank(
+            self.etypes, self.con, self.eidxs, nrank
+        )
+        return sum(len(v) for v in moved.values())
+
+
 
     @staticmethod
     def _trailing_shape(name: str, meta: MeshMetadata, et: str | None):
