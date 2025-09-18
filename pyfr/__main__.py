@@ -15,12 +15,13 @@ from pyfr.backends import BaseBackend, get_backend
 from pyfr.inifile import Inifile
 from pyfr.mpiutil import get_comm_rank_root, init_mpi
 from pyfr.partitioners import (BasePartitioner, get_partitioner,
+                               reconstruct_by_diffusion,
                                reconstruct_partitioning, write_partitioning)
 from pyfr.plugins import BaseCLIPlugin
 from pyfr.progress import (NullProgressSequence, ProgressBar,
                            ProgressSequenceAction)
 from pyfr.readers import BaseReader, get_reader_by_name, get_reader_by_extn
-from pyfr.readers.native import NativeReader
+from pyfr.readers.native import NativeReader, _Mesh, _MetaMesh
 from pyfr.readers.stl import read_stl
 from pyfr.resamplers import (BaseInterpolator, NativeCloudResampler,
                              get_interpolator)
@@ -76,6 +77,24 @@ def main():
                                    help='separator')
     ap_partition_info.set_defaults(process=process_partition_info)
 
+    # Partition: moreinfo
+    ap_partition_moreinfo = ap_partition.add_parser(
+        'moreinfo', help='partition moreinfo --help'
+    )
+    ap_partition_moreinfo.add_argument('mesh', help='input mesh file')
+    ap_partition_moreinfo.add_argument('name', help='partitioning name')
+    ap_partition_moreinfo.add_argument('cfg', type=FileType('r'), 
+                                       help='config file')
+    ap_partition_moreinfo.add_argument('-s', '--sep', default='\t', 
+                                       help='separator')
+    ap_partition_moreinfo.add_argument('--units', choices=['B', 'KB', 'MB', 'GB'],
+                                default='MB', help='units for iface bytes')
+    ap_partition_moreinfo.add_argument('--iface', action='store_true',
+                help='Show pairwise MPI cut face counts (faces only)')
+    ap_partition_moreinfo.set_defaults(process=process_partition_moreinfo)
+    # in your partition/moreinfo subparser setup
+
+
     # Add partitioning
     ap_partition_add = ap_partition.add_parser('add',
                                                help='partition add --help')
@@ -113,6 +132,40 @@ def main():
     ap_partition_reconstruct.set_defaults(
         process=process_partition_reconstruct
     )
+
+    # Reconstruct partitioning by diffusion from an existing partitioning
+    ap_partition_diffuse = ap_partition.add_parser(
+        'diffuse', help='partition diffuse --help'
+    )
+
+    ap_partition_diffuse.add_argument('mesh', help='input mesh file')
+    ap_partition_diffuse.add_argument('np', 
+                                      help='number of partitions or a colon '
+                                           'delimited list of weights')
+    ap_partition_diffuse.add_argument('name', help='Existing partitioning name')
+    ap_partition_diffuse.add_argument('dpname', help='Diffused partitioning name')
+    ap_partition_diffuse.add_argument(
+        '-f', '--force', action='count', help='overwrite existing partitioning'
+    )
+    ap_partition_diffuse.add_argument('--mopt', dest='mopts', action='append', 
+                                      default=[], metavar='deltas', 
+                                      help='per-rank movements, e.g. "-2:1:1";'
+                                           ' must sum to 0'
+    )
+
+    ap_partition_diffuse.add_argument(
+        '--moves', required=True, metavar='MATRIX',
+        help=('Movement matrix (R rows) with rows separated by "," or ";" '
+            'and entries by ":", e.g. "0:2:1,0:0:0,0:0:0" for R=3')
+    )
+
+    ap_partition_diffuse.add_argument(
+        '--mode', choices=['iface', 'random'], default='iface',
+        help='Select from MPI interface only ("iface") or any element ("random")'
+    )
+
+
+    ap_partition_diffuse.set_defaults(process=process_partition_diffuse)
 
     # Remove partitioning
     ap_partition_remove = ap_partition.add_parser(
@@ -277,6 +330,111 @@ def process_partition_info(args):
         for i, neles in enumerate(regions[:, 1:] - regions[:, :-1]):
             print(i, *neles, sep=args.sep)
 
+def _print_table(rows, sep: str = None):
+    """
+    Pretty-print a table.
+    - rows: list of lists
+    - sep: if None → auto-align columns, else use provided separator (e.g. '\t', ',')
+
+    Example:
+        _print_table([["rank","n-quad"], [0,7], [1,8]], sep=None)
+    """
+    # Convert all to strings
+    srows = [[str(x) for x in row] for row in rows]
+
+    if sep:
+        for row in srows:
+            print(sep.join(row))
+    else:
+        # Column widths
+        widths = [max(len(row[i]) for row in srows) for i in range(len(srows[0]))]
+        for row in srows:
+            print("  ".join(val.rjust(widths[i]) for i, val in enumerate(row)))
+
+
+def process_partition_moreinfo(args):
+    """
+    Minimal partition info:
+      - per-rank element counts by etype
+      - per-rank totals
+      - optional pairwise MPI cut face counts (if --iface)
+      - basic solver/meta (if cfg provided)
+    """
+    from pyfr.inifile import Inifile
+    from pyfr.readers.native import NativeReader
+    import numpy as np
+
+    init_mpi()
+    comm, rank, root = get_comm_rank_root()
+
+    # Optional solver config (meta only)
+    cfg = Inifile.load(args.cfg) if args.cfg else None
+    if cfg:
+        order     = cfg.getint('solver', 'order')
+        precision = cfg.get('backend', 'precision')
+        system    = cfg.get('solver', 'system')
+    else:
+        order = precision = system = None
+
+    # Build MetaMesh (no gid2row dependency)
+    reader = NativeReader(args.mesh, pname=args.name)
+    mesh   = reader.mesh
+    mm     = _MetaMesh.from_mesh(mesh)
+
+    # --- Per-rank element counts (vectorised) ---
+    etypes = list(mm.etypes)
+    R = comm.size
+    counts_by_et = {
+        et: np.bincount(mm.placements[et][:, 0].astype(np.int64), minlength=R)
+        for et in etypes
+    }
+    totals = np.zeros(R, dtype=np.int64)
+    for et in etypes:
+        totals += counts_by_et[et]
+
+    if rank == root:
+        header = ["rank", *[f"n-{et}" for et in etypes], "n-total"]
+        rows = [header]
+        for r in range(R):
+            rows.append([r, *[int(counts_by_et[et][r]) for et in etypes], int(totals[r])])
+        _print_table(rows, args.sep)
+        print()
+
+    # --- Optional: pairwise MPI cut face counts (faces only) ---
+    if getattr(args, 'iface', False):
+        # Uses the new vectorised kernel inside _MetaMesh
+        pc = mm.iface_pair_counts()  # shape (m, 3): [lo_rank, hi_rank, faces]
+
+        if rank == root:
+            # pair table
+            rows = [["pair", "faces"]]
+            for lo, hi, f in pc:
+                rows.append([f"{int(lo)}-{int(hi)}", int(f)])
+            _print_table(rows, args.sep)
+            print()
+
+            # per-rank face sums (each cut counted once; add to both sides)
+            if pc.size:
+                lo = pc[:, 0].astype(np.int64)
+                hi = pc[:, 1].astype(np.int64)
+                w  = pc[:, 2].astype(np.float64)  # bincount weights must be float
+                sums = np.bincount(lo, weights=w, minlength=R) + np.bincount(hi, weights=w, minlength=R)
+                sums = sums.astype(np.int64, copy=False)
+            else:
+                sums = np.zeros(R, dtype=np.int64)
+
+            rows = [["rank", "iface-faces-sum"], *([[r, int(sums[r])] for r in range(R)])]
+            _print_table(rows, args.sep)
+            print()
+
+    # --- Optional solver/meta block ---
+    if rank == root and cfg:
+        rows = [["order", order],
+                ["precision", precision],
+                ["system", system],
+                ["ndims", mm._ndims()]]
+        _print_table(rows, args.sep)
+
 
 def process_partition_add(args):
     with h5py.File(args.mesh, 'r+') as mesh:
@@ -357,6 +515,69 @@ def process_partition_reconstruct(args):
         with args.progress.start('Write partitioning'):
             write_partitioning(mesh, args.name, pinfo)
 
+def process_partition_diffuse(args):
+
+    def _parse_moves_matrix(s: str) -> list[list[int]]:
+        # split rows by comma or semicolon
+        rows = re.split(r'[;,]', s.strip())
+        mat = []
+        for r in rows:
+            r = r.strip()
+            if not r:
+                continue
+            mat.append([int(x) for x in r.split(':') if x != ''])
+        # ensure rectangular
+        if len({len(r) for r in mat}) != 1:
+            raise ValueError("moves matrix must have equal-length rows")
+        return mat
+
+
+    # Validate the partitioning name
+    if not re.match(r'\w+$', args.name):
+        raise ValueError('Invalid partitioning name')
+
+    init_mpi()
+    comm, rank, root = get_comm_rank_root()
+
+    # Parse matrix on root, broadcast
+    if rank == root:
+        mat = _parse_moves_matrix(args.moves)
+        M = np.asarray(mat, dtype=int)
+    else:
+        M = None
+    M = comm.bcast(M, root=root)
+
+    # Basic sanity: square and matches communicator
+    R = comm.size
+    if M.shape != (R, R):
+        raise ValueError(f'--moves must be a {R}x{R} matrix for this MPI run')
+
+    # Build a read-only mesh and metamesh for current partitioning
+    reader = NativeReader(args.mesh, pname=args.name)
+    read_only_mesh = reader.mesh
+    reader.close()
+
+    mm = _MetaMesh.from_mesh(read_only_mesh)
+
+    # Apply the diffusion (matrix + mode)
+    mm.diffuse_by_matrix(M, mode=args.mode)
+
+    # Convert placements to flat parts vector (PyFR canonical order)
+    vparts = mm.vparts_global()
+
+    if rank == root:
+        with args.progress.start('Repartition'):
+            with h5py.File(args.mesh, 'r+') as mesh:
+                # Check overwrite rules
+                if args.dpname in mesh['partitionings'] and not args.force:
+                    raise ValueError('Partitioning already exists; use -f to replace')
+
+                # Build connectivity and write out new partitioning
+                con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
+                pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps, con, vparts)
+
+                with args.progress.start('Write partitioning'):
+                    write_partitioning(mesh, args.dpname, pinfo)
 
 def process_partition_remove(args):
     with h5py.File(args.mesh, 'r+') as mesh:
