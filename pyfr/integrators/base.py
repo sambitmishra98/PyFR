@@ -64,6 +64,7 @@ class BaseIntegrator:
 
         # Record the starting wall clock time
         self._wstart = time.time()
+        self.walltime_last = 0.
 
         # Record the total amount of time spent in each plugin
         self._plugin_wtimes = defaultdict(lambda: 0)
@@ -180,6 +181,8 @@ class BaseIntegrator:
 
         # Simulation and wall clock times
         stats.set('solver-time-integrator', 'tcurr', self.tcurr)
+        stats.set('solver-time-integrator', 'wall-time-last', self.walltime_last)
+        self.walltime_last = wtime
         stats.set('solver-time-integrator', 'wall-time', wtime)
 
         # Plugin wall clock times
@@ -221,6 +224,12 @@ class BaseIntegrator:
 
         if self.cfg.getbool('backend', 'collect-waitsome-times', False):
             comm, rank, root = get_comm_rank_root()
+
+            wait_times = comm.allgather(self.system.rhs_wait_times())
+            for i, ms in enumerate(zip(*wait_times)):
+                for j, k in enumerate(['mean', 'stdev', 'median']):
+                    stats.set('backend-wait-times', f'rhs-graph-{i}-wait-{k}',
+                              ','.join(f'{v[j]:.3g}' for v in ms))
 
             compute_times = comm.allgather(self.system.rhs_compute_times())
             for i, ms in enumerate(zip(*compute_times)):
@@ -281,11 +290,102 @@ class BaseIntegrator:
         for r_src, stage_dict in enumerate(nbs_all):
             for stage, vec in stage_dict.items():
                 for r_dst, nb in enumerate(vec):
-                    if r_src != r_dst and nb:
+                    if r_src > r_dst and nb:
                         stage_to_triplets[stage].append(f'({r_src},{r_dst},{nb})')
 
         for stage, triplets in sorted(stage_to_triplets.items()):
-            stats.set('backend-bytes', f'rhs-graph-{stage}', ','.join(triplets))
+            stats.set('backend-bytes', f'rhs-graph-{stage}-bytes', ','.join(triplets))
+
+        self._collect_backend_elements(stats)
+
+        if self.tcurr > self.tstart:
+            self.load_balance_compute_weights(stats)
+
+
+    def _collect_backend_elements(self, stats):
+        """Collect element counts and DoFs per rank and per type, via ele_shapes."""
+        comm, rank, root = get_comm_rank_root()
+
+        # Local stats from ele_shapes
+        etypes = list(self.system.ele_shapes)
+        local_counts = [self.system.ele_shapes[et][2] for et in etypes]
+        local_dofs   = [self.system.ele_shapes[et][0] *
+                        self.system.ele_shapes[et][1] *
+                        self.system.ele_shapes[et][2]
+                        for et in etypes]
+
+        # Totals per rank
+        local_count_tot = sum(local_counts)
+        local_dof_tot   = sum(local_dofs)
+
+        # Gather across ranks
+        all_counts = comm.allgather(local_counts)
+        all_dofs   = comm.allgather(local_dofs)
+        all_count_tot = comm.allgather(local_count_tot)
+        all_dof_tot   = comm.allgather(local_dof_tot)
+
+        stats.set('backend-elements', 'etypes', ','.join(etypes))
+
+        for j, et in enumerate(etypes):
+            counts = ','.join(str(c[j]) for c in all_counts)
+            dofs   = ','.join(str(d[j]) for d in all_dofs)
+            stats.set('backend-elements', f'elems-{et}', counts)
+            stats.set('backend-elements', f'dofs-{et}', dofs)
+
+        stats.set('backend-elements', 'elems-all',
+                ','.join(str(c) for c in all_count_tot))
+        stats.set('backend-elements', 'dofs-all',
+                ','.join(str(d) for d in all_dof_tot))
+
+    def load_balance_compute_weights(self, stats):
+        comm, rank, root = get_comm_rank_root()
+
+        # Grab per-rank dofs
+        dofs = [int(x) for x in stats.get('backend-elements', 'dofs-all').split(',')]
+        R = len(dofs)
+        P = comm.size
+
+        # Grab per-rank compute+all times (median for g0+g1)
+        g0c = [float(x) for x in stats.get('backend-compute-times', 'rhs-graph-0-compute-median').split(',')]
+        g1c = [float(x) for x in stats.get('backend-compute-times', 'rhs-graph-1-compute-median').split(',')]
+        g0a = [float(x) for x in stats.get('backend-all-times',     'rhs-graph-0-all-median').split(',')]
+        g1a = [float(x) for x in stats.get('backend-all-times',     'rhs-graph-1-all-median').split(',')]
+
+        # NEW: read flattened send medians (length P*P): row=r (src), col=c (dst)
+        def _get_send(stage):
+            key = f'rhs-graph-{stage}-send-median'
+            vals = [float(x) for x in stats.get('backend-wait-times', key).split(',')]
+            return vals
+
+        def _sum_offdiag(flat, P):
+            # per-rank sum over c != r
+            if len(flat) != P*P:
+                # fallback if older stats format; keep neutral
+                return [0.0]*P
+            return [sum(flat[r*P + c] for c in range(P) if c != r) for r in range(P)]
+
+        g0s_flat = _get_send(0)
+        g1s_flat = _get_send(1)
+        g0s_sum  = _sum_offdiag(g0s_flat, P)
+        g1s_sum  = _sum_offdiag(g1s_flat, P)
+
+        # Cost candidates
+        cost_compute = [g0c[r] + g1c[r] for r in range(R)]
+        cost_all     = [g0a[r] + g1a[r] for r in range(R)]
+
+        # Normalise by dofs
+        per_dof_compute = [cost_compute[r]      / dofs[r] for r in range(R)]
+        per_dof_all     = [cost_all[r]          / dofs[r] for r in range(R)]
+
+        if rank == root:
+            print("[weights] dofs:", dofs)
+            print("[weights] cost_compute:", cost_compute)
+            print("[weights] cost_all:", cost_all)
+            print("[weights] per_dof_compute:", per_dof_compute)
+            print("[weights] per_dof_all:", per_dof_all)
+            # NEW: show send sums and compute+send candidate
+            print("[weights] send_sums_g0:", g0s_sum)
+            print("[weights] send_sums_g1:", g1s_sum)
 
     @property
     def cfgmeta(self):

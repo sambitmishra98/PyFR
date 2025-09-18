@@ -340,46 +340,61 @@ class Graph:
             self._compute_times = compute_times = deque(maxlen=n)
             self._recv_times    = [deque(maxlen=n) for _ in range(comm.size)]
             self._send_times    = [deque(maxlen=n) for _ in range(comm.size)]    
+            self._wait_times    = wait_times = deque(maxlen=n)
 
             self._prev_end = time.perf_counter_ns()
 
             def waitall(reqs):
                 if not reqs:
                     return
-    
+
                 start_ns = time.perf_counter_ns()
-                compute_times.append((start_ns - self._prev_end)*1e-9)
+                compute_times.append((start_ns - self._prev_end) * 1e-9)
 
                 lreqs = list(reqs)
 
+                # Map each request id -> info, once per call
+                _imap   = self.backend._req_info_map
+                reqinfo = {id(r): _imap.get(id(r)) for r in lreqs}
+
+                wait_ns_total = 0
+
                 while True:
-                    wait_ns = time.perf_counter_ns()
-                    idxs    = mpi.Prequest.Waitsome(lreqs)
-                    tend    = time.perf_counter_ns()
-                    dt      = (tend - wait_ns)*1e-9
+                    t0   = time.perf_counter_ns()
+                    idxs = mpi.Prequest.Waitsome(lreqs)
+                    t1   = time.perf_counter_ns()
 
                     if idxs is None:
                         break
 
-                    _imap = self.backend._req_info_map
-                    info_for_req = [ _imap.get(id(r)) for r in reqs ]
+                    dt_ns = t1 - t0
+                    wait_ns_total += dt_ns
 
-                    for idx in idxs:
-                        info = info_for_req[idx]
-                        if info is None:
-                            continue
-                        
-                        peer = info['peer']
-                        if info['type'] == 'send':
-                            self._send_times[peer].append(dt)
-                        else:
-                            self._recv_times[peer].append(dt)
+                    # Share this Waitsome block across completed requests
+                    ncomp = len(idxs) if idxs else 1
+                    share = (dt_ns * 1e-9) / ncomp
 
                     for i in idxs:
+                        r = lreqs[i]
+                        inf = reqinfo.get(id(r))
+                        if inf is None:
+                            # Safe-guard; skip unknown requests
+                            lreqs[i] = mpi.REQUEST_NULL
+                            continue
+
+                        peer = inf['peer']
+                        if inf['type'] == 'send':
+                            self._send_times[peer].append(share)
+                        else:
+                            self._recv_times[peer].append(share)
+
                         lreqs[i] = mpi.REQUEST_NULL
 
-                all_times.append((tend - self._prev_end) / 1e9)
-                self._prev_end = tend
+                end_ns   = time.perf_counter_ns()
+                all_this = (start_ns - self._prev_end + wait_ns_total) * 1e-9
+                all_times.append(all_this)
+                wait_times.append(wait_ns_total * 1e-9)
+                self._prev_end = end_ns
 
             self._waitall = waitall
         elif backend.cfg.getbool('backend', 'collect-wait-times', False):
