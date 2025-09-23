@@ -55,6 +55,9 @@ class BaseDualIntegrator(BaseIntegrator):
         return dt_soln
 
     def call_plugin_dt(self, tstart, dt):
+        if self.called_plugin_dt:
+            return
+
         rem = math.fmod(dt, self._dt)
         tol = 5.0*self.dtmin
         if rem > tol and (self._dt - rem) > tol:

@@ -49,6 +49,8 @@ class BaseDualPseudoIntegrator(BaseCommon):
         self.system = systemcls(backend, mesh, initsoln, nregs=self.nregs,
                                 cfg=cfg)
 
+        self._systemcls = systemcls
+
         # Register index list and current index
         self._regidx = list(range(self.nregs))
         self._idxcurr = 0

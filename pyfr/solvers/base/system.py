@@ -103,24 +103,28 @@ class BaseSystem:
 
         # Set the initial conditions
         if initsoln:
-            # Load the config and stats files from the solution
-            solncfg = initsoln['config']
-            solnsts = initsoln['stats']
+            if isinstance(initsoln, dict):
+                # Load the config and stats files from the solution
+                solncfg = initsoln['config']
+                solnsts = initsoln['stats']
 
-            # Get the names of the conserved variables (fields)
-            solnfields = solnsts.get('data', 'fields').split(',')
-            currfields = eles[0].convars
+                # Get the names of the conserved variables (fields)
+                solnfields = solnsts.get('data', 'fields').split(',')
+                currfields = eles[0].convars
 
-            # Construct a mapping between the solution file and the system
-            try:
-                smap = [solnfields.index(cf) for cf in currfields]
-            except ValueError:
-                raise RuntimeError('Invalid solution for system')
+                # Construct a mapping between the solution file and the system
+                try:
+                    smap = [solnfields.index(cf) for cf in currfields]
+                except ValueError:
+                    raise RuntimeError('Invalid solution for system')
 
-            # Process the solution
-            for etype, ele in elemap.items():
-                soln = initsoln[etype][:, smap, :]
-                ele.set_ics_from_soln(soln, solncfg)
+                # Process the solution
+                for etype, ele in elemap.items():
+                    soln = initsoln[etype][:, smap, :]
+                    ele.set_ics_from_soln(soln, solncfg)
+            elif isinstance(initsoln, list):
+                for ele, soln in zip(eles, initsoln):
+                    ele.recreate_soln(soln)
         else:
             for ele in eles:
                 ele.set_ics_from_cfg()

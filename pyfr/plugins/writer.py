@@ -21,14 +21,14 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
         basename = self.cfg.get(cfgsect, 'basename')
 
         # Get the element map and region data
-        emap, erdata = intg.system.ele_map, self._ele_region_data
+        self._emap, erdata = intg.system.ele_map, self._ele_region_data
 
         # Decide if gradients should be written or not
         self._write_grads = self.cfg.getbool(cfgsect, 'write-gradients', False)
 
         # Figure out the shape of each element type in our region
-        nvars = self.nvars + self._write_grads*(self.nvars*self.ndims)
-        ershapes = {etype: (nvars, emap[etype].nupts) for etype in erdata}
+        self._nvars = self.nvars + self._write_grads*(self.nvars*self.ndims)
+        ershapes = {etype: (self._nvars, self._emap[etype].nupts) for etype in erdata}
 
         # Construct the solution writer
         self._writer = NativeWriter.from_integrator(intg, basedir, basename,
@@ -53,6 +53,7 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         # Register our output times with the integrator
         intg.call_plugin_dt(intg.tcurr, self.dt_out)
+        intg.called_plugin_dt = True
 
         # If we're not restarting then make sure we write out the initial
         # solution when we are called for the first time
@@ -113,6 +114,15 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         if intg.tcurr - self.tout_last < self.dt_out - self.tol:
             return
+
+        self._writer._ecounts = {etype: len(
+                intg.system.mesh.eidxs.get(etype, [])
+                ) for etype in intg.system.mesh.etypes}
+
+        self.redo_ele_region_data(intg)
+        ershapes = {etype: (self._nvars, self._emap[etype].nupts) 
+                            for etype in self._ele_region_data}
+        self._writer.set_shapes_eidxs(ershapes, self._ele_region_data)
 
         # Prepare the data and metadata
         data = self._prepare_data(intg)

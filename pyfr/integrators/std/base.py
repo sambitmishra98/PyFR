@@ -19,6 +19,8 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
         self.system = systemcls(backend, mesh, initsoln, nregs=self.nregs,
                                 cfg=cfg)
 
+        self._systemcls = systemcls
+
         # Event handlers for advance_to
         self.plugins = self._get_plugins(initsoln)
 

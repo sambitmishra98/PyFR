@@ -224,6 +224,19 @@ class RegionMixin:
             geidxs = intg.system.mesh.eidxs[etype][eidxs]
             self._ele_region_data[etype] = geidxs
 
+    def redo_ele_region_data(self, intg):
+        # Parse the region
+        ridxs = region_data(self.cfg, self.cfgsect, intg.system.mesh)
+
+        # Generate the appropriate metadata arrays
+        self._ele_regions, self._ele_region_data = [], {}
+        for etype, eidxs in ridxs.items():
+            doff = intg.system.ele_types.index(etype)
+            self._ele_regions.append((doff, etype, eidxs))
+
+            # Obtain the global element numbers
+            geidxs = intg.system.mesh.eidxs[etype][eidxs]
+            self._ele_region_data[etype] = geidxs
 
 class SurfaceRegionMixin:
     def _surf_region(self, intg):

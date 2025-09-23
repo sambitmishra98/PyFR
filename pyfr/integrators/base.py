@@ -10,6 +10,8 @@ from pyfr.cache import memoize
 from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
 from pyfr.plugins import get_plugin
 
+from pyfr.readers.native import _MetaMesh
+
 
 def _common_plugin_prop(attr):
     def wrapfn(fn):
@@ -72,6 +74,15 @@ class BaseIntegrator:
         self._abort = False
         self._abort_reason = ''
 
+        self.lb_interval = self.cfg.getint('mesh', 'load-balance-interval', 0)
+        self.called_plugin_dt = False
+
+        # An array of rank-wise weights for load balancing
+        self.lb_weights = self.cfg.get('mesh', 'load-balance-weights', '')
+        if self.lb_weights != '':
+            # Convert to numpy array
+            self.lb_weights = np.array([float(w) for w in self.lb_weights.split(',')])
+
     def plugin_abort(self, reason):
         self._abort = True
         self._abort_reason = self._abort_reason or reason
@@ -104,6 +115,16 @@ class BaseIntegrator:
 
         return plugins
 
+    def _reget_plugins(self):
+        plugins = []
+
+        for s in self.cfg.sections():
+            if (m := re.match('(soln|solver)-plugin-(.+?)(?:-(.+))?$', s)):
+                cfgsect, ptype, name, suffix = m[0], m[1], m[2], m[3]
+                plugins.append(get_plugin(ptype, name, self, cfgsect, suffix))
+
+        return plugins
+
     def _run_plugins(self):
         wtimes = self._plugin_wtimes
 
@@ -125,6 +146,43 @@ class BaseIntegrator:
         # Abort if plugins request it
         self._check_abort()
 
+    def run_load_relocation(self):
+        """
+            Move per relocation matrix. For now we just print a message        
+        """
+
+        if self.lb_interval == 0:
+            return
+
+        comm, rank, root = get_comm_rank_root()
+        if comm.size == 1:
+            raise RuntimeError('LB needs min 2 ranks')
+
+        if self.nacptsteps % self.lb_interval == 0 and self.tcurr < self.tend:
+            # Switch to mmesh from mesh
+            mmesh = _MetaMesh.from_mesh(self.system.mesh)
+
+            M = mmesh.plan_relocation(self.lb_weights, verbose=True)
+
+            ## Move one element from rank 0 to rank 2. In our case this is definitely a quad
+            mmesh.diffuse_by_matrix(M)
+            mmesh.smooth_interfaces_greedy()
+    
+            self.system.mesh, plan = mmesh.to_mesh(self.system.mesh)
+            soln_dict = mmesh.relocate(plan, {et: arr for et, arr in zip(mmesh.etypes, self.soln)}, edim=2)
+
+#            self.backend()
+            self.system = self._systemcls(self.backend, self.system.mesh, list(soln_dict.values()), nregs=self.nregs, cfg=self.cfg)
+            self._reget_plugins()
+            self.system.commit()
+            self.system.preproc(self.tcurr, self._idxcurr)
+            # Delete all memoized cache attributes
+            for attr in dir(self):
+                if attr.startswith('_memoize_cache@'):
+                    delattr(self, attr) 
+# 
+#             gc.collect()
+
     def _finalise_plugins(self):
         for plugin in self.plugins:
             if (finalise := getattr(plugin, 'finalise', None)):
@@ -138,6 +196,9 @@ class BaseIntegrator:
             return f'plugins/{name}'
 
     def call_plugin_dt(self, tstart, dt):
+        if self.called_plugin_dt:
+            return
+
         ta = self.tlist
         tbegin = tstart if tstart > self.tcurr else self.tcurr
         tb = deque(np.arange(tbegin, self.tend, dt).tolist())

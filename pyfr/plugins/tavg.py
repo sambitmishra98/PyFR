@@ -100,6 +100,7 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
 
         # Register our output times with the integrator
         intg.call_plugin_dt(self.tstart, self.dtout)
+        intg.called_plugin_dt = True
 
         # Mark ourselves as not currently averaging
         self._started = False

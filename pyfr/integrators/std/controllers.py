@@ -40,6 +40,9 @@ class BaseStdController(BaseStdIntegrator):
         # Run any plugins
         self._run_plugins()
 
+        # Perform load balancing if required
+        self.run_load_relocation()
+
         # Clear the step info
         self.stepinfo = []
 
