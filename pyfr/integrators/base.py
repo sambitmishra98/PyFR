@@ -3,8 +3,11 @@ import itertools as it
 import re
 import sys
 import time
+from pprint import pprint
 
 import numpy as np
+
+from pyfr.relocator.utils import crpprint, crprint
 
 from pyfr.cache import memoize
 from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
@@ -160,29 +163,55 @@ class BaseIntegrator:
 
         if self.nacptsteps % self.lb_interval == 0 and self.tcurr < self.tend:
             # Switch to mmesh from mesh
-            mmesh = _MetaMesh.from_mesh(self.system.mesh)
+#            mmesh = _MetaMesh.from_mesh(self.system.mesh)
+#            mmesh.compute_is_mpi()
 
-            M = mmesh.plan_relocation(self.lb_weights, verbose=True)
+#            target = 0
+#            eidxs_move_by_et = mmesh.create_plan_local(target_rank=target)
+
+#            crpprint(-1, eidxs_move_by_et)
+
+#            mmesh.relocate_eidxs_and_con_full(eidxs_move_by_et)
+
+            # 3) Materialize back to a mesh with only eidxs changed
+#            new_mesh = mmesh.to_mesh(self.system.mesh)
+#            self.system.mesh = new_mesh  # optional; or keep separate
+#            crprint(-1, new_mesh)
+
+#            soln_dict = mmesh.relocate_external({et: arr for et, arr in zip(mmesh.etypes, self.soln)}, edim=2)
+
+#            M = mmesh.plan_relocation(self.lb_weights, verbose=True)
 
             ## Move one element from rank 0 to rank 2. In our case this is definitely a quad
-            mmesh.diffuse_by_matrix(M)
-            mmesh.smooth_interfaces_greedy()
+#            mmesh.diffuse_by_matrix(M)
+#            mmesh.smooth_interfaces_greedy()
     
-            self.system.mesh, plan = mmesh.to_mesh(self.system.mesh)
-            soln_dict = mmesh.relocate(plan, {et: arr for et, arr in zip(mmesh.etypes, self.soln)}, edim=2)
+#            self.system.mesh, plan = mmesh.to_mesh(self.system.mesh)
+#            soln_dict = mmesh.relocate(plan, {et: arr for et, arr in zip(mmesh.etypes, self.soln)}, edim=2)
 
 #            self.backend()
-            self.system = self._systemcls(self.backend, self.system.mesh, list(soln_dict.values()), nregs=self.nregs, cfg=self.cfg)
-            self._reget_plugins()
-            self.system.commit()
-            self.system.preproc(self.tcurr, self._idxcurr)
-            # Delete all memoized cache attributes
-            for attr in dir(self):
-                if attr.startswith('_memoize_cache@'):
-                    delattr(self, attr) 
-# 
-#             gc.collect()
 
+            # Print all above rank-wise in a txt file as before-${rank}.txt
+            with open(f'before-{rank}.txt', 'w') as f:
+                pprint(vars(self.system), stream=f)
+
+#             self.system = self._systemcls(self.backend, self.system.mesh, self.soln, nregs=self.nregs, cfg=self.cfg)
+# 
+#             self._idxcurr = 0 
+# 
+#             self._reget_plugins()
+#             self.system.commit()
+#             self.system.preproc(self.tcurr, self._idxcurr)
+# 
+#             for attr in dir(self):
+#                 if attr.startswith('_memoize_cache@'):
+#                     delattr(self, attr) 
+# 
+#             # Print all above rank-wise in a txt file as after-${rank}.txt
+            with open(f'after-{rank}.txt', 'w') as f:
+                pprint(vars(self.system), stream=f)
+
+ 
     def _finalise_plugins(self):
         for plugin in self.plugins:
             if (finalise := getattr(plugin, 'finalise', None)):

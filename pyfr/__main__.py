@@ -560,7 +560,7 @@ def process_partition_diffuse(args):
     mm = _MetaMesh.from_mesh(read_only_mesh)
 
     # Apply the diffusion (matrix + mode)
-    mm.diffuse_by_matrix(M, mode=args.mode)
+    mm.diffuse_by_matrix(M)
 
     # Convert placements to flat parts vector (PyFR canonical order)
     vparts = mm.vparts_global()
