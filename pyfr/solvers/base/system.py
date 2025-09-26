@@ -2,12 +2,14 @@ from collections import defaultdict
 import inspect
 import itertools as it
 import statistics
+from pprint import pprint
 
 import numpy as np
 
 from pyfr.backends.base import NullKernel
 from pyfr.cache import memoize
 from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
+from pyfr.relocator.utils import crpprint, crprint
 from pyfr.shapes import BaseShape
 from pyfr.util import subclasses
 
@@ -135,6 +137,8 @@ class BaseSystem:
             linoff = np.max(*np.nonzero(curved), initial=-1) + 1
 
             ele.set_backend(self.backend, nregs, nonce, linoff)
+
+        pprint(vars(eles[0]))
 
         return eles, elemap
 

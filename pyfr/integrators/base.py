@@ -158,8 +158,8 @@ class BaseIntegrator:
             return
 
         comm, rank, root = get_comm_rank_root()
-        if comm.size == 1:
-            raise RuntimeError('LB needs min 2 ranks')
+#        if comm.size == 1:
+#            raise RuntimeError('LB needs min 2 ranks')
 
         if self.nacptsteps % self.lb_interval == 0 and self.tcurr < self.tend:
             # Switch to mmesh from mesh
