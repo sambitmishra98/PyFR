@@ -9,6 +9,7 @@ import numpy as np
 from pytools import prefork
 
 from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.readers.native import NativeReader, _MeshInterconnector
 from pyfr.regions import parse_region_expr
 from pyfr.writers.csv import CSVStream
 
@@ -211,24 +212,73 @@ class RegionMixin:
     def __init__(self, intg, *args, **kwargs):
         super().__init__(intg, *args, **kwargs)
 
+        # If partition name given for the plugin, use this partitioning instead
+        if self.cfg.hasopt(self.cfgsect, 'partition'):
+
+            if not (self.name in {'writer', 'tavg'}):
+                raise NotImplementedError(
+                    f'Only supported for writer and tavg plugins')
+
+            pname = self.cfg.get(self.cfgsect, 'partition')
+
+            self.mesh = NativeReader(intg.system.mesh.fname, pname,
+                                     construct_con=False).mesh
+        
+            self.intercon = _MeshInterconnector(intg.system.mesh.eidxs, 
+                                                self.mesh.eidxs)
+
+            self._ele_types = (list(self.mesh.eidxs) if self.mesh.eidxs else [])
+        else:
+            self.mesh = intg.system.mesh
+            self.intercon = None
+
+            self._ele_types = intg.system.ele_types
+
+        self.initialise_regions(self.mesh)
+
+        emap = intg.system.ele_map
+
+        comm, rank, root = get_comm_rank_root()
+        nupts = {etype: emap[etype].nupts if etype in emap else 0 for etype in self.mesh.etypes}
+        nupts = {etype: comm.allgather(nupts[etype]) for etype in nupts}
+        self.nupts = {etype: max(nupts[etype]) for etype in nupts}
+        
+        self.neles = {e: len(self.mesh.eidxs[e]) if e in self.mesh.eidxs else 0 
+                        for e in self.mesh.etypes}
+
+    def initialise_regions(self, mesh):
         # Parse the region
-        ridxs = region_data(self.cfg, self.cfgsect, intg.system.mesh)
+        ridxs = region_data(self.cfg, self.cfgsect, mesh)
 
         # Generate the appropriate metadata arrays
         self._ele_regions, self._ele_region_data = [], {}
         for etype, eidxs in ridxs.items():
-            doff = intg.system.ele_types.index(etype)
+            doff = self._ele_types.index(etype)
             self._ele_regions.append((doff, etype, eidxs))
 
             # Obtain the global element numbers
-            geidxs = intg.system.mesh.eidxs[etype][eidxs]
+            geidxs = mesh.eidxs[etype][eidxs]
             self._ele_region_data[etype] = geidxs
+
+    def relocate_ary(self, ary, edim):
+        if self.intercon:
+            switch = False
+            if isinstance(ary, list):
+                switch = True
+                ary = {e: s for e, s in zip(self.mesh.etypes, ary)}
+
+            ary_dict = self.intercon.relocate(ary, edim=edim)
+
+            if switch:
+                ary = list(ary_dict.values())
+
+        return ary
 
 
 class SurfaceRegionMixin:
     def _surf_region(self, intg):
         # Parse the region
-        sidxs = surface_data(intg.cfg, self.cfgsect, intg.system.mesh)
+        sidxs = surface_data(intg.cfg, self.cfgsect, self.mesh)
 
         # Generate the appropriate metadata arrays
         ele_surface, ele_surface_data = [], {}

@@ -79,7 +79,7 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         emap, erdata = intg.system.ele_map, self._ele_region_data
 
         # Figure out the shape of each element type in our region
-        ershapes = {etype: (nfields, emap[etype].nupts) for etype in erdata}
+        ershapes = {etype: (nfields, self.nupts[etype]) for etype in erdata}
 
         # Construct the file writer
         self._writer = NativeWriter.from_integrator(intg, basedir, basename,
@@ -107,9 +107,9 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         # Get the total number of solution points in the region
         ergns = self._ele_regions
         if self.cfg.get(cfgsect, 'region') == '*':
-            tpts = sum(emap[e].neles*emap[e].nupts for i, e, r in ergns)
+            tpts = sum(self.neles[e]*self.nupts[e] for i, e, r in ergns)
         else:
-            tpts = sum(len(r)*emap[e].nupts for i, e, r in ergns)
+            tpts = sum(len(r)*self.nupts[e] for i, e, r in ergns)
 
         # Reduce
         self.tpts = comm.reduce(tpts, op=mpi.SUM, root=root)
@@ -176,12 +176,14 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         if self._gradpinfo:
             grad_soln = intg.grad_soln
 
+        soln = self.relocate_ary(intg.soln, edim=2)
+
         # Iterate over each element type in the simulation
         for idx, etype, rgn in self._ele_regions:
-            soln = intg.soln[idx][..., rgn].swapaxes(0, 1)
+            soln_ary = soln[idx][..., rgn].swapaxes(0, 1)
 
             # Convert from conservative to primitive variables
-            psolns = self.elementscls.con_to_pri(soln, self.cfg)
+            psolns = self.elementscls.con_to_pri(soln_ary, self.cfg)
 
             # Prepare the substitutions dictionary
             subs = dict(zip(self.privars, psolns))
@@ -191,7 +193,7 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
                 grads = np.rollaxis(grad_soln[idx], 2)[..., rgn]
 
                 # Transform from conservative to primitive gradients
-                pgrads = self.elementscls.grad_con_to_pri(soln, grads,
+                pgrads = self.elementscls.grad_con_to_pri(soln_ary, grads,
                                                           self.cfg)
 
                 # Add them to the substitutions dictionary
