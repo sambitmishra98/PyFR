@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from pytools import prefork
 
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.mpiutil import get_comm_rank_root, mpi, initialise_new_comm
 from pyfr.readers.native import NativeReader, _MeshInterconnector
 from pyfr.regions import parse_region_expr
 from pyfr.writers.csv import CSVStream
@@ -212,6 +212,8 @@ class RegionMixin:
     def __init__(self, intg, *args, **kwargs):
         super().__init__(intg, *args, **kwargs)
 
+        comm, rank, root = get_comm_rank_root('world')
+
         # If partition name given for the plugin, use this partitioning instead
         if self.cfg.hasopt(self.cfgsect, 'partition'):
 
@@ -221,9 +223,23 @@ class RegionMixin:
 
             pname = self.cfg.get(self.cfgsect, 'partition')
 
+            if self.cfg.hasopt(self.cfgsect, 'ranks'):
+                ranks = list(map(int, self.cfg.get(self.cfgsect, 'ranks').split(',')))
+            else:
+                ranks = list(range(comm.size))
+
+            initialise_new_comm(self.name, ranks)
+
+            # Return if we are not in the new communicator
+            comm, rank, root = get_comm_rank_root(self.name)
+            if rank == None:
+                return
+
+            # Everything else needs to be done only by ranks mentioned in list
+
             self.mesh = NativeReader(intg.system.mesh.fname, pname,
                                      construct_con=False).mesh
-        
+
             self.intercon = _MeshInterconnector(intg.system.mesh.eidxs, 
                                                 self.mesh.eidxs)
 
@@ -238,7 +254,6 @@ class RegionMixin:
 
         emap = intg.system.ele_map
 
-        comm, rank, root = get_comm_rank_root()
         nupts = {etype: emap[etype].nupts if etype in emap else 0 for etype in self.mesh.etypes}
         nupts = {etype: comm.allgather(nupts[etype]) for etype in nupts}
         self.nupts = {etype: max(nupts[etype]) for etype in nupts}
