@@ -43,7 +43,7 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
         self.tout_last = intg.tcurr
 
         # Output field names
-        self.fields = list(first(intg.system.ele_map.values()).convars)
+        self.fields = intg.convars
         if self._write_grads:
             dims = 'xyz'[:self.ndims]
             self.fields += [f'grad_{f}_{d}' for f in self.fields for d in dims]
@@ -56,8 +56,10 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         # If we're not restarting then make sure we write out the initial
         # solution when we are called for the first time
-        if not intg.isrestart:
+        if not intg.isrestart and not intg.called_plugin_dt:
             self.tout_last -= self.dt_out
+
+        intg.called_plugin_dt = True
 
     def _prepare_metadata(self, intg):
         comm, rank, root = get_comm_rank_root()
@@ -115,12 +117,13 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
             return
 
         # Prepare the data and metadata
+        print(f'tcurr = {intg.tcurr}, writing solution')
         data = self._prepare_data(intg)
         metadata = self._prepare_metadata(intg)
 
         # Prepare a callback to kick off any postactions
         callback = lambda fname, t=intg.tcurr: self._invoke_postaction(
-            intg=intg, mesh=intg.system.mesh.fname, soln=fname, t=t
+            intg=intg, mesh=intg.meshes['plugins'].fname, soln=fname, t=t
         )
 
         # Write out the file

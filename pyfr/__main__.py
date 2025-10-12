@@ -13,7 +13,7 @@ mpi4py.rc.initialize = False
 from pyfr._version import __version__
 from pyfr.backends import BaseBackend, get_backend
 from pyfr.inifile import Inifile
-from pyfr.mpiutil import get_comm_rank_root, init_mpi
+from pyfr.mpiutil import get_comm_rank_root, init_mpi, initialise_new_comm
 from pyfr.partitioners import (BasePartitioner, get_partitioner,
                                reconstruct_partitioning, write_partitioning)
 from pyfr.plugins import BaseCLIPlugin
@@ -514,8 +514,17 @@ def _process_common(args, soln, cfg):
 
     comm, rank, root = get_comm_rank_root()
 
+    # If cfg provides a partitioning ranklist, use it
+    if cfg is not None:
+        part_ranklist = cfg.getliteral('mesh', 'partition-compute-ranklist', 
+                                list(range(comm.size)))
+    else:
+        part_ranklist = list(range(comm.size))
+
+    initialise_new_comm('compute', part_ranklist)
+
     # Read the mesh
-    reader = NativeReader(args.mesh, pname=args.pname)
+    reader = NativeReader(args.mesh, pname=args.pname, comm_name='compute')
     mesh = reader.mesh
 
     # Load a provided solution, if any
