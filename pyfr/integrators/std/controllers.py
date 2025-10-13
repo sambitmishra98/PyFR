@@ -1,9 +1,17 @@
 import math
+import gc
+
+from copy import deepcopy
 
 import numpy as np
 
+from pyfr.backends import get_backend
+
+from pyfr.backends.base import backend
 from pyfr.integrators.std.base import BaseStdIntegrator
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.mpiutil import get_comm_rank_root, initialise_new_comm, mpi
+
+from pyfr.readers.native import _MetaMesh, NativeReader
 
 
 class BaseStdController(BaseStdIntegrator):
@@ -67,14 +75,110 @@ class StdNoneController(BaseStdController):
             raise ValueError('Advance time is in the past')
 
         while self.tcurr < t:
+            comm,  rank,  root  = get_comm_rank_root('world')
+            ccomm, crank, croot = get_comm_rank_root('compute')
+
             # Decide on the time step
             self.adjust_dt(t)
 
-            # Take the step
-            idxcurr = self.step(self.tcurr, self.dt)
+            if ccomm != mpi.COMM_NULL:
+                # Take the step
+                idxcurr = self.step(self.tcurr, self.dt)
+
+            else:
+                idxcurr = -1    
+            # allreduce MAX idxcurr, we only need to keep one
+            idxcurr = comm.allreduce(idxcurr, op=mpi.MAX)
 
             # We are not adaptive, so accept every step
             self._accept_step(self.dt, idxcurr)
+
+            # Switch mesh here, after 5 steps
+            if self.nacptsteps % self.lb_iters == 0:
+
+                print('Switching, nacptsteps = ', self.nacptsteps)
+
+                mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
+
+                _MetaMesh.info(self.meshes['compute'])
+
+                # Current element count
+                e_curr = sum(len(eidxs) for eidxs in mmesh.eidxs_i.values())
+
+                # Allgather the coutns
+                ecurrs = comm.allgather(e_curr)
+                #etarget = deepcopy(ecurrs)
+                #etarget = [etarget[0]+2000, etarget[1]-4000, etarget[2]+2000]
+
+                etarget = self._lb_etarget_from_history(ecurrs)
+
+
+                #mmesh.plan_send_matrix_simple(ecurrs, etarget)
+
+                #moves = mmesh.build_parallel_moves_to_targets(etarget, rank_move_budget=None)
+                #eidxs_dest = mmesh.plan_eidxs_dest_from_diff(moves)     # collective; resolves send/recv
+
+                # build target vector however you like
+                moves_mesh = mmesh.iterate_to_convergence(
+                    etarget,
+                    max_iters=12,
+                    materialize=True,   # True if you want a rebuilt mesh now
+                    verbose=True,
+                )
+
+                soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
+                self.reinit_backend_and_system(self.meshes['newcompute'], soln)
+
+    def reinit_mesh_soln(self, mesh, soln):
+        self.meshes['newcompute'] = mesh
+        _MetaMesh.info(self.meshes['newcompute'])
+        self._newcompute_intercon = self.initialise_interconnector('compute', 'newcompute')
+        soln = self.relocate_ary(self._newcompute_intercon, soln, edim=2,
+                                    src_name='compute', dst_name='newcompute')
+
+        del self.meshes['compute']
+        del self._plugins_intercon
+
+        self.meshes['compute'] = self.meshes['newcompute']
+
+        return soln
+
+    def reinit_backend_and_system(self, mesh, soln):
+        ccomm, crank, croot = get_comm_rank_root('compute')
+        comm,  rank,  root  = get_comm_rank_root('world')
+
+        self._invalidate_caches()
+
+        del self.system
+
+        for attr in dir(self):
+           if attr.startswith('_memoize_cache@'):
+               delattr(self, attr) 
+
+        gc.collect()
+
+        comm.barrier()
+
+        self.system = self._systemcls(self.backend, mesh, soln, nregs=self.nregs, cfg=self.cfg)
+
+        self.copy_to_empty_system()
+
+        self._idxcurr = 0
+
+        # Re-initialise plugin comm and interconnector
+        self.initialise_comm_and_partition('plugins', construct_con=False)
+        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
+
+        self.plugins = self._reget_plugins()
+
+        if ccomm != mpi.COMM_NULL:
+            # Commit the sytem
+            self.system.commit()
+
+            # Pre-process solution
+            self.system.preproc(self.tcurr, self._idxcurr)
+
+        comm.barrier()
 
 
 class StdPIController(BaseStdController):
@@ -121,7 +225,7 @@ class StdPIController(BaseStdController):
         return True
 
     def _errest(self, rcurr, rprev, rerr):
-        comm, rank, root = get_comm_rank_root()
+        comm, rank, root = get_comm_rank_root('compute')
 
         # Get a set of kernels to estimate the integration error
         ekerns = self._get_reduction_kerns(rcurr, rprev, rerr, method='errest',
