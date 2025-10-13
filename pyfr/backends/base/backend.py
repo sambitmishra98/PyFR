@@ -66,6 +66,20 @@ class BaseBackend:
         # Mapping from backend objects to memory extents
         self._obj_extents = WeakKeyDictionary()
 
+    def __call__(self):
+
+        # Allocated matrices
+        self.mats = WeakValueDictionary()
+        self._mat_counter = count()
+
+        # Aliases and extents
+        self._pend_aliases = {}
+        self._pend_extents = defaultdict(list)
+        self._comm_extents = set()
+
+        # Mapping from backend objects to memory extents
+        self._obj_extents = WeakKeyDictionary()
+
     @cached_property
     def lookup(self):
         pkg = f'pyfr.backends.{self.name}.kernels'

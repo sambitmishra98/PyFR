@@ -211,23 +211,26 @@ class RegionMixin:
     def __init__(self, intg, *args, **kwargs):
         super().__init__(intg, *args, **kwargs)
 
+        # Shorthand for the mesh
+        pmesh = intg.meshes['plugins']
+
         # If partition name given for the plugin, use this partitioning instead
-        if intg.needs_reloc:
-            self._ele_types = (list(intg._plugins_mesh.eidxs) if intg._plugins_mesh.eidxs else [])
+        if 'plugins' in intg.meshes:
+            self._ele_types = (list(pmesh.eidxs) if pmesh.eidxs else [])
         else:
             self._ele_types = intg.system.ele_types
 
         comm, rank, root = get_comm_rank_root()
         emap = intg.system.ele_map
 
-        nupts = {e: emap[e].nupts if e in emap else 0 for e in intg._plugins_mesh.etypes}
+        nupts = {e: emap[e].nupts if e in emap else 0 for e in pmesh.etypes}
         self.nupts = {e: comm.allreduce(nupts[e], op=mpi.MAX) for e in nupts}
-        
-        self.neles = {e: len(intg._plugins_mesh.eidxs[e]) if e in intg._plugins_mesh.eidxs else 0 
-                        for e in intg._plugins_mesh.etypes}
+
+        self.neles = {e: len(pmesh.eidxs[e]) if e in pmesh.eidxs else 0
+                      for e in pmesh.etypes}
 
         # Parse the region
-        ridxs = region_data(self.cfg, self.cfgsect, intg._plugins_mesh)
+        ridxs = region_data(self.cfg, self.cfgsect, pmesh)
 
         # Generate the appropriate metadata arrays
         self._ele_regions, self._ele_region_data = [], {}
@@ -236,14 +239,38 @@ class RegionMixin:
             self._ele_regions.append((doff, etype, eidxs))
 
             # Obtain the global element numbers
-            geidxs = intg._plugins_mesh.eidxs[etype][eidxs]
+            geidxs = intg.meshes['plugins'].eidxs[etype][eidxs]
             self._ele_region_data[etype] = geidxs
 
+    def recreate(self, intg):
+        # Shorthand for the mesh
+        pmesh = intg.meshes['plugins']
+
+        comm, rank, root = get_comm_rank_root()
+        emap = intg.system.ele_map
+
+        self.neles = {e: len(pmesh.eidxs[e]) if e in pmesh.eidxs else 0
+                      for e in pmesh.etypes}
+
+        # Parse the region
+        ridxs = region_data(self.cfg, self.cfgsect, pmesh)
+
+        # Generate the appropriate metadata arrays
+        self._ele_regions, self._ele_region_data = [], {}
+        for etype, eidxs in ridxs.items():
+            doff = self._ele_types.index(etype)
+            self._ele_regions.append((doff, etype, eidxs))
+
+            # Obtain the global element numbers
+            geidxs = intg.meshes['plugins'].eidxs[etype][eidxs]
+            self._ele_region_data[etype] = geidxs
+
+        
 
 class SurfaceRegionMixin:
     def _surf_region(self, intg):
         # Parse the region
-        sidxs = surface_data(intg.cfg, self.cfgsect, intg._plugins_mesh)
+        sidxs = surface_data(intg.cfg, self.cfgsect, intg.meshes['plugins'])
 
         # Generate the appropriate metadata arrays
         ele_surface, ele_surface_data = [], {}

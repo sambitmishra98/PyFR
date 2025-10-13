@@ -56,7 +56,9 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         # If we're not restarting then make sure we write out the initial
         # solution when we are called for the first time
-        if not intg.isrestart and not intg.called_plugin_dt:
+        if intg.called_plugin_dt:
+            pass
+        elif not intg.isrestart:
             self.tout_last -= self.dt_out
 
         intg.called_plugin_dt = True
