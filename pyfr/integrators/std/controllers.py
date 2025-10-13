@@ -94,7 +94,7 @@ class StdNoneController(BaseStdController):
             self._accept_step(dt, idxcurr)
 
             # Switch mesh here, after 5 steps
-            if self.nacptsteps % self.lb_iters == 0:
+            if self.nacptsteps % self.lb_iters == 0 and not self.lb_iters == 1:
 
                 print('Switching, nacptsteps = ', self.nacptsteps)
 

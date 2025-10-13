@@ -89,7 +89,7 @@ class BaseIntegrator:
         self._abort_reason = ''
 
         self.called_plugin_dt = False
-        self.lb_iters = self.cfg.getint('mesh', 'load-balancing-iterations')
+        self.lb_iters = self.cfg.getint('mesh', 'load-balancing-iterations', 1)
 
     def plugin_abort(self, reason):
         self._abort = True
@@ -98,7 +98,7 @@ class BaseIntegrator:
     def initialise_comm_and_partition(self, mname, construct_con=False):
         comm, rank, root = get_comm_rank_root('world')
 
-        pname  = self.cfg.get('mesh', f'partition-{mname}')
+        pname  = self.cfg.get('mesh', f'partition-{mname}', 'compute')
 
         # If note 'compute'
         if pname == 'compute':
