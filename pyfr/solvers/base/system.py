@@ -1,6 +1,7 @@
 from collections import defaultdict
 import inspect
 import itertools as it
+import math
 import statistics
 
 import numpy as np
@@ -60,16 +61,19 @@ class BaseSystem:
         # Get all the solution point locations for the elements
         self.ele_ploc_upts = [e.ploc_at_np('upts') for e in eles]
 
-        if hasattr(eles[0], '_grad_upts'):
-            self.eles_vect_upts = [e._grad_upts for e in eles]
+        comm, rank, root = get_comm_rank_root('compute')
+        if comm != mpi.COMM_NULL:
 
-        if hasattr(eles[0], 'entmin_int'):
-            self.eles_entmin_int = [e.entmin_int for e in eles]
+            if hasattr(eles[0], '_grad_upts'):
+                self.eles_vect_upts = [e._grad_upts for e in eles]
 
-        # Load the interfaces
-        self._int_inters = self._load_int_inters(mesh, elemap)
-        self._mpi_inters = self._load_mpi_inters(mesh, elemap)
-        self._bc_inters, self._bc_prefns = self._load_bc_inters(mesh, elemap)
+            if hasattr(eles[0], 'entmin_int'):
+                self.eles_entmin_int = [e.entmin_int for e in eles]
+
+            # Load the interfaces
+            self._int_inters = self._load_int_inters(mesh, elemap)
+            self._mpi_inters = self._load_mpi_inters(mesh, elemap)
+            self._bc_inters, self._bc_prefns = self._load_bc_inters(mesh, elemap)
         backend.commit()
 
     def commit(self):
@@ -103,24 +107,28 @@ class BaseSystem:
 
         # Set the initial conditions
         if initsoln:
-            # Load the config and stats files from the solution
-            solncfg = initsoln['config']
-            solnsts = initsoln['stats']
+            if isinstance(initsoln, list):
+                for ele, soln in zip(eles, initsoln):
+                    ele.recreate_soln(soln)
+            else:
+                # Load the config and stats files from the solution
+                solncfg = initsoln['config']
+                solnsts = initsoln['stats']
 
-            # Get the names of the conserved variables (fields)
-            solnfields = solnsts.get('data', 'fields').split(',')
-            currfields = eles[0].convars
+                # Get the names of the conserved variables (fields)
+                solnfields = solnsts.get('data', 'fields').split(',')
+                currfields = eles[0].convars
 
-            # Construct a mapping between the solution file and the system
-            try:
-                smap = [solnfields.index(cf) for cf in currfields]
-            except ValueError:
-                raise RuntimeError('Invalid solution for system')
+                # Construct a mapping between the solution file and the system
+                try:
+                    smap = [solnfields.index(cf) for cf in currfields]
+                except ValueError:
+                    raise RuntimeError('Invalid solution for system')
 
-            # Process the solution
-            for etype, ele in elemap.items():
-                soln = initsoln[etype][:, smap, :]
-                ele.set_ics_from_soln(soln, solncfg)
+                # Process the solution
+                for etype, ele in elemap.items():
+                    soln = initsoln[etype][:, smap, :]
+                    ele.set_ics_from_soln(soln, solncfg)
         else:
             for ele in eles:
                 ele.set_ics_from_cfg()
@@ -150,7 +158,7 @@ class BaseSystem:
         return mpi_inters
 
     def _load_bc_inters(self, mesh, elemap):
-        comm, rank, root = get_comm_rank_root()
+        comm, rank, root = get_comm_rank_root('compute')
 
         bccls = self.bbcinterscls
         bcmap = {b.type: b for b in subclasses(bccls, just_leaf=True)}
@@ -322,6 +330,130 @@ class BaseSystem:
             stats.append((mean, stdev, median))
 
         return stats
+
+    def rhs_compute_times(self):
+        # Group together timings for graphs which are semantically equivalent
+        times = defaultdict(list)
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                times[i].extend(g.get_compute_times())
+
+        # Compute all statistics
+        stats = []
+        for t in times.values():
+            mean = statistics.mean(t) if t else 0
+            stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
+            median = statistics.median(t) if t else 0
+
+            sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
+
+            stats.append((mean, sem, stdev, median))
+
+        return stats
+
+    def rhs_all_times(self):
+        # Group together timings for graphs which are semantically equivalent
+        times = defaultdict(list)
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                times[i].extend(g.get_all_times())
+
+        # Compute all statistics
+        stats = []
+        for t in times.values():
+            mean = statistics.mean(t) if t else 0
+            stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
+            median = statistics.median(t) if t else 0
+
+            sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
+
+            stats.append((mean, sem, stdev, median))
+
+        return stats
+
+    @property
+    def nbytes_send(self):
+        out = {}
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                out.setdefault(i, g.get_nbytes_send())
+        return out
+
+    @property
+    def nbytes_recv(self):
+        out = {}
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                out.setdefault(i, g.get_nbytes_recv())
+        return out
+
+    def rhs_wait_times_send(self):
+
+        comm, rank, root = get_comm_rank_root()
+
+        # times_send[i][j] = list of dt ...
+        # ... for sends (local rank -> rank j) at stage i
+        times_send = defaultdict(lambda: [[] for _ in range(comm.size)])
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_send()  
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_send[i][rank_j].extend(dt_list)
+
+        stage_stats = []
+        num_stages = max(times_send.keys())+1 if times_send else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((comm.size, 4), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_send[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    sem = s / math.sqrt(len(dt_list)) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = sem = s = d = 0
+                arr[rank_j] = [m, sem, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats
+
+    def rhs_wait_times_recv(self):
+
+        comm, rank, root = get_comm_rank_root()
+
+        times_recv = defaultdict(lambda: [[] for _ in range(comm.size)])
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_recv()  
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_recv[i][rank_j].extend(dt_list)
+
+        stage_stats = []
+        num_stages = max(times_recv.keys())+1 if times_recv else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((comm.size, 4), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_recv[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    sem = s / math.sqrt(len(dt_list)) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = sem = s = d = 0
+                arr[rank_j] = [m, sem, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats
 
     def _compute_grads_graph(self, t, uinbank):
         raise NotImplementedError(f'Solver "{self.name}" does not compute '

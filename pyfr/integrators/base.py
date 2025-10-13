@@ -7,7 +7,7 @@ import time
 import numpy as np
 
 from pyfr.cache import memoize
-from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
+from pyfr.mpiutil import get_comm_rank_root, initialise_new_comm, mpi, scal_coll
 from pyfr.plugins import get_plugin
 
 from pyfr.readers.native import NativeReader, _MeshInterconnector
@@ -19,11 +19,16 @@ def _common_plugin_prop(attr, *, edim):
         def newfn(self):
             if not (p := getattr(self, attr)):
                 t, c = time.time(), self._plugin_wtimes['common', None]
-                p = fn(self)
 
-                # Relocate if necessary, if self.needs_reloc is True
-                if self.needs_reloc:
-                    p = self.relocate_plugin_ary(p, edim=edim)
+                ccomm, crank, croot = get_comm_rank_root('compute')
+                comm,  rank,  root = get_comm_rank_root('world')
+                if ccomm != mpi.COMM_NULL:
+                    p = fn(self)
+                else:
+                    p = None
+
+                p = self.relocate_ary(self._plugins_intercon, p, edim,
+                                      src_name='compute', dst_name='plugins')
 
                 self._plugin_wtimes['common', None] = c + time.time() - t
                 setattr(self, attr, p)
@@ -67,50 +72,92 @@ class BaseIntegrator:
         # Extract the UUID of the mesh (to be saved with solutions)
         self.mesh_uuid = mesh.uuid
 
+        # Create a dictionary to store all the meshes used throughout the simulation
+        self.meshes = {'compute': mesh}
+
         self._invalidate_caches()
 
         # Record the starting wall clock time
         self._wstart = time.time()
+        self.walltime_last = 0.
 
         # Record the total amount of time spent in each plugin
         self._plugin_wtimes = defaultdict(lambda: 0)
-        self.needs_reloc = cfg.hasopt('plugins-base', 'partition')
 
         # Abort computation
         self._abort = False
         self._abort_reason = ''
 
+        self.called_plugin_dt = False
+        self.lb_iters = self.cfg.getint('mesh', 'load-balancing-iterations')
+
     def plugin_abort(self, reason):
         self._abort = True
         self._abort_reason = self._abort_reason or reason
 
-    def initialise_plugin_partition(self):
+    def initialise_comm_and_partition(self, mname, construct_con=False):
+        comm, rank, root = get_comm_rank_root('world')
 
-        # If partition name given for the plugin, use this partitioning instead
-        if self.needs_reloc:
-            pname = self.cfg.get('plugins-base', 'partition')
+        pname  = self.cfg.get('mesh', f'partition-{mname}')
 
-            self._plugins_mesh = NativeReader(self.system.mesh.fname, pname,
-                                     construct_con=False).mesh
-        
-            self._plugins_intercon = _MeshInterconnector(self.system.mesh.eidxs, 
-                                                self._plugins_mesh.eidxs)
+        # If note 'compute'
+        if pname == 'compute':
+            # Just duplicate the compute mesh
+            self.meshes[mname] = self.meshes['compute']
 
         else:
-            self._plugins_mesh = self.system.mesh
-            self._plugins_intercon = None
+           
+            pranks = self.cfg.getliteral('mesh', f'partition-{mname}-ranklist',
+                                        list(range(comm.size)))
 
-    def relocate_plugin_ary(self, ary, edim):
-        if self._plugins_intercon:
-            ary = {e: s for e, s in zip(self._plugins_mesh.etypes, ary)}
-            ary_dict = self._plugins_intercon.relocate(ary, edim=edim)
-            ary = list(ary_dict.values())
+            initialise_new_comm(mname, pranks)
 
-        return ary
+            reader = NativeReader(self.meshes['compute'].fname, pname,
+                                construct_con=construct_con, comm_name=mname)
+
+            # Append to the meshes dictionary
+            self.meshes[mname] = reader.mesh
+
+    def initialise_interconnector(self, mname1, mname2):
+        return _MeshInterconnector(self.meshes[mname1].eidxs, 
+                                   self.meshes[mname2].eidxs)
+
+    def relocate_ary(self, pintercon, ary, edim, *, src_name='compute', dst_name='plugins'):
+        world, wrank, _ = get_comm_rank_root('world')
+
+        # Build the input dict in the *source* etype order
+        if ary is None:
+            edict_in = {}
+        elif isinstance(ary, dict):
+            edict_in = {et: a for et, a in ary.items() if a is not None}
+        else:
+            src_etypes = list(self.meshes[src_name].eidxs)  # preserve source ordering
+            edict_in = {et: a for et, a in zip(src_etypes, ary) if a is not None}
+
+        # Sanity print + invariant check per etype we provide
+        for et, a in edict_in.items():
+            if not hasattr(a, "ndim") or a.ndim <= edim:
+                raise ValueError(f"[reloc:pre] r={wrank} et={et} invalid edim={edim} shape={getattr(a,'shape',None)}")
+            rows    = int(a.shape[edim])             # <-- element axis is at `edim`
+            Ne_mesh = int(np.asarray(self.meshes[src_name].eidxs.get(et, ())).size)
+            Ne_intr = int(np.asarray(pintercon.src_all[et][wrank]).size)
+            # print(f"[reloc:pre] r={wrank} et={et} rows(edim={edim})={rows} shape={a.shape} Ne_mesh={Ne_mesh} Ne_inter={Ne_intr}", flush=True)
+            assert rows == Ne_mesh == Ne_intr, (
+                f"[reloc:pre] r={wrank} et={et} rows={rows} Ne_mesh={Ne_mesh} Ne_inter={Ne_intr}"
+            )
+
+        # Relocate
+        ary_dict = pintercon.relocate(edict_in, edim=edim)
+
+        # Return arrays in the *destination* etype order
+        dst_etypes = list(self.meshes[dst_name].eidxs)
+        return [ary_dict[e] for e in dst_etypes if e in ary_dict]
 
     def _get_plugins(self, initsoln):
 
-        self.initialise_plugin_partition()
+        self.initialise_comm_and_partition('plugins')
+        self._plugins_intercon = self.initialise_interconnector('compute', 
+                                                                'plugins')
 
         plugins = []
 
@@ -136,6 +183,16 @@ class BaseIntegrator:
 
                 # Instantiate
                 plugins.append(get_plugin(*args, **data))
+
+        return plugins
+
+    def _reget_plugins(self):
+        plugins = []
+
+        for s in self.cfg.sections():
+            if (m := re.match('(soln|solver)-plugin-(.+?)(?:-(.+))?$', s)):
+                cfgsect, ptype, name, suffix = m[0], m[1], m[2], m[3]
+                plugins.append(get_plugin(ptype, name, self, cfgsect, suffix))
 
         return plugins
 
@@ -173,6 +230,9 @@ class BaseIntegrator:
             return f'plugins/{name}'
 
     def call_plugin_dt(self, tstart, dt):
+        if self.called_plugin_dt:
+            return
+
         ta = self.tlist
         tbegin = tstart if tstart > self.tcurr else self.tcurr
         tb = deque(np.arange(tbegin, self.tend, dt).tolist())
@@ -215,6 +275,8 @@ class BaseIntegrator:
 
         # Simulation and wall clock times
         stats.set('solver-time-integrator', 'tcurr', self.tcurr)
+        stats.set('solver-time-integrator', 'wall-time-last', self.walltime_last)
+        self.walltime_last = wtime
         stats.set('solver-time-integrator', 'wall-time', wtime)
 
         # Plugin wall clock times
@@ -232,13 +294,341 @@ class BaseIntegrator:
 
         # MPI wait times
         if self.cfg.getbool('backend', 'collect-wait-times', False):
+            comm, rank, root = get_comm_rank_root('compute')
+
+            if comm != mpi.COMM_NULL:
+                wait_times = comm.allgather(self.system.rhs_wait_times())
+            else:
+                wait_times = []
+
+            # Finally, across all ranks in the world ....
+            comm, rank, root = get_comm_rank_root()
+            
+            wait_times = comm.allgather(wait_times)
+            
+            for i, ms in enumerate(zip(*wait_times)):
+                for j, k in enumerate(['mean', 'stdev', 'median']):
+                    stats.set('backend-wait-times', f'rhs-graph-{i}-wait-{k}',
+                              ','.join(f'{v[j]:.3g}' for v in ms))
+
+
+            compute_times = comm.allgather(self.system.rhs_compute_times())
+            for i, ms in enumerate(zip(*compute_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median']):
+                    stats.set('backend-compute-times', f'rhs-graph-{i}-compute-{k}',
+                              ','.join(f'{v[j]:.6g}' for v in ms))
+
+            all_times = comm.allgather(self.system.rhs_all_times())
+            for i, ms in enumerate(zip(*all_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median']):
+                    stats.set('backend-all-times', f'rhs-graph-{i}-all-{k}',
+                              ','.join(f'{v[j]:.6g}' for v in ms))
+
+        if self.cfg.getbool('backend', 'collect-waitsome-times', False):
             comm, rank, root = get_comm_rank_root()
 
             wait_times = comm.allgather(self.system.rhs_wait_times())
             for i, ms in enumerate(zip(*wait_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
-                    stats.set('backend-wait-times', f'rhs-graph-{i}-{k}',
+                    stats.set('backend-wait-times', f'rhs-graph-{i}-wait-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
+
+            compute_times = comm.allgather(self.system.rhs_compute_times())
+            for i, ms in enumerate(zip(*compute_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median']):
+                    stats.set('backend-compute-times', f'rhs-graph-{i}-compute-{k}',
+                              ','.join(f'{v[j]:.6g}' for v in ms))
+
+            all_times = comm.allgather(self.system.rhs_all_times())
+            for i, ms in enumerate(zip(*all_times)):
+                for j, k in enumerate(['mean', 'sem', 
+                                       'stdev', 'median']):
+                    stats.set('backend-all-times', f'rhs-graph-{i}-all-{k}',
+                              ','.join(f'{v[j]:.6g}' for v in ms))
+
+            waitsome_send = comm.allgather(self.system.rhs_wait_times_send())
+            for i, ms in enumerate(zip(*waitsome_send)):
+                for j, k in enumerate(['mean', 'sem','stdev', 'median']):
+                    coldata = []
+                    for arr in ms:
+                        coldata.extend(row[j] for row in arr)
+
+                    stats.set('backend-wait-times',
+                            f'rhs-graph-{i}-send-{k}',
+                            ','.join(f'{val:.3g}' for val in coldata))
+
+            waitsome_recv = comm.allgather(self.system.rhs_wait_times_recv())
+            for i, ms in enumerate(zip(*waitsome_recv)):
+                for j, k in enumerate(['mean', 'sem', 'stdev', 'median']):
+                    coldata = []
+                    for arr in ms:
+                        coldata.extend(row[j] for row in arr)
+
+                    stats.set('backend-wait-times',
+                            f'rhs-graph-{i}-recv-{k}',
+                            ','.join(f'{val:.3g}' for val in coldata))
+
+            def _make_csr(stage_lists, col):
+                out = defaultdict(list)
+                for r_src, sl in enumerate(stage_lists):
+                    for stage, arr in enumerate(sl):
+                        for r_dst, row in enumerate(arr):
+                            v = row[col]
+                            if r_src != r_dst and v:
+                                out[stage].append(f'({r_src},{r_dst},{v:.3e})')
+                return out
+
+            for label, col in (('mean', 0), ('sem', 1), ('stdev', 2), ('median', 3)):
+                for stage, trip in sorted(_make_csr(waitsome_send, col).items()):
+                    stats.set('backend-wait-times', f'csr-rhs-graph-{stage}-send-{label}', ','.join(trip))
+
+                for stage, trip in sorted(_make_csr(waitsome_recv, col).items()):
+                    stats.set('backend-wait-times', f'csr-rhs-graph-{stage}-recv-{label}', ','.join(trip))
+
+        nbs_all  = comm.allgather(self.system.nbytes_send)
+
+        stage_to_triplets = defaultdict(list)
+        for r_src, stage_dict in enumerate(nbs_all):
+            for stage, vec in stage_dict.items():
+                for r_dst, nb in enumerate(vec):
+                    if r_src > r_dst and nb:
+                        stage_to_triplets[stage].append(f'({r_src},{r_dst},{nb})')
+
+        for stage, triplets in sorted(stage_to_triplets.items()):
+            stats.set('backend-bytes', f'rhs-graph-{stage}-bytes', ','.join(triplets))
+
+        self._collect_backend_elements(stats)
+
+        if self.tcurr > self.tstart:
+            self.load_balance_compute_weights(stats)
+
+
+    def _collect_backend_elements(self, stats):
+        """Collect element counts and DoFs per rank and per type, via ele_shapes."""
+        comm, rank, root = get_comm_rank_root()
+
+        # Local stats from ele_shapes
+        etypes = list(self.system.ele_shapes)
+        local_counts = [self.system.ele_shapes[et][2] for et in etypes]
+        local_dofs   = [self.system.ele_shapes[et][0] *
+                        self.system.ele_shapes[et][1] *
+                        self.system.ele_shapes[et][2]
+                        for et in etypes]
+
+        # Totals per rank
+        local_count_tot = sum(local_counts)
+        local_dof_tot   = sum(local_dofs)
+
+        # Gather across ranks
+        all_counts = comm.allgather(local_counts)
+        all_dofs   = comm.allgather(local_dofs)
+        all_count_tot = comm.allgather(local_count_tot)
+        all_dof_tot   = comm.allgather(local_dof_tot)
+
+        stats.set('backend-elements', 'etypes', ','.join(etypes))
+
+        # for j, et in enumerate(etypes):
+        #     counts = ','.join(str(c[j]) for c in all_counts)
+        #     dofs   = ','.join(str(d[j]) for d in all_dofs)
+        #     stats.set('backend-elements', f'elems-{et}', counts)
+        #     stats.set('backend-elements', f'dofs-{et}', dofs)
+
+        stats.set('backend-elements', 'elems-all',
+                ','.join(str(c) for c in all_count_tot))
+        stats.set('backend-elements', 'dofs-all',
+                ','.join(str(d) for d in all_dof_tot))
+
+    def load_balance_compute_weights(self, stats):
+        comm, rank, root = get_comm_rank_root()
+
+        # Grab per-rank dofs
+        dofs = [int(x) for x in stats.get('backend-elements', 'dofs-all').split(',')]
+        R = len(dofs)
+        P = comm.size
+
+        # Grab per-rank compute+all times (median for g0+g1)
+        g0c = [float(x) for x in stats.get('backend-compute-times', 'rhs-graph-0-compute-median').split(',')]
+        g1c = [float(x) for x in stats.get('backend-compute-times', 'rhs-graph-1-compute-median').split(',')]
+        g0a = [float(x) for x in stats.get('backend-all-times',     'rhs-graph-0-all-median').split(',')]
+        g1a = [float(x) for x in stats.get('backend-all-times',     'rhs-graph-1-all-median').split(',')]
+
+        # NEW: read flattened send medians (length P*P): row=r (src), col=c (dst)
+        def _get_send(stage):
+            key = f'rhs-graph-{stage}-send-median'
+            vals = [float(x) for x in stats.get('backend-wait-times', key).split(',')]
+            return vals
+
+        def _sum_offdiag(flat, P):
+            # per-rank sum over c != r
+            if len(flat) != P*P:
+                # fallback if older stats format; keep neutral
+                return [0.0]*P
+            return [sum(flat[r*P + c] for c in range(P) if c != r) for r in range(P)]
+
+        g0s_flat = _get_send(0)
+        g1s_flat = _get_send(1)
+        g0s_sum  = _sum_offdiag(g0s_flat, P)
+        g1s_sum  = _sum_offdiag(g1s_flat, P)
+
+        # Cost candidates
+        cost_compute = [g0c[r] + g1c[r] for r in range(R)]
+        cost_all     = [g0a[r] + g1a[r] for r in range(R)]
+
+        # Normalise by dofs
+        per_dof_compute = [cost_compute[r]      / dofs[r] for r in range(R)]
+        per_dof_all     = [cost_all[r]          / dofs[r] for r in range(R)]
+
+        if rank == root:
+            print("[weights] dofs:", dofs)
+            print("[weights] cost_compute:", cost_compute)
+            print("[weights] cost_all:", cost_all)
+            print("[weights] per_dof_compute:", per_dof_compute)
+            print("[weights] per_dof_all:", per_dof_all)
+            # NEW: show send sums and compute+send candidate
+            print("[weights] send_sums_g0:", g0s_sum)
+            print("[weights] send_sums_g1:", g1s_sum)
+
+            # Only g1 all times seem to correlate well with load imbalance
+            print("[weights] cost-g1-all:", g1a)
+
+        # Store g1a into self
+        self.lb_cost = g1a
+
+
+
+    def _lb_etarget_from_history(self, ecurrs):
+        """Return target per-rank element counts via T ~= alpha + beta*N (numpy-only)."""
+        import numpy as np
+        from pyfr.mpiutil import get_comm_rank_root
+
+        comm, rank, root = get_comm_rank_root()
+        N_now = np.array(ecurrs, dtype=np.int64)
+        P = len(N_now)
+
+        # Current per-rank 'g1a' times (set earlier by your weights collector)
+        T_now = np.array(getattr(self, 'lb_cost', [0.0]*P), dtype=float)
+
+        # Init rolling history once (identical on all ranks; safe)
+        if not hasattr(self, '_lb_hist_N'): self._lb_hist_N = []
+        if not hasattr(self, '_lb_hist_T'): self._lb_hist_T = []
+
+        self._lb_hist_N.append(N_now.copy())
+        self._lb_hist_T.append(T_now.copy())
+
+        # Rolling window
+        W = min(8, len(self._lb_hist_N))
+        eps = 1e-12
+
+        if W < 2 or not np.isfinite(T_now).all():
+            if rank == root:
+                print(f"[lb-lsq] insufficient history or bad T; window={W} ranks={P} (no change)")
+            return N_now.tolist()
+
+        X = np.array(self._lb_hist_N[-W:], dtype=float)  # [W, P]
+        Y = np.array(self._lb_hist_T[-W:], dtype=float)  # [W, P]
+
+        alpha = np.zeros(P, dtype=float)
+        beta  = np.zeros(P, dtype=float)
+        r2    = np.zeros(P, dtype=float)
+
+        for r in range(P):
+            x = X[:, r]
+            y = Y[:, r]
+            A = np.column_stack([np.ones_like(x), x])
+            theta, *_ = np.linalg.lstsq(A, y, rcond=None)
+            a, b = float(theta[0]), float(theta[1])
+            a = max(a, 0.0)
+            b = max(b, eps)
+
+            yhat = A @ np.array([a, b])
+            ss_res = float(np.sum((y - yhat)**2))
+            ss_tot = float(np.sum((y - np.mean(y))**2))
+            R2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
+
+            alpha[r], beta[r], r2[r] = a, b, R2
+
+        # Equal-time target: T* = (Ntot + sum(a/b)) / sum(1/b)
+        Ntot = int(N_now.sum())
+        invb = 1.0 / beta
+        Tstar = (Ntot + float(np.sum(alpha * invb))) / float(np.sum(invb))
+
+        N_star = (Tstar - alpha) * invb
+        N_star = np.clip(N_star, 0.0, None)
+
+        # Round & conserve exactly
+        N_int = np.floor(N_star).astype(np.int64)
+        diff = Ntot - int(N_int.sum())
+        if diff != 0:
+            frac = N_star - N_int
+            order = np.argsort(frac)[::-1] if diff > 0 else np.argsort(frac)
+            for i in range(abs(diff)):
+                N_int[order[i % P]] += 1 if diff > 0 else -1
+
+        # Logs for verification
+        if rank == root:
+            print(f"[lb-lsq] window={W} ranks={P}")
+            for r in range(P):
+                print(f"[lb-lsq] rank={r} Twarmup={alpha[r]:.6f} k={beta[r]:.3e} R2={r2[r]:.3f}")
+            print(f"[lb-lsq] equalize T*={Tstar:.6f}")
+            print(f"[lb-lsq] N_now={N_now.tolist()} N_target={N_int.tolist()} "
+                f"delta={(N_int - N_now).tolist()} sum_now={int(N_now.sum())} sum_tgt={int(N_int.sum())}")
+
+
+        # --- NEW: per-rank movement clip at 50% of current ---
+        delta = (N_int - N_now).astype(np.int64)
+        cap   = np.floor(0.5 * N_now).astype(np.int64)
+
+        # Clip per-rank deltas
+        delta_clipped = np.clip(delta, -cap, cap)
+        N_clip = (N_now + delta_clipped).astype(np.int64)
+
+        # Preserve total exactly by redistributing any leftover within headroom
+        leftover = int(Ntot - int(N_clip.sum()))
+        if leftover != 0:
+            # Use fractional preference from N_star while respecting headroom
+            frac = (N_star - N_clip)
+            if leftover > 0:
+                order = np.argsort(frac)[::-1]   # prefer those we wanted to increase
+                for i in range(leftover):
+                    # find next rank with headroom to add (+1)
+                    for r in order:
+                        if delta_clipped[r] < cap[r]:
+                            N_clip[r] += 1
+                            delta_clipped[r] += 1
+                            break
+            else:
+                order = np.argsort(frac)         # prefer those we wanted to decrease
+                for i in range(-leftover):
+                    # find next rank with headroom to subtract (-1)
+                    for r in order:
+                        if delta_clipped[r] > -cap[r]:
+                            N_clip[r] -= 1
+                            delta_clipped[r] -= 1
+                            break
+
+        # Optional: assert safety and log
+        assert int(N_clip.sum()) == Ntot, "[lb-lsq] total must be conserved after per-rank clip"
+
+        applied = bool(np.any(delta != delta_clipped))
+        if rank == root:
+            print(f"[lb-lsq] per-rank-clip@50% applied={applied}")
+            if applied:
+                print(f"[lb-lsq] caps={cap.tolist()} pre_delta={delta.tolist()} post_delta={delta_clipped.tolist()}")
+
+        # Replace N_int with clipped result for subsequent logs/return
+        N_int = N_clip
+
+
+        # --- END NEW ---
+        # Safety
+        assert int(N_int.sum()) == Ntot, "[lb-lsq] target sum must equal current sum"
+
+
+        return N_int.tolist()
+
 
     @property
     def cfgmeta(self):
