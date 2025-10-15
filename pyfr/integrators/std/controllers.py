@@ -107,27 +107,16 @@ class StdNoneController(BaseStdController):
 
                 # Allgather the coutns
                 ecurrs = comm.allgather(e_curr)
-                #etarget = deepcopy(ecurrs)
-                #etarget = [etarget[0]+2000, etarget[1]-4000, etarget[2]+2000]
+                etarget = deepcopy(ecurrs)
+                etarget = [etarget[0]+2000, etarget[1]-4000, etarget[2]+2000, *etarget[3:]]
 
-                etarget = self._lb_etarget_from_history(ecurrs)
-
-
-                #mmesh.plan_send_matrix_simple(ecurrs, etarget)
-
-                #moves = mmesh.build_parallel_moves_to_targets(etarget, rank_move_budget=None)
-                #eidxs_dest = mmesh.plan_eidxs_dest_from_diff(moves)     # collective; resolves send/recv
-
-                # build target vector however you like
-                moves_mesh = mmesh.iterate_to_convergence(
-                    etarget,
-                    max_iters=12,
-                    materialize=True,   # True if you want a rebuilt mesh now
-                    verbose=True,
-                )
-
-                soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
+                mmesh.iterate_to_convergence4(etarget)
+                soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_i), self.compute_soln)
                 self.reinit_backend_and_system(self.meshes['newcompute'], soln)
+
+                # exit 
+                import sys
+                sys.exit()
 
     def reinit_mesh_soln(self, mesh, soln):
         self.meshes['newcompute'] = mesh
