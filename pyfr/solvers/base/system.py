@@ -331,6 +331,29 @@ class BaseSystem:
 
         return stats
 
+    def rhs_wait_times(self):
+        pairs = list(self._rhs_uin_fout)
+        nstages = len(pairs) or 1
+        ngraphs = int(sum(len(self._rhs_graphs(u, f)) for u, f in pairs) / nstages)
+
+        if ngraphs <= 0: return [(0.0, 0.0, 0.0)]
+
+        u, f = pairs[-1]
+        g_list = tuple(self._rhs_graphs(u, f))
+        if not g_list: return [(0.0, 0.0, 0.0)] * ngraphs
+
+        pick_idx = len(g_list) - 2
+        t = g_list[pick_idx].get_wait_times()
+
+        mean = statistics.mean(t) if t else 0.0
+        stdev = statistics.stdev(t) if len(t) >= 2 else 0.0
+        median = statistics.median(t) if t else 0.0
+
+        out = [(0.0, 0.0, 0.0)] * ngraphs
+        out[pick_idx] = (mean, stdev, median)
+
+        return out
+
     def rhs_compute_times(self):
         # Group together timings for graphs which are semantically equivalent
         times = defaultdict(list)
@@ -345,9 +368,7 @@ class BaseSystem:
             stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
             median = statistics.median(t) if t else 0
 
-            sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
-
-            stats.append((mean, sem, stdev, median))
+            stats.append((mean, stdev, median))
 
         return stats
 
@@ -365,9 +386,7 @@ class BaseSystem:
             stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
             median = statistics.median(t) if t else 0
 
-            sem = stdev / math.sqrt(len(t)) if len(t) >= 2 else 0
-
-            stats.append((mean, sem, stdev, median))
+            stats.append((mean, stdev, median))
 
         return stats
 
@@ -406,17 +425,16 @@ class BaseSystem:
         num_stages = max(times_send.keys())+1 if times_send else 0
 
         for i in range(num_stages):
-            arr = np.zeros((comm.size, 4), dtype=np.float64)
+            arr = np.zeros((comm.size, 3), dtype=np.float64)
 
             for rank_j, dt_list in enumerate(times_send[i]):
                 if dt_list:
                     m = statistics.mean(dt_list)
                     s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
-                    sem = s / math.sqrt(len(dt_list)) if len(dt_list) >= 2 else 0
                     d = statistics.median(dt_list)
                 else:
-                    m = sem = s = d = 0
-                arr[rank_j] = [m, sem, s, d]
+                    m = s = d = 0
+                arr[rank_j] = [m, s, d]
 
             stage_stats.append(arr)
 
@@ -439,21 +457,56 @@ class BaseSystem:
         num_stages = max(times_recv.keys())+1 if times_recv else 0
 
         for i in range(num_stages):
-            arr = np.zeros((comm.size, 4), dtype=np.float64)
+            arr = np.zeros((comm.size, 3), dtype=np.float64)
 
             for rank_j, dt_list in enumerate(times_recv[i]):
                 if dt_list:
                     m = statistics.mean(dt_list)
                     s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
-                    sem = s / math.sqrt(len(dt_list)) if len(dt_list) >= 2 else 0
                     d = statistics.median(dt_list)
                 else:
-                    m = sem = s = d = 0
-                arr[rank_j] = [m, sem, s, d]
+                    m = s = d = 0
+                arr[rank_j] = [m, s, d]
 
             stage_stats.append(arr)
 
         return stage_stats
+
+
+    def rhs_all_times_median(self):
+        u, f = list(self._rhs_uin_fout)[-1]
+        g_list = tuple(self._rhs_graphs(u, f))
+        t = g_list[-2].get_all_times()
+        return statistics.median(t)
+
+    def rhs_wait_times_send_median(self):
+        comm, _, _ = get_comm_rank_root()
+        P = comm.size
+
+        u, f = list(self._rhs_uin_fout)[-1]
+
+        # Per-destination medians
+        lsts = tuple(self._rhs_graphs(u, f))[-2].get_wait_times_send()
+        out = np.zeros(P, dtype=np.float64)
+        for j, dt in enumerate(lsts):
+            out[j] = statistics.median(dt) if dt else 0.0
+
+        return out
+
+    def rhs_wait_times_recv_median(self):
+        comm, _, _ = get_comm_rank_root()
+        P = comm.size
+
+        u, f = list(self._rhs_uin_fout)[-1]
+
+        # Per-destination medians
+        lsts = tuple(self._rhs_graphs(u, f))[-2].get_wait_times_recv()
+        out = np.zeros(P, dtype=np.float64)
+        for j, dt in enumerate(lsts):
+            out[j] = statistics.median(dt) if dt else 0.0
+
+        return out
+
 
     def _compute_grads_graph(self, t, uinbank):
         raise NotImplementedError(f'Solver "{self.name}" does not compute '
