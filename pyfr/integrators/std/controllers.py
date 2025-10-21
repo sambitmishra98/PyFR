@@ -102,21 +102,16 @@ class StdNoneController(BaseStdController):
 
                 _MetaMesh.info(self.meshes['compute'])
 
-                # Current element count
-                e_curr = sum(len(eidxs) for eidxs in mmesh.eidxs_i.values())
+                current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
+                ecurrs = np.asarray(comm.allgather(int(current_local)), dtype=np.int64)
 
-                # Allgather the coutns
-                ecurrs = comm.allgather(e_curr)
-                etarget = deepcopy(ecurrs)
-                etarget = [etarget[0]+2000, etarget[1]-4000, etarget[2]+2000, *etarget[3:]]
+                # Get target element distribution
+                targets = self.get_target(ecurrs, scale=self.lb_target_scale)
 
-                mmesh.iterate_to_convergence4(etarget)
-                soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_i), self.compute_soln)
+                mmesh.iterate_to_convergence(targets, etype_order=self.etype_order,
+                    flowmat_relax=self.lb_flowmat_relax, mask=self.twoway_mask)
+                soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
                 self.reinit_backend_and_system(self.meshes['newcompute'], soln)
-
-                # exit 
-                import sys
-                sys.exit()
 
     def reinit_mesh_soln(self, mesh, soln):
         self.meshes['newcompute'] = mesh

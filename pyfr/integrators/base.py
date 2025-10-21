@@ -90,6 +90,16 @@ class BaseIntegrator:
 
         self.called_plugin_dt = False
         self.lb_iters = self.cfg.getint('mesh', 'load-balancing-iterations', 1)
+        self.lb_target_scale = self.cfg.getfloat('mesh', 'load-balancing-target-scale', 1.0)
+        self.lb_flowmat_relax = self.cfg.getfloat('mesh', 'load-balancing-flowmatrix-relax', 0.5)
+
+        # devices = 'gpu'*1+'cpu'*11
+        devices = self.cfg.getliteral('mesh', 'devices')
+
+        own_device = devices[get_comm_rank_root()[1]]
+
+        # Get preference lists according to device type, depending on the rank
+        self.etype_order = self.cfg.getliteral('mesh', f'device-preference-{own_device}')
 
     def plugin_abort(self, reason):
         self._abort = True
@@ -123,35 +133,49 @@ class BaseIntegrator:
                                    self.meshes[mname2].eidxs)
 
     def relocate_ary(self, pintercon, ary, edim, *, src_name='compute', dst_name='plugins'):
-        world, wrank, _ = get_comm_rank_root('world')
+        """
+        Relocate per-element arrays between mesh layouts.
 
-        # Build the input dict in the *source* etype order
+        Parameters
+        ----------
+        pintercon : _MeshInterconnector
+            Interconnector built from meshes[src_name] -> meshes[dst_name].
+        ary : None | dict[str, np.ndarray] | Sequence[np.ndarray]
+            - dict: keyed by etype; any subset is fine (empties auto-filled).
+            - sequence: ordered like meshes[src_name].eidxs iteration order.
+            - None: treated as empty input.
+        edim : int
+            Axis index corresponding to the element dimension.
+        src_name, dst_name : str
+            Names in self.meshes for source/destination layouts.
+
+        Returns
+        -------
+        out : dict[str, np.ndarray] | list[np.ndarray]
+            dict if input was a dict; otherwise a list ordered like
+            meshes[dst_name].eidxs iteration order.
+        """
+        # Normalize input → dict keyed by etype (only provide what we have)
+        want_dict = isinstance(ary, dict)
         if ary is None:
             edict_in = {}
-        elif isinstance(ary, dict):
-            edict_in = {et: a for et, a in ary.items() if a is not None}
+        elif want_dict:
+            edict_in = {str(et): a for et, a in ary.items() if a is not None}
         else:
-            src_etypes = list(self.meshes[src_name].eidxs)  # preserve source ordering
-            edict_in = {et: a for et, a in zip(src_etypes, ary) if a is not None}
+            src_order = list(self.meshes[src_name].eidxs)  # deterministic
+            edict_in = {et: a for et, a in zip(src_order, ary) if a is not None}
 
-        # Sanity print + invariant check per etype we provide
-        for et, a in edict_in.items():
-            if not hasattr(a, "ndim") or a.ndim <= edim:
-                raise ValueError(f"[reloc:pre] r={wrank} et={et} invalid edim={edim} shape={getattr(a,'shape',None)}")
-            rows    = int(a.shape[edim])             # <-- element axis is at `edim`
-            Ne_mesh = int(np.asarray(self.meshes[src_name].eidxs.get(et, ())).size)
-            Ne_intr = int(np.asarray(pintercon.src_all[et][wrank]).size)
-            # print(f"[reloc:pre] r={wrank} et={et} rows(edim={edim})={rows} shape={a.shape} Ne_mesh={Ne_mesh} Ne_inter={Ne_intr}", flush=True)
-            assert rows == Ne_mesh == Ne_intr, (
-                f"[reloc:pre] r={wrank} et={et} rows={rows} Ne_mesh={Ne_mesh} Ne_inter={Ne_intr}"
-            )
+        # Let the interconnector validate/reshape/synthesize empties and relocate
+        out_dict = pintercon.relocate(edict_in, edim=edim)  # → dict[etype] = np.ndarray
 
-        # Relocate
-        ary_dict = pintercon.relocate(edict_in, edim=edim)
+        # Preserve caller’s expectation on return type
+        if want_dict:
+            # keep only originally requested keys in that same key order
+            return {et: out_dict.get(et) for et in edict_in.keys()}
+        else:
+            dst_order = list(self.meshes[dst_name].eidxs)
+            return [out_dict[e] for e in dst_order if e in out_dict]
 
-        # Return arrays in the *destination* etype order
-        dst_etypes = list(self.meshes[dst_name].eidxs)
-        return [ary_dict[e] for e in dst_etypes if e in ary_dict]
 
     def _get_plugins(self, initsoln):
 
@@ -400,235 +424,139 @@ class BaseIntegrator:
         for stage, triplets in sorted(stage_to_triplets.items()):
             stats.set('backend-bytes', f'rhs-graph-{stage}-bytes', ','.join(triplets))
 
-        self._collect_backend_elements(stats)
-
-        if self.tcurr > self.tstart:
-            self.load_balance_compute_weights(stats)
-
-
-    def _collect_backend_elements(self, stats):
-        """Collect element counts and DoFs per rank and per type, via ele_shapes."""
-        comm, rank, root = get_comm_rank_root()
-
-        # Local stats from ele_shapes
+    def __collect_hist(self):
+        """
+        Append one observation: [dofs_hex, dofs_pyr, dofs_tet, ..., g1_compute_median]
+        Returns the full history as a numpy array (rows = observations).
+        """
         etypes = list(self.system.ele_shapes)
-        local_counts = [self.system.ele_shapes[et][2] for et in etypes]
-        local_dofs   = [self.system.ele_shapes[et][0] *
-                        self.system.ele_shapes[et][1] *
-                        self.system.ele_shapes[et][2]
-                        for et in etypes]
+        dofs = [self.system.ele_shapes[et][0]*self.system.ele_shapes[et][1]*
+                self.system.ele_shapes[et][2] for et in etypes]
 
-        # Totals per rank
-        local_count_tot = sum(local_counts)
-        local_dof_tot   = sum(local_dofs)
+        ct = self.system.rhs_compute_times()
+        if not ct:
+            raise RuntimeError("collect_hist: no compute-time data available")
+        gidx = 1 if len(ct) > 1 else 0
+        if len(ct[gidx]) < 4:
+            raise RuntimeError("collect_hist: compute-time tuple missing median")
+        tmed = float(ct[gidx][3])
 
-        # Gather across ranks
-        all_counts = comm.allgather(local_counts)
-        all_dofs   = comm.allgather(local_dofs)
-        all_count_tot = comm.allgather(local_count_tot)
-        all_dof_tot   = comm.allgather(local_dof_tot)
+        row = np.array([*map(float, dofs), tmed], dtype=float)
+        if not hasattr(self, "_perf_hist"):
+            self._perf_hist = []
+        self._perf_hist.append(row)
+        return np.asarray(self._perf_hist, dtype=float)
 
-        stats.set('backend-elements', 'etypes', ','.join(etypes))
+    def __performance_from_hist(self, hist):
+        """
+        Fit time ≈ sum_i alpha_i * dofs_i on the last N+1 rows (N = #etypes).
+        Return {etype: perf_i} where perf_i = 1/alpha_i in dof/s.
+        """
 
-        # for j, et in enumerate(etypes):
-        #     counts = ','.join(str(c[j]) for c in all_counts)
-        #     dofs   = ','.join(str(d[j]) for d in all_dofs)
-        #     stats.set('backend-elements', f'elems-{et}', counts)
-        #     stats.set('backend-elements', f'dofs-{et}', dofs)
+        comm, rank, root = get_comm_rank_root('world')
 
-        stats.set('backend-elements', 'elems-all',
-                ','.join(str(c) for c in all_count_tot))
-        stats.set('backend-elements', 'dofs-all',
-                ','.join(str(d) for d in all_dof_tot))
+        etypes = list(self.system.ele_shapes)
+        N = len(etypes)
+        if hist is None or len(hist) < N + 1:
+            return
 
-    def load_balance_compute_weights(self, stats):
-        comm, rank, root = get_comm_rank_root()
+        H = np.asarray(hist[-(N+1):], dtype=float)
+        X, y = H[:, :N], H[:, N]
+        alphas, *_ = np.linalg.lstsq(X, y, rcond=None)
+        alphas = np.asarray(alphas, dtype=float)
+        if np.any(~np.isfinite(alphas)):
+            raise RuntimeError("Regression produced non-finite coefficients")
 
-        # Grab per-rank dofs
-        dofs = [int(x) for x in stats.get('backend-elements', 'dofs-all').split(',')]
-        R = len(dofs)
-        P = comm.size
+        eps = 1e-30
+        perfs = 1.0 / np.maximum(alphas, eps)
 
-        # Grab per-rank compute+all times (median for g0+g1)
-        g0c = [float(x) for x in stats.get('backend-compute-times', 'rhs-graph-0-compute-median').split(',')]
-        g1c = [float(x) for x in stats.get('backend-compute-times', 'rhs-graph-1-compute-median').split(',')]
-        g0a = [float(x) for x in stats.get('backend-all-times',     'rhs-graph-0-all-median').split(',')]
-        g1a = [float(x) for x in stats.get('backend-all-times',     'rhs-graph-1-all-median').split(',')]
+        self.perf_by_etype = {et: float(p) for et, p in zip(etypes, perfs)}
 
-        # NEW: read flattened send medians (length P*P): row=r (src), col=c (dst)
-        def _get_send(stage):
-            key = f'rhs-graph-{stage}-send-median'
-            vals = [float(x) for x in stats.get('backend-wait-times', key).split(',')]
-            return vals
-
-        def _sum_offdiag(flat, P):
-            # per-rank sum over c != r
-            if len(flat) != P*P:
-                # fallback if older stats format; keep neutral
-                return [0.0]*P
-            return [sum(flat[r*P + c] for c in range(P) if c != r) for r in range(P)]
-
-        g0s_flat = _get_send(0)
-        g1s_flat = _get_send(1)
-        g0s_sum  = _sum_offdiag(g0s_flat, P)
-        g1s_sum  = _sum_offdiag(g1s_flat, P)
-
-        # Cost candidates
-        cost_compute = [g0c[r] + g1c[r] for r in range(R)]
-        cost_all     = [g0a[r] + g1a[r] for r in range(R)]
-
-        # Normalise by dofs
-        per_dof_compute = [cost_compute[r]      / dofs[r] for r in range(R)]
-        per_dof_all     = [cost_all[r]          / dofs[r] for r in range(R)]
+        all_perf = comm.allgather(self.perf_by_etype)
 
         if rank == root:
-            print("[weights] dofs:", dofs)
-            print("[weights] cost_compute:", cost_compute)
-            print("[weights] cost_all:", cost_all)
-            print("[weights] per_dof_compute:", per_dof_compute)
-            print("[weights] per_dof_all:", per_dof_all)
-            # NEW: show send sums and compute+send candidate
-            print("[weights] send_sums_g0:", g0s_sum)
-            print("[weights] send_sums_g1:", g1s_sum)
+            print(f"[perf] per_etype_dof_per_sec_allranks:")
+            etypes = list(self.system.ele_shapes)
+            header = "Rank " + " ".join(f"{et:>15}" for et in etypes)
+            print(header)
+            for r in range(comm.size):
+                row = f"{r:>4} " + " ".join(f"{all_perf[r].get(et, 0.0):15.3e}" for et in etypes)
+                print(row)
 
-            # Only g1 all times seem to correlate well with load imbalance
-            print("[weights] cost-g1-all:", g1a)
+    def mask_per_etype(self, etype_performance):
+        """
+            Given performance numbers for each rank each etype ...
+            Build a relocation mask (boolean) for downstream flow planner.
+        """       
+        
+        pass
 
-        # Store g1a into self
-        self.lb_cost = g1a
+    def get_target(self, ecurrs, scale=1.0):
+        """
+        Build target using MPI wait-split data
+        - e_curr from self.meshes['compute']
+        - g1c medians directly from self.system.rhs_compute_times()
+        Returns the integer per-rank targets (list[int]) and sets target.
+        """
 
+        # --- Comms ---
+        comm,  rank,  root  = get_comm_rank_root('world')
 
+        Ntot   = int(ecurrs.sum())
+        g1a, g1c, g1s, g1r = self.get_median_matrices()
 
-    def _lb_etarget_from_history(self, ecurrs):
-        """Return target per-rank element counts via T ~= alpha + beta*N (numpy-only)."""
-        import numpy as np
-        from pyfr.mpiutil import get_comm_rank_root
+        s_out = g1s.sum(axis=1) # s (sender burden): row-sum of send
+        r_in  = g1r.sum(axis=1) # r as experienced locally (remove from 'all'; avoid charging receiver)
+        r_out = g1r.sum(axis=0) # r attributed to the sender (transpose row-sum == column-sum of recv)
 
-        comm, rank, root = get_comm_rank_root()
-        N_now = np.array(ecurrs, dtype=np.int64)
-        P = len(N_now)
+        self.oneway_mask = g1s + g1r.T > 0
+        self.twoway_mask = g1s + g1r > 0
 
-        # Current per-rank 'g1a' times (set earlier by your weights collector)
-        T_now = np.array(getattr(self, 'lb_cost', [0.0]*P), dtype=float)
+        #burden_current = g1a - (r_in + r_out)    # = (a-r)+r^T = (c+s)+r^T
+        burden_target = g1a - (r_in + s_out)*scale + r_out*scale    # = (a-r)     = (c+s)
 
-        # Init rolling history once (identical on all ranks; safe)
-        if not hasattr(self, '_lb_hist_N'): self._lb_hist_N = []
-        if not hasattr(self, '_lb_hist_T'): self._lb_hist_T = []
+        # --- Online perf history + regression (tiny, safe to skip if not enough data)
+        # hist = self.collect_hist()
+        # self.performance_from_hist(hist)
 
-        self._lb_hist_N.append(N_now.copy())
-        self._lb_hist_T.append(T_now.copy())
-
-        # Rolling window
-        W = min(8, len(self._lb_hist_N))
-        eps = 1e-12
-
-        if W < 2 or not np.isfinite(T_now).all():
-            if rank == root:
-                print(f"[lb-lsq] insufficient history or bad T; window={W} ranks={P} (no change)")
-            return N_now.tolist()
-
-        X = np.array(self._lb_hist_N[-W:], dtype=float)  # [W, P]
-        Y = np.array(self._lb_hist_T[-W:], dtype=float)  # [W, P]
-
-        alpha = np.zeros(P, dtype=float)
-        beta  = np.zeros(P, dtype=float)
-        r2    = np.zeros(P, dtype=float)
-
-        for r in range(P):
-            x = X[:, r]
-            y = Y[:, r]
-            A = np.column_stack([np.ones_like(x), x])
-            theta, *_ = np.linalg.lstsq(A, y, rcond=None)
-            a, b = float(theta[0]), float(theta[1])
-            a = max(a, 0.0)
-            b = max(b, eps)
-
-            yhat = A @ np.array([a, b])
-            ss_res = float(np.sum((y - yhat)**2))
-            ss_tot = float(np.sum((y - np.mean(y))**2))
-            R2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
-
-            alpha[r], beta[r], r2[r] = a, b, R2
-
-        # Equal-time target: T* = (Ntot + sum(a/b)) / sum(1/b)
-        Ntot = int(N_now.sum())
-        invb = 1.0 / beta
-        Tstar = (Ntot + float(np.sum(alpha * invb))) / float(np.sum(invb))
-
-        N_star = (Tstar - alpha) * invb
-        N_star = np.clip(N_star, 0.0, None)
-
-        # Round & conserve exactly
+        # per-element cost: exactly what you asked for
+        inv_cost = ecurrs / burden_target
+        N_star   = Ntot * (inv_cost / inv_cost.sum())
         N_int = np.floor(N_star).astype(np.int64)
-        diff = Ntot - int(N_int.sum())
-        if diff != 0:
+        k = int(Ntot - N_int.sum())
+        if k:
             frac = N_star - N_int
-            order = np.argsort(frac)[::-1] if diff > 0 else np.argsort(frac)
-            for i in range(abs(diff)):
-                N_int[order[i % P]] += 1 if diff > 0 else -1
+            order = np.argsort(frac) # asc; deterministic tie-break by index
+            if k > 0:  N_int[order[ -k:  ]] += 1 # +1 to largest fractions
+            else:      N_int[order[   :-k]] -= 1 # -1 from smallest fractions
 
-        # Logs for verification
-        if rank == root:
-            print(f"[lb-lsq] window={W} ranks={P}")
-            for r in range(P):
-                print(f"[lb-lsq] rank={r} Twarmup={alpha[r]:.6f} k={beta[r]:.3e} R2={r2[r]:.3f}")
-            print(f"[lb-lsq] equalize T*={Tstar:.6f}")
-            print(f"[lb-lsq] N_now={N_now.tolist()} N_target={N_int.tolist()} "
-                f"delta={(N_int - N_now).tolist()} sum_now={int(N_now.sum())} sum_tgt={int(N_int.sum())}")
-
-
-        # --- NEW: per-rank movement clip at 50% of current ---
-        delta = (N_int - N_now).astype(np.int64)
-        cap   = np.floor(0.5 * N_now).astype(np.int64)
-
-        # Clip per-rank deltas
-        delta_clipped = np.clip(delta, -cap, cap)
-        N_clip = (N_now + delta_clipped).astype(np.int64)
-
-        # Preserve total exactly by redistributing any leftover within headroom
-        leftover = int(Ntot - int(N_clip.sum()))
-        if leftover != 0:
-            # Use fractional preference from N_star while respecting headroom
-            frac = (N_star - N_clip)
-            if leftover > 0:
-                order = np.argsort(frac)[::-1]   # prefer those we wanted to increase
-                for i in range(leftover):
-                    # find next rank with headroom to add (+1)
-                    for r in order:
-                        if delta_clipped[r] < cap[r]:
-                            N_clip[r] += 1
-                            delta_clipped[r] += 1
-                            break
-            else:
-                order = np.argsort(frac)         # prefer those we wanted to decrease
-                for i in range(-leftover):
-                    # find next rank with headroom to subtract (-1)
-                    for r in order:
-                        if delta_clipped[r] > -cap[r]:
-                            N_clip[r] -= 1
-                            delta_clipped[r] -= 1
-                            break
-
-        # Optional: assert safety and log
-        assert int(N_clip.sum()) == Ntot, "[lb-lsq] total must be conserved after per-rank clip"
-
-        applied = bool(np.any(delta != delta_clipped))
-        if rank == root:
-            print(f"[lb-lsq] per-rank-clip@50% applied={applied}")
-            if applied:
-                print(f"[lb-lsq] caps={cap.tolist()} pre_delta={delta.tolist()} post_delta={delta_clipped.tolist()}")
-
-        # Replace N_int with clipped result for subsequent logs/return
-        N_int = N_clip
-
-
-        # --- END NEW ---
-        # Safety
-        assert int(N_int.sum()) == Ntot, "[lb-lsq] target sum must equal current sum"
-
-
+        assert int(N_int.sum()) == Ntot, "Target sum must equal current sum"
         return N_int.tolist()
 
+    def get_median_matrices(self, g1idx=1):
+        # World/compute comms
+        comm, rank, root = get_comm_rank_root('world')
+        P = comm.size
+
+        all_times = comm.allgather(self.system.rhs_all_times())
+        cmp_times = comm.allgather(self.system.rhs_compute_times())
+        ws_send   = comm.allgather(self.system.rhs_wait_times_send())
+        ws_recv   = comm.allgather(self.system.rhs_wait_times_recv())
+
+        # Per-rank medians
+        all_med = np.fromiter((float(all_times[r][g1idx][3]) for r in range(P)), dtype=float, count=P)
+        cmp_med = np.fromiter((float(cmp_times[r][g1idx][3]) for r in range(P)), dtype=float, count=P)
+        send_mat = np.fromiter((float(ws_send[i][g1idx][j][3]) for i in range(P) for j in range(P)),dtype=float, count=P*P).reshape(P, P)
+        recv_mat = np.fromiter((float(ws_recv[i][g1idx][j][3]) for i in range(P) for j in range(P)),dtype=float, count=P*P).reshape(P, P)
+
+        # Root-only concise logs
+        if rank == root:
+            print(f"all*1e6=\n{ np.array2string(all_med*1e6,  formatter={'float_kind':lambda x: f'{x:05.0f}'})}")
+            print(f"cmp*1e6=\n{ np.array2string(cmp_med*1e6,  formatter={'float_kind':lambda x: f'{x:05.0f}'})}")
+            print(f"send*1e6=\n{np.array2string(send_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
+            print(f"recv*1e6=\n{np.array2string(recv_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
+
+        return all_med, cmp_med, send_mat, recv_mat
 
     @property
     def cfgmeta(self):
