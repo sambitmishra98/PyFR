@@ -12,6 +12,43 @@ from pyfr.plugins import get_plugin
 
 from pyfr.readers.native import NativeReader, _MeshInterconnector
 
+import os
+
+def _append_csv_row(file_path: str, header_cols: list[str], values: list[int]):
+    """Root-only: write header if missing, then append one integer row."""
+    # Write header once
+    if not os.path.exists(file_path):
+        with open(file_path, 'w', newline='') as f:
+            f.write(','.join(header_cols) + '\n')
+        print(f"[g1csv] header_written file='{file_path}' ncols={len(header_cols)}")
+
+    # Append row
+    with open(file_path, 'a', newline='') as f:
+        f.write(','.join(str(int(v)) for v in values) + '\n')
+    print(f"[g1csv] row_append file='{file_path}' ncols={len(header_cols)}")
+
+
+def _flatten_offdiag_labels(P: int) -> list[str]:
+    """i0-1,i0-2,...,i0-(P-1), i1-0,i1-2,...,i(P-1)-(P-2); skips i==j."""
+    cols = []
+    for i in range(P):
+        for j in range(P):
+            if j != i:
+                cols.append(f"i{i}-{j}")
+    return cols
+
+
+def _flatten_offdiag_values(M: np.ndarray) -> list[int]:
+    """Row-major off-diagonal flatten to ints."""
+    P = M.shape[0]
+    vals = []
+    for i in range(P):
+        for j in range(P):
+            if j != i:
+                vals.append(int(M[i, j]))
+    return vals
+
+
 
 def _common_plugin_prop(attr, *, edim):
     def wrapfn(fn):
@@ -491,6 +528,35 @@ class BaseIntegrator:
         
         pass
 
+    def write_g1_median_csvs(self, g1a, g1s, g1r, g1idx: int = 1):
+        """
+        Snapshot g1 medians to CSV in integer microseconds:
+        - g1-all-median-ms.csv   : columns r0,...,r{P-1}
+        - g1-cmp-median-ms.csv   : columns r0,...,r{P-1}
+        - g1-send-median-ms.csv  : columns i<sender>-<receiver> for all j!=i
+        - g1-recv-median-ms.csv  : same pattern as send
+        Header is created only if the file does not exist.
+        """
+        comm, rank, root = get_comm_rank_root('world')
+        P = comm.size
+
+        # Scale to microseconds and cast to int
+        all_us  = np.rint(g1a * 1e6).astype(np.int64)
+        send_us = np.rint(g1s * 1e6).astype(np.int64)
+        recv_us = np.rint(g1r * 1e6).astype(np.int64)
+
+        if rank != root:
+            return
+
+        # --- ALL / CMP vectors ---
+        rcols = [f"r{r}" for r in range(P)]
+        _append_csv_row('g1-all-median-ms.csv', rcols, all_us.tolist())
+
+        # --- SEND / RECV full directed off-diagonal matrices ---
+        mcols = _flatten_offdiag_labels(P)
+        _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us))
+        _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us))
+
     def get_target(self, ecurrs, scale=1.0):
         """
         Build target using MPI wait-split data
@@ -503,7 +569,11 @@ class BaseIntegrator:
         comm,  rank,  root  = get_comm_rank_root('world')
 
         Ntot   = int(ecurrs.sum())
-        g1a, g1c, g1s, g1r = self.get_median_matrices()
+        g1a, _, g1s, g1r = self.get_median_matrices()
+
+        # After calling get_median_matrices(...) or inside advance loop where you snapshot:
+        self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
+
 
         s_out = g1s.sum(axis=1) # s (sender burden): row-sum of send
         r_in  = g1r.sum(axis=1) # r as experienced locally (remove from 'all'; avoid charging receiver)

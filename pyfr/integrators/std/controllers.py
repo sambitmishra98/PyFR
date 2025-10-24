@@ -1,17 +1,14 @@
 import math
 import gc
 
-from copy import deepcopy
+from time import perf_counter_ns
 
 import numpy as np
 
-from pyfr.backends import get_backend
-
-from pyfr.backends.base import backend
 from pyfr.integrators.std.base import BaseStdIntegrator
-from pyfr.mpiutil import get_comm_rank_root, initialise_new_comm, mpi
+from pyfr.mpiutil import get_comm_rank_root, mpi
 
-from pyfr.readers.native import _MetaMesh, NativeReader
+from pyfr.readers.native import _MetaMesh
 
 
 class BaseStdController(BaseStdIntegrator):
@@ -30,6 +27,18 @@ class BaseStdController(BaseStdIntegrator):
         # Fire off any event handlers if not restarting
         if not self.isrestart:
             self._run_plugins()
+
+        comm, rank, root = get_comm_rank_root('world')
+
+        # Global union of etypes (keeps header complete)
+        ets_local = tuple(self.meshes['compute'].eidxs.keys())
+        etypes = sorted({et for ets in comm.allgather(ets_local) for et in ets})
+        self._lb_etypes = etypes  # cache for rows
+
+        if rank == root:
+            with open('lb_walltimes.csv', 'a') as f:
+                f.write('tcurr,others,iterate,reinit\n')
+                self.wallt_end = perf_counter_ns()
 
     def _accept_step(self, dt, idxcurr, err=None):
         self.tcurr += dt
@@ -95,12 +104,16 @@ class StdNoneController(BaseStdController):
 
             # Switch mesh here, after 5 steps
             if self.nacptsteps % self.lb_iters == 0 and not self.lb_iters == 1:
+                wallt_start = perf_counter_ns()
 
                 print('Switching, nacptsteps = ', self.nacptsteps)
 
                 mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
 
                 _MetaMesh.info(self.meshes['compute'])
+
+                # Right where you want to snapshot (e.g., just before/after switching):
+                _MetaMesh.info_to_csv(self.meshes['compute'], tcurr=self.tcurr)
 
                 current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
                 ecurrs = np.asarray(comm.allgather(int(current_local)), dtype=np.int64)
@@ -110,8 +123,20 @@ class StdNoneController(BaseStdController):
 
                 mmesh.iterate_to_convergence(targets, etype_order=self.etype_order,
                     flowmat_relax=self.lb_flowmat_relax, mask=self.twoway_mask)
+                wallt_iterate = perf_counter_ns() - wallt_start
                 soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
                 self.reinit_backend_and_system(self.meshes['newcompute'], soln)
+                wallt_reinit = perf_counter_ns() - wallt_start - wallt_iterate
+
+                # Write wall times
+                if rank == root:
+                    with open('lb_walltimes.csv', 'a') as f:
+                        f.write(f"{self.tcurr:.6f},"
+                                f"{(wallt_start - self.wallt_end)/1e9},"
+                                f"{wallt_iterate/1e9},"
+                                f"{wallt_reinit/1e9}\n")
+
+                self.wallt_end = perf_counter_ns()
 
     def reinit_mesh_soln(self, mesh, soln):
         self.meshes['newcompute'] = mesh
