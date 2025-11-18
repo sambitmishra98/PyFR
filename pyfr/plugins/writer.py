@@ -57,7 +57,10 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
         # If we're not restarting then make sure we write out the initial
         # solution when we are called for the first time
         if intg.called_plugin_dt:
-            pass
+            self.tout_last = intg.tstart
+            if intg.isrestart:
+                raise RuntimeError('Restarting from a time other '
+                                            'than t=0 is not supported')
         elif not intg.isrestart:
             self.tout_last -= self.dt_out
 

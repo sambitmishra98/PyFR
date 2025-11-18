@@ -1,4 +1,4 @@
-from pyfr.mpiutil import get_comm_rank_root
+from pyfr.mpiutil import get_comm_rank_root, rank
 from pyfr.solvers.baseadvec import (BaseAdvectionIntInters,
                                     BaseAdvectionMPIInters,
                                     BaseAdvectionBCInters)
@@ -38,9 +38,7 @@ class BaseAdvectionDiffusionMPIInters(BaseAdvectionMPIInters):
     def __init__(self, be, lhs, rhsrank, elemap, cfg):
         super().__init__(be, lhs, rhsrank, elemap, cfg)
 
-        comm, rank, root = get_comm_rank_root()
-
-        lhsprank = rank
+        lhsprank = rank['compute']
         rhsprank = rhsrank
 
         # Generate second set of view matrices

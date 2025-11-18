@@ -5,9 +5,13 @@ from time import perf_counter_ns
 import numpy as np
 
 from pyfr.integrators.std.base import BaseStdIntegrator
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.mpiutil import (mpi, initialise_new_comm, 
+                          comm, rank, root, rankmap, execute,
+                          promote_comm)
 
 from pyfr.readers.native import _MetaMesh
+
+from pyfr.inifile import Inifile
 
 
 class BaseStdController(BaseStdIntegrator):
@@ -27,14 +31,12 @@ class BaseStdController(BaseStdIntegrator):
         if not self.isrestart:
             self._run_plugins()
 
-        comm, rank, root = get_comm_rank_root('world')
-
         # Global union of etypes (keeps header complete)
         ets_local = tuple(self.meshes['compute'].eidxs.keys())
-        etypes = sorted({et for ets in comm.allgather(ets_local) for et in ets})
+        etypes = sorted({et for ets in comm['world'].allgather(ets_local) for et in ets})
         self._lb_etypes = etypes  # cache for rows
 
-        if rank == root:
+        if rank['world'] == root['world']:
             with open('lb_walltimes.csv', 'a') as f:
                 f.write('tcurr,others,iterate,reinit\n')
                 self.wallt_end = perf_counter_ns()
@@ -69,6 +71,203 @@ class BaseStdController(BaseStdIntegrator):
 
         self._idxcurr = idxold
 
+    def load_balance(self):
+        # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
+        if self.nacptsteps % self.lb_iters == 0 and not self.lb_iters == 1:
+            # Read inifile  from /scratch/EFFORTS/LoadBalancer3/c3900/online.ini
+            online_cfg = Inifile.load(self.cfg.get('partition', 'online-file'))
+            part_ranklist = online_cfg.getliteral('partition', 'compute-ranklist')
+
+            # Build / update 'newcompute' communicator
+            initialise_new_comm('newcompute', part_ranklist)
+
+
+            # 🔍 NEW: print communicator state after creating newcompute
+            if rank['world'] == root['world']:
+                print(
+                    f"[comm-debug] init-newcompute: "
+                    f"world_size={comm['world'].size} "
+                    f"compute_size={comm['compute'].size} "
+                    f"rankmap_compute={rankmap['compute']} "
+                    f"newcompute_size={comm['newcompute'].size} "
+                    f"rankmap_newcompute={rankmap['newcompute']}",
+                    flush=True
+                )
+
+            wallt_start = perf_counter_ns()
+
+            # Wait-time matrices (still needed by get_target)
+            g1a, g1s, g1r = self.get_median_matrices()
+
+            print('Switching, nacptsteps = ', self.nacptsteps)
+
+            # Build MetaMesh over the *world* communicator
+            mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
+
+            _MetaMesh.info(self.meshes['compute'])
+            _MetaMesh.info_to_csv(self.meshes['compute'], tcurr=self.tcurr)
+
+            # Element counts per world rank
+            current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
+            ecurrs = np.asarray(comm['world'].allgather(int(current_local)), dtype=np.int64)
+
+            print(f"[lb] world-rank {rank['world']} ecurrs={ecurrs.tolist()}")
+
+            # After this, we measure only iterate+reinit
+            self.wallt_end = perf_counter_ns()
+
+            # Only newcompute ranks compute targets / mask
+            targets = execute['newcompute'](lambda: self.get_target(ecurrs, g1a, g1s, g1r, scale=self.lb_target_scale), default=None)
+            twoway_mask = execute['newcompute'](lambda: g1s + g1r > 0, default=None)
+
+            # Broadcast to all world ranks so everyone agrees
+            targets     = comm['world'].bcast(targets)
+            twoway_mask = comm['world'].bcast(twoway_mask)
+
+            if rank['world'] == root['world']:
+                print(f"[lb] twoway_mask:\n{twoway_mask.astype(int)}", flush=True)
+
+            # Extend targets to world size using rankmap['newcompute']
+            targets = [
+                targets[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
+                for i in range(comm['world'].size)
+            ]
+
+            # Run diffusion on MetaMesh
+            mmesh.iterate_to_convergence(
+                targets,
+                etype_order=self.etype_order,
+                flowmat_relax=self.lb_flowmat_relax,
+                mask=twoway_mask
+            )
+
+            wallt_iterate = perf_counter_ns() - wallt_start
+
+            # Convert back to mesh, relocate solution, and reinit system
+            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
+
+            # Optional safety check: new element counts per world rank
+            current_local_new = sum(len(eidxs)
+                                    for eidxs in self.meshes['compute'].eidxs.values())
+            ecurrs_new = np.asarray(
+                comm['world'].allgather(int(current_local_new)),
+                dtype=np.int64
+            )
+
+            # At this point, rankmap['newcompute'] is still valid.
+            new_active = set(rankmap['newcompute'])
+
+            # Assert: any world-rank not in new_active has zero elements.
+            # (If you want to be looser, just drop the assert.)
+            if all((i in new_active) or (ecurrs_new[i] == 0)
+                       for i in range(comm['world'].size)):
+
+
+                # 🔍 NEW: print state just before and after promote_comm
+                if rank['world'] == root['world']:
+                    print(
+                        f"[comm-debug] before-promote: "
+                        f"compute_size={comm['compute'].size} "
+                        f"rankmap_compute={rankmap['compute']} "
+                        f"newcompute_size={comm['newcompute'].size} "
+                        f"rankmap_newcompute={rankmap['newcompute']}",
+                        flush=True
+                    )
+
+                # Now make 'newcompute' the canonical 'compute' communicator.
+                promote_comm('newcompute', 'compute')
+
+                if rank['world'] == root['world']:
+                    print(
+                        f"[comm-debug] after-promote: "
+                        f"compute_size={comm['compute'].size} "
+                        f"rankmap_compute={rankmap['compute']}",
+                        flush=True
+                    )
+
+            # Reinitialise backend+system on the new 'compute' layout
+            self.reinit_backend_and_system(self.meshes['compute'], soln)
+
+            wallt_reinit = perf_counter_ns() - wallt_start - wallt_iterate
+
+            # Write wall times
+            if rank['world'] == root['world']:
+                with open('lb_walltimes.csv', 'a') as f:
+                    f.write(f"{self.tcurr:.6f},"
+                            f"{(wallt_start - self.wallt_end)/1e9},"
+                            f"{wallt_iterate/1e9},"
+                            f"{wallt_reinit/1e9}\n")
+
+            self.wallt_end = perf_counter_ns()
+
+    def reinit_mesh_soln(self, mesh, soln):
+        # New mesh lives under the 'newcompute' logical name while we migrate.
+        self.meshes['newcompute'] = mesh
+        _MetaMesh.info(self.meshes['newcompute'])
+
+        # Build interconnector from old compute layout -> newcompute layout
+        self._newcompute_intercon = self.initialise_interconnector('compute', 'newcompute')
+        soln = self.relocate_ary(self._newcompute_intercon, soln,
+                                 edim=2, src_name='compute', dst_name='newcompute')
+
+        # Drop old compute mesh and plugin interconnector
+        del self.meshes['compute']
+        del self._plugins_intercon
+
+        # Promote newcompute mesh to be the canonical compute mesh
+        self.meshes['compute'] = self.meshes['newcompute']
+        # Optionally drop the extra key to avoid confusion
+        # del self.meshes['newcompute']
+
+        return soln
+
+
+    def reinit_backend_and_system(self, mesh, soln):
+
+
+        # 🔍 NEW: log communicator state at entry
+        if comm['compute'] != mpi.COMM_NULL:
+            print(
+                f"[reinit-debug] world_rank={rank['world']} "
+                f"compute_size={comm['compute'].size} "
+                f"rankmap_compute={rankmap['compute']}",
+                flush=True
+            )
+
+        self._invalidate_caches()
+
+        del self.system
+
+        for attr in dir(self):
+           if attr.startswith('_memoize_cache@'):
+               delattr(self, attr) 
+
+        gc.collect()
+
+        comm['world'].barrier()
+
+        self.system = self._systemcls(self.backend, mesh, soln, 
+                                      nregs=self.nregs, cfg=self.cfg)
+
+        self.copy_to_empty_system()
+
+        self._idxcurr = 0
+
+        # Re-initialise plugin comm and interconnector
+        self.initialise_comm_and_partition(goal='plugins')
+        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
+
+        self.plugins = self._reget_plugins()
+
+        #if comm['compute'] != mpi.COMM_NULL:
+        #    self.system.commit()
+        #    self.system.preproc(self.tcurr, self._idxcurr)
+
+        execute['compute'](lambda: self.system.commit())
+        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
+
+        comm['world'].barrier()
+
 
 class StdNoneController(BaseStdController):
     controller_name = 'none'
@@ -83,166 +282,18 @@ class StdNoneController(BaseStdController):
             raise ValueError('Advance time is in the past')
 
         while self.tcurr < t:
-            comm,  rank,  root  = get_comm_rank_root('world')
-            ccomm, crank, croot = get_comm_rank_root('compute')
 
             # Decide on the time step
             self.adjust_dt(t)
 
-            if ccomm != mpi.COMM_NULL:
-                # Take the step
-                idxcurr = self.step(self.tcurr, self.dt)
-
-            else:
-                idxcurr = -1    
-            # allreduce MAX idxcurr, we only need to keep one
-            idxcurr = comm.allreduce(idxcurr, op=mpi.MAX)
+            idxcurr = execute['compute'](lambda: self.step(self.tcurr, self.dt),
+                                         default=-1)
+            idxcurr = comm['world'].allreduce(idxcurr, op=mpi.MAX)
 
             # We are not adaptive, so accept every step
             self._accept_step(self.dt, idxcurr)
 
-            # Switch mesh here, after 5 steps
-            if self.nacptsteps % self.lb_iters == 0 and not self.lb_iters == 1 and not self.lb_stop_relocating:
-                wallt_start = perf_counter_ns()
-                g1a, g1s, g1r = self.get_median_matrices()
-
-                local_mean   = float(np.mean(np.asarray(g1a)))
-                global_sum   = comm.allreduce(local_mean, op=mpi.SUM)
-                g1a_mean_global = global_sum / comm.size
-
-                if rank == root:
-                    print(f"nacpt={self.nacptsteps} "
-                        f"g1a_mean_global={g1a_mean_global:.6e} "
-                        f"best={self.lb_best_score:.6e} since_best={self.lb_since_best}", 
-                        flush=True)
-
-                # Check for improvement
-                if g1a_mean_global < self.lb_best_score:
-                    self.lb_best_score      = g1a_mean_global
-                    self.meshes['computebest'] = self.meshes['compute']
-                    self.lb_since_best       = 0
-                else:
-                    self.lb_since_best      += 1
-                    
-                if self.lb_since_best >= self.lb_patience:
-                    self.lb_stop_relocating = True
-                    if rank == root:
-                        print(f'No improvement in {self.lb_patience} switches, stopping relocation.', flush=True)
-
-                    # Revert to best mesh (if available) and reinit system
-                    wallt_iterate = 0
-                    if self.meshes['computebest'] is not None:
-                        soln = self.reinit_mesh_soln(self.meshes['computebest'], self.compute_soln)
-                        self.reinit_backend_and_system(self.meshes['newcompute'], soln)
-                        wallt_reinit = perf_counter_ns() - wallt_start
-                        if rank == root:
-                            print(f"[lb/restore] nacpt={self.nacptsteps} reverted_to_best", flush=True)
-                    else:
-                        wallt_reinit = 0
-                        if rank == root:
-                            print(f"[lb/restore] nacpt={self.nacptsteps} no_best_to_restore", flush=True)
-
-                    # Log walltimes for this freeze step
-                    if rank == root:
-                        with open('lb_walltimes.csv', 'a') as f:
-                            f.write(f"{self.tcurr:.6f},"
-                                    f"{(wallt_start - self.wallt_end)/1e9},"
-                                    f"{wallt_iterate/1e9},"
-                                    f"{wallt_reinit/1e9}\n")
-                    self.wallt_end = perf_counter_ns()
-                    continue
-
-
-                else:                    
-
-                    print('Switching, nacptsteps = ', self.nacptsteps)
-
-                    mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
-
-                    _MetaMesh.info(self.meshes['compute'])
-                    
-                    # Right where you want to snapshot (e.g., just before/after switching):
-                    _MetaMesh.info_to_csv(self.meshes['compute'], tcurr=self.tcurr)
-
-
-                    current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
-                    ecurrs = np.asarray(comm.allgather(int(current_local)), dtype=np.int64)
-
-                    # Get target element distribution
-                    targets = self.get_target(ecurrs, g1a, g1s, g1r,
-                                            scale=self.lb_target_scale)
-
-                    mmesh.iterate_to_convergence(targets, etype_order=self.etype_order,
-                        flowmat_relax=self.lb_flowmat_relax, mask=self.twoway_mask)
-
-                    wallt_iterate = perf_counter_ns() - wallt_start
-
-                    soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
-                    self.reinit_backend_and_system(self.meshes['newcompute'], soln)
-
-                    wallt_reinit = perf_counter_ns() - wallt_start - wallt_iterate
-
-                    # Write wall times
-                    if rank == root:
-                        with open('lb_walltimes.csv', 'a') as f:
-                            f.write(f"{self.tcurr:.6f},"
-                                    f"{(wallt_start - self.wallt_end)/1e9},"
-                                    f"{wallt_iterate/1e9},"
-                                    f"{wallt_reinit/1e9}\n")
-
-                    self.wallt_end = perf_counter_ns()
-               
-
-    def reinit_mesh_soln(self, mesh, soln):
-        self.meshes['newcompute'] = mesh
-        _MetaMesh.info(self.meshes['newcompute'])
-        self._newcompute_intercon = self.initialise_interconnector('compute', 'newcompute')
-        soln = self.relocate_ary(self._newcompute_intercon, soln, edim=2,
-                                    src_name='compute', dst_name='newcompute')
-
-        del self.meshes['compute']
-        del self._plugins_intercon
-
-        self.meshes['compute'] = self.meshes['newcompute']
-
-        return soln
-
-    def reinit_backend_and_system(self, mesh, soln):
-        ccomm, crank, croot = get_comm_rank_root('compute')
-        comm,  rank,  root  = get_comm_rank_root('world')
-
-        self._invalidate_caches()
-
-        del self.system
-
-        for attr in dir(self):
-           if attr.startswith('_memoize_cache@'):
-               delattr(self, attr) 
-
-        gc.collect()
-
-        comm.barrier()
-
-        self.system = self._systemcls(self.backend, mesh, soln, nregs=self.nregs, cfg=self.cfg)
-
-        self.copy_to_empty_system()
-
-        self._idxcurr = 0
-
-        # Re-initialise plugin comm and interconnector
-        self.initialise_comm_and_partition('plugins', construct_con=False)
-        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
-
-        self.plugins = self._reget_plugins()
-
-        if ccomm != mpi.COMM_NULL:
-            # Commit the sytem
-            self.system.commit()
-
-            # Pre-process solution
-            self.system.preproc(self.tcurr, self._idxcurr)
-
-        comm.barrier()
+            self.load_balance()
 
 
 class StdPIController(BaseStdController):
@@ -289,7 +340,6 @@ class StdPIController(BaseStdController):
         return True
 
     def _errest(self, rcurr, rprev, rerr):
-        comm, rank, root = get_comm_rank_root('compute')
 
         # Get a set of kernels to estimate the integration error
         ekerns = self._get_reduction_kerns(rcurr, rprev, rerr, method='errest',
@@ -308,7 +358,7 @@ class StdPIController(BaseStdController):
             err = np.array([sum(v for k in ekerns for v in k.retval)])
 
             # Reduce globally (MPI ranks)
-            comm.Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
+            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
 
             # Normalise
             err = math.sqrt(float(err) / self._gndofs)
@@ -318,7 +368,7 @@ class StdPIController(BaseStdController):
             err = np.array([max(v for k in ekerns for v in k.retval)])
 
             # Reduce globally (MPI ranks)
-            comm.Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
 
             # Normalise
             err = math.sqrt(float(err))
@@ -344,8 +394,16 @@ class StdPIController(BaseStdController):
 
             self.dt = max(self.dt, self.dtmin)
 
+            # Decide on the time step
+            dt = max(min(t - self.tcurr, self._dt, self.dtmax), self.dtmin)
+
             # Take the step
-            idxcurr, idxprev, idxerr = self.step(self.tcurr, self.dt)
+            idxcurr, idxprev, idxerr = execute['compute'](lambda: self.step(self.tcurr, dt),
+                                                          default=(-1, -1, -1))
+
+            idxcurr = comm['world'].allreduce(idxcurr, op=mpi.MAX)
+            idxprev = comm['world'].allreduce(idxprev, op=mpi.MAX)
+            idxerr  = comm['world'].allreduce(idxerr,  op=mpi.MAX)
 
             # Estimate the error
             err = self._errest(idxcurr, idxprev, idxerr)
@@ -363,3 +421,4 @@ class StdPIController(BaseStdController):
 
             # Compute the next time step
             self.dt_fallback = fac*self.dt
+            self.load_balance()

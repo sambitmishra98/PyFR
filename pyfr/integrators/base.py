@@ -7,7 +7,9 @@ import time
 import numpy as np
 
 from pyfr.cache import memoize
-from pyfr.mpiutil import get_comm_rank_root, initialise_new_comm, mpi, scal_coll
+from pyfr.inifile import Inifile
+from pyfr.mpiutil import (initialise_new_comm, mpi, scal_coll,
+                          comm, rank, root, rankmap, execute)
 from pyfr.plugins import get_plugin
 
 from pyfr.readers.native import NativeReader, _MeshInterconnector
@@ -55,13 +57,8 @@ def _common_plugin_prop(attr, *, edim):
             if not (p := getattr(self, attr)):
                 t, c = time.time(), self._plugin_wtimes['common', None]
 
-                ccomm, crank, croot = get_comm_rank_root('compute')
-                comm,  rank,  root = get_comm_rank_root('world')
-                if ccomm != mpi.COMM_NULL:
-                    p = fn(self)
-                else:
-                    p = None
-
+                p = execute['compute'](lambda: fn(self), default=None)
+                
                 p = self.relocate_ary(self._plugins_intercon, p, edim,
                                       src_name='compute', dst_name='plugins')
 
@@ -124,22 +121,14 @@ class BaseIntegrator:
         self._abort_reason = ''
 
         self.called_plugin_dt = False
-        self.lb_iters = self.cfg.getint('mesh', 'load-balancing-iterations', 1)
-        self.lb_target_scale = self.cfg.getfloat('mesh', 'load-balancing-target-scale', 1.0)
-        self.lb_flowmat_relax = self.cfg.getfloat('mesh', 'load-balancing-flowmatrix-relax', 0.5)
+        self.lb_iters = self.cfg.getint('partition', 'load-balancing-iterations', 1)
+        self.lb_target_scale = self.cfg.getfloat('partition', 'load-balancing-target-scale', 1.0)
+        self.lb_flowmat_relax = self.cfg.getfloat('partition', 'load-balancing-flowmatrix-relax', 0.5)
 
-        self.lb_best_score       = float('inf') # global best objective seen so far
-        self.lb_since_best       = 0            # switches since best
-        self.lb_stop_relocating  = False        # freeze flag
-        self.lb_patience         = 10           # user-requested patience
-
-        # devices = 'gpu'*1+'cpu'*11
-        devices = self.cfg.getliteral('mesh', 'devices')
-
-        own_device = devices[get_comm_rank_root()[1]]
-
-        # Get preference lists according to device type, depending on the rank
-        self.etype_order = self.cfg.getliteral('mesh', f'device-preference-{own_device}')
+        self.lb_best_score       = float('inf')
+        self.lb_since_best       = 0
+        self.lb_stop_relocating  = False
+        self.lb_patience         = 10
 
         # Smoothly step to target time in the last near_t steps
         self.aminf = self.cfg.getfloat('solver-time-integrator', 
@@ -180,28 +169,34 @@ class BaseIntegrator:
         self._abort = True
         self._abort_reason = self._abort_reason or reason
 
-    def initialise_comm_and_partition(self, mname, construct_con=False):
-        comm, rank, root = get_comm_rank_root('world')
+    def initialise_comm_and_partition(self, goal):
 
-        pname  = self.cfg.get('mesh', f'partition-{mname}', 'compute')
-
-        # If note 'compute'
-        if pname == 'compute':
-            # Just duplicate the compute mesh
-            self.meshes[mname] = self.meshes['compute']
-
+        if self.cfg.hasopt('partition', f'{goal}-pname'):
+            pname = self.cfg.get('partition', f'{goal}-pname')
         else:
-           
-            pranks = self.cfg.getliteral('mesh', f'partition-{mname}-ranklist',
-                                        list(range(comm.size)))
+            pname = None
 
-            initialise_new_comm(mname, pranks)
+        if self.cfg.hasopt('partition', f'online-file'):
+            online_cfg = Inifile.load(self.cfg.get('partition', 'online-file'))
+        else:
+            online_cfg = self.cfg
 
+        if online_cfg.hasopt('partition', f'{goal}-ranklist'):
+            pranks = online_cfg.getliteral('partition', f'{goal}-ranklist')
+        else:
+            pranks = list(range(comm['world'].size))
+
+        initialise_new_comm(goal, pranks)
+
+        if goal == 'plugins':
             reader = NativeReader(self.meshes['compute'].fname, pname,
-                                construct_con=construct_con, comm_name=mname)
+                                construct_con=False, comm_name=goal)
+            self.meshes[goal] = reader.mesh
+        else:
+            reader = NativeReader(self.meshes['compute'].fname, pname,
+                                construct_con=True, comm_name=goal)
+            self.meshes[goal] = reader.mesh
 
-            # Append to the meshes dictionary
-            self.meshes[mname] = reader.mesh
 
     def initialise_interconnector(self, mname1, mname2):
         return _MeshInterconnector(self.meshes[mname1].eidxs, 
@@ -254,9 +249,8 @@ class BaseIntegrator:
 
     def _get_plugins(self, initsoln):
 
-        self.initialise_comm_and_partition('plugins')
-        self._plugins_intercon = self.initialise_interconnector('compute', 
-                                                                'plugins')
+        self.initialise_comm_and_partition(goal='plugins')
+        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
 
         plugins = []
 
@@ -393,61 +387,58 @@ class BaseIntegrator:
 
         # MPI wait times
         if self.cfg.getbool('backend', 'collect-wait-times', False):
-            comm, rank, root = get_comm_rank_root('compute')
 
-            if comm != mpi.COMM_NULL:
-                wait_times = comm.allgather(self.system.rhs_wait_times())
+            if comm['compute'] != mpi.COMM_NULL:
+                wait_times = comm['compute'].allgather(self.system.rhs_wait_times())
             else:
                 wait_times = []
 
-            # Finally, across all ranks in the world ....
-            comm, rank, root = get_comm_rank_root()
-            
-            wait_times = comm.allgather(wait_times)
+            wait_times = comm['world'].allgather(wait_times)
             
             for i, ms in enumerate(zip(*wait_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-wait-times', f'rhs-graph-{i}-wait-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
 
-
-            compute_times = comm.allgather(self.system.rhs_compute_times())
+            compute_times = comm['compute'].allgather(self.system.rhs_compute_times())
             for i, ms in enumerate(zip(*compute_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-compute-times', f'rhs-graph-{i}-compute-{k}',
                               ','.join(f'{v[j]:.6g}' for v in ms))
 
-            all_times = comm.allgather(self.system.rhs_all_times())
+            all_times = comm['compute'].allgather(self.system.rhs_all_times())
             for i, ms in enumerate(zip(*all_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-all-times', f'rhs-graph-{i}-all-{k}',
                               ','.join(f'{v[j]:.6g}' for v in ms))
 
         if self.cfg.getbool('backend', 'collect-waitsome-times', False):
-            comm, rank, root = get_comm_rank_root()
 
-            # Get median matrices here
-            if self.nsteps > 0: self.get_median_matrices()
+            if comm['compute'] == mpi.COMM_NULL:
+                return 
 
-            wait_times = comm.allgather(self.system.rhs_wait_times())
+            wait_times    = comm['compute'].allgather(self.system.rhs_wait_times())
+            compute_times = comm['compute'].allgather(self.system.rhs_compute_times())
+            all_times     = comm['compute'].allgather(self.system.rhs_all_times())
+            waitsome_send = comm['compute'].allgather(self.system.rhs_wait_times_send())
+            waitsome_recv = comm['compute'].allgather(self.system.rhs_wait_times_recv())
+            #nbs_all       = comm.allgather(self.system.nbytes_send)
+
             for i, ms in enumerate(zip(*wait_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-wait-times', f'rhs-graph-{i}-wait-{k}',
                               ','.join(f'{v[j]:.3g}' for v in ms))
 
-            compute_times = comm.allgather(self.system.rhs_compute_times())
             for i, ms in enumerate(zip(*compute_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-compute-times', f'rhs-graph-{i}-compute-{k}',
                               ','.join(f'{v[j]:.6g}' for v in ms))
 
-            all_times = comm.allgather(self.system.rhs_all_times())
             for i, ms in enumerate(zip(*all_times)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     stats.set('backend-all-times', f'rhs-graph-{i}-all-{k}',
                               ','.join(f'{v[j]:.6g}' for v in ms))
 
-            waitsome_send = comm.allgather(self.system.rhs_wait_times_send())
             for i, ms in enumerate(zip(*waitsome_send)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     coldata = []
@@ -458,7 +449,6 @@ class BaseIntegrator:
                             f'rhs-graph-{i}-send-{k}',
                             ','.join(f'{val:.3g}' for val in coldata))
 
-            waitsome_recv = comm.allgather(self.system.rhs_wait_times_recv())
             for i, ms in enumerate(zip(*waitsome_recv)):
                 for j, k in enumerate(['mean', 'stdev', 'median']):
                     coldata = []
@@ -486,17 +476,15 @@ class BaseIntegrator:
                 for stage, trip in sorted(_make_csr(waitsome_recv, col).items()):
                     stats.set('backend-wait-times', f'csr-rhs-graph-{stage}-recv-{label}', ','.join(trip))
 
-        nbs_all  = comm.allgather(self.system.nbytes_send)
-
-        stage_to_triplets = defaultdict(list)
-        for r_src, stage_dict in enumerate(nbs_all):
-            for stage, vec in stage_dict.items():
-                for r_dst, nb in enumerate(vec):
-                    if r_src > r_dst and nb:
-                        stage_to_triplets[stage].append(f'({r_src},{r_dst},{nb})')
-
-        for stage, triplets in sorted(stage_to_triplets.items()):
-            stats.set('backend-bytes', f'rhs-graph-{stage}-bytes', ','.join(triplets))
+        # stage_to_triplets = defaultdict(list)
+        # for r_src, stage_dict in enumerate(nbs_all):
+        #     for stage, vec in stage_dict.items():
+        #         for r_dst, nb in enumerate(vec):
+        #             if r_src > r_dst and nb:
+        #                 stage_to_triplets[stage].append(f'({r_src},{r_dst},{nb})')
+        # 
+        # for stage, triplets in sorted(stage_to_triplets.items()):
+        #     stats.set('backend-bytes', f'rhs-graph-{stage}-bytes', ','.join(triplets))
 
     def write_g1_median_csvs(self, g1a, g1s, g1r, g1idx: int = 1):
         """
@@ -507,78 +495,266 @@ class BaseIntegrator:
         - g1-recv-median-ms.csv  : same pattern as send
         Header is created only if the file does not exist.
         """
-        comm, rank, root = get_comm_rank_root('world')
-        P = comm.size
-
         # Scale to microseconds and cast to int
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
         send_us = np.rint(g1s * 1e6).astype(np.int64)
         recv_us = np.rint(g1r * 1e6).astype(np.int64)
 
-        if rank != root:
+        if rank['compute'] != root['compute']:
             return
 
         # --- ALL / CMP vectors ---
-        rcols = [f"r{r}" for r in range(P)]
+        rcols = [f"r{r}" for r in range(comm['compute'].size)]
         _append_csv_row('g1-all-median-ms.csv', rcols, all_us.tolist())
 
         # --- SEND / RECV full directed off-diagonal matrices ---
-        mcols = _flatten_offdiag_labels(P)
+        mcols = _flatten_offdiag_labels(comm['compute'].size)
         _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us))
         _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us))
 
     def get_target(self, ecurrs, g1a, g1s, g1r, scale=1.0):
         """
-        Build target using MPI wait-split data
-        - e_curr from self.meshes['compute']
-        - g1c medians directly from self.system.rhs_compute_times()
-        Returns the integer per-rank targets (list[int]) and sets target.
+        Build target using MPI wait-split data.
+
+        Parameters
+        ----------
+        ecurrs : Sequence[int]
+            Current element counts indexed by *world* rank.
+        g1a, g1s, g1r : np.ndarray
+            Median all / send / recv indexed by *old compute* rank (0..P_old-1).
+        scale : float
+            Scaling for the comm burden (typically 1.0).
+
+        Returns
+        -------
+        list[int]
+            Integer per-rank targets in the *newcompute* communicator order
+            (world-rank list from rankmap_new).
         """
+        # --- Rankmaps for old and new compute comms ---
+        # New compute: communicator built from online.ini compute-ranklist
+        if g1a is None or g1s is None or g1r is None:
+            raise RuntimeError(
+                f"[get_target] called with None g1-data on this rank; "
+                "this should only be called on ranks in the old compute comm."
+            )
 
-        # --- Comms ---
-        comm,  rank,  root  = get_comm_rank_root('world')
+        if comm['newcompute'] == mpi.COMM_NULL:
+            raise RuntimeError(
+                "[get_target] rank is not in newcompute but still reached get_target"
+            )
 
-        Ntot   = int(ecurrs.sum())
+        # Devices from config: e.g. ['gpu', 'cpu', 'cpu', 'cpu', 'cpu']
+        devices = self.cfg.getliteral('backend', 'devices')
 
-        # After calling get_median_matrices(...) or inside advance loop where you snapshot:
+        # On ranks that are actually in newcompute, log the mapping
+        if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
+            print(f"[load-balance] rankmap_old={rankmap['compute']}")
+            print(f"[load-balance] rankmap_new={rankmap['newcompute']}")
+            print(f"[load-balance] devices={devices}")
+
+        # Safeguard: we expect g1a/g1s/g1r to be over the old compute comm
+        P_old = len(g1a)
+        assert g1s.shape == (P_old, P_old)
+        assert g1r.shape == (P_old, P_old)
+        assert len(rankmap['compute']) == P_old, \
+            f"[load-balance] len(rankmap_old)={len(rankmap['compute'])} != len(g1a)={P_old}"
+
+        # --- Restrict world-indexed element counts to old compute ranks ---
+
+        # rankmap_old is a list of world ranks in old compute order
+        ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
+        Ntot = int(ecurrs_old.sum())
+
+        # Snapshot medians to CSV (uses whatever index space g1* live in)
         self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
 
-        s_out = g1s.sum(axis=1) # s (sender burden): row-sum of send
-        r_in  = g1r.sum(axis=1) # r as experienced locally (remove from 'all'; avoid charging receiver)
-        r_out = g1r.sum(axis=0) # r attributed to the sender (transpose row-sum == column-sum of recv)
+        # g1a/g1s/g1r are *already* in old-compute index space
+        g1a_old = np.asarray(g1a, dtype=float)
+        g1s_old = np.asarray(g1s, dtype=float)
+        g1r_old = np.asarray(g1r, dtype=float)
 
-        self.oneway_mask = g1s + g1r.T > 0
-        self.twoway_mask = g1s + g1r > 0
+        # --- Build COST / burden on old compute ranks ---
 
-        #burden_current = g1a - (r_in + r_out)    # = (a-r)+r^T = (c+s)+r^T
-        burden_target = g1a - (r_in + s_out)*scale + r_out*scale    # = (a-r)     = (c+s)
+        s_out = g1s_old.sum(axis=1)  # sender burden: row sum of send
+        r_in  = g1r_old.sum(axis=1)  # recv experienced locally
+        r_out = g1r_old.sum(axis=0)  # recv attributed to sender
 
-        # --- Online perf history + regression (tiny, safe to skip if not enough data)
-        # hist = self.collect_hist()
-        # self.performance_from_hist(hist)
+        # Masks in the old-compute space (used by MetaMesh)
+        self.twoway_mask = g1s_old + g1r_old   > 0
 
-        # per-element cost: exactly what you asked for
-        inv_cost = ecurrs / burden_target
-        N_star   = Ntot * (inv_cost / inv_cost.sum())
-        N_int = np.floor(N_star).astype(np.int64)
-        k = int(Ntot - N_int.sum())
-        if k:
-            frac = N_star - N_int
-            order = np.argsort(frac) # asc; deterministic tie-break by index
-            if k > 0:  N_int[order[ -k:  ]] += 1 # +1 to largest fractions
-            else:      N_int[order[   :-k]] -= 1 # -1 from smallest fractions
+        # Target burden (COST variant)
+        burden_target = g1a_old - (r_in + s_out) * scale + r_out * scale
 
-        assert int(N_int.sum()) == Ntot, "Target sum must equal current sum"
+        # Per-element inverse cost on old ranks
+        inv_cost = ecurrs_old / burden_target
+        N_star_old = Ntot * (inv_cost / inv_cost.sum())
+
+        if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
+            print(f"[load-balance] Ntot={Ntot}")
+            print(f"[load-balance] N_star_old={N_star_old.tolist()}")
+
+        # --- Remap N_star_old from old->new using device groups (world space) ---
+
+        # rankmap_* are world-rank lists, matching ecurrs/devices indexing
+        if list(rankmap['compute']) != list(rankmap['newcompute']):
+            N_star_new = self.remap_targets_by_ranklist(
+                N_star_old,
+                old_ranks=rankmap['compute'],
+                new_ranks=rankmap['newcompute'],
+                devices=devices,
+                tag="[lb-group]",
+            )
+        else:
+            # No rank change: old and new are the same
+            N_star_new = N_star_old.copy()
+
+        # --- Normalise and round to integer targets in newcompute order ---
+
+        N_int = self.normalise_and_round_targets(
+            N_star_new,
+            Ntot=Ntot,
+            tag="[lb-round]",
+        )
+
+        if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
+            print(f"[load-balance] N_int={N_int.tolist()} (sum={int(N_int.sum())})")
+
+        # Return in newcompute's world-rank order (rankmap_new)
         return N_int.tolist()
+
+    def remap_targets_by_ranklist(self, N_star_old, old_ranks, new_ranks, devices, tag="[lb-group]"):
+        """
+        Remap continuous targets N_star_old from old_ranks -> new_ranks using device groups.
+
+        Parameters
+        ----------
+        N_star_old : array-like of float, shape (P_old,)
+            Continuous targets on the old compute ranks, in old-compute index order.
+        old_ranks : list[int]
+            World ranks in old compute order (len == len(N_star_old)).
+        new_ranks : list[int]
+            World ranks in new compute order.
+        devices : Sequence[str]
+            Device label per *world* rank, e.g. ['gpu','cpu',...].
+        tag : str
+            Log prefix.
+
+        Returns
+        -------
+        np.ndarray of float, shape (len(new_ranks),)
+            Continuous targets in new compute order.
+        """
+        N_star_old = np.asarray(N_star_old, dtype=float)
+        assert len(N_star_old) == len(old_ranks), \
+            f"{tag} len(N_star_old)={len(N_star_old)} != len(old_ranks)={len(old_ranks)}"
+
+        # Map world rank -> index in old-compute array
+        wr_to_idx = {wr: i for i, wr in enumerate(old_ranks)}
+
+        # Build device-group → list of old indices
+        from collections import defaultdict
+        group_to_indices = defaultdict(list)
+        for i, wr in enumerate(old_ranks):
+            dev = devices[wr]
+            group_to_indices[dev].append(i)
+
+        removed = sorted(set(old_ranks) - set(new_ranks))
+        print(f"{tag} old_ranks={old_ranks} new_ranks={new_ranks}")
+        print(f"{tag} removed_ranks={removed}")
+        print(f"{tag} group_to_indices="
+              f"{{{', '.join(f'{g}:{idxs}' for g, idxs in group_to_indices.items())}}}")
+
+        N_star_new = np.zeros(len(new_ranks), dtype=float)
+
+        for k, wr in enumerate(new_ranks):
+            dev = devices[wr]
+            if wr in wr_to_idx:
+                # Rank survives: carry its own target
+                i_old = wr_to_idx[wr]
+                N_star_new[k] = N_star_old[i_old]
+                print(f"{tag} wr={wr} (dev={dev}) reused_old idx={i_old} "
+                      f"N_star_old={N_star_old[i_old]:.6e}")
+            else:
+                # New compute rank: use device-group average, else global average
+                idxs = group_to_indices.get(dev, [])
+                if idxs:
+                    val = float(N_star_old[idxs].mean())
+                    print(f"{tag} wr={wr} (dev={dev}) new_rank using group_avg over idxs={idxs}: "
+                          f"{val:.6e}")
+                else:
+                    val = float(N_star_old.mean())
+                    print(f"{tag} wr={wr} (dev={dev}) new_rank using global_avg: {val:.6e}")
+                N_star_new[k] = val
+
+        print(f"{tag} N_star_old={N_star_old.tolist()}")
+        print(f"{tag} N_star_new_raw={N_star_new.tolist()}")
+
+        return N_star_new
+
+
+    def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):
+        """
+        Rescale continuous targets N_star to sum to Ntot and round to integers.
+
+        Parameters
+        ----------
+        N_star : array-like of float
+            Continuous targets (new compute order).
+        Ntot : int
+            Total element count to preserve.
+        tag : str
+            Log prefix.
+
+        Returns
+        -------
+        np.ndarray of int
+            Integer targets summing to Ntot.
+        """
+        N_star = np.asarray(N_star, dtype=float)
+        sum_star = float(N_star.sum())
+
+        if sum_star <= 0.0:
+            raise ValueError(f"{tag} sum(N_star) <= 0 (got {sum_star})")
+
+        scale = float(Ntot) / sum_star
+        N_scaled = N_star * scale
+        N_floor = np.floor(N_scaled).astype(np.int64)
+
+        k = int(Ntot - N_floor.sum())
+
+        print(f"{tag} sum_star={sum_star:.6e} Ntot={Ntot} "
+              f"sum_floor={int(N_floor.sum())} residual_k={k}")
+
+        if k != 0:
+            frac = N_scaled - N_floor
+            order = np.argsort(frac)  # ascending
+
+            if k > 0:
+                idxs = order[-k:]   # bump largest fractions
+                N_floor[idxs] += 1
+                print(f"{tag} +1 to indices={idxs.tolist()}")
+            else:
+                idxs = order[:-k]   # k < 0 → drop smallest fractions
+                N_floor[idxs] -= 1
+                print(f"{tag} -1 from indices={idxs.tolist()}")
+
+        print(f"{tag} N_scaled={N_scaled.tolist()}")
+        print(f"{tag} N_int={N_floor.tolist()} (sum={int(N_floor.sum())})")
+
+        return N_floor
+
 
     def get_median_matrices(self):
         # World/compute comms
-        comm, rank, root = get_comm_rank_root('world')
-        P = comm.size
+        if comm['compute'] == mpi.COMM_NULL:
+            return None, None, None
 
-        all_times = comm.allgather(self.system.rhs_all_times_median())
-        ws_send   = comm.allgather(self.system.rhs_wait_times_send_median())
-        ws_recv   = comm.allgather(self.system.rhs_wait_times_recv_median())
+        P = comm['compute'].size
+
+        all_times = comm['compute'].allgather(self.system.rhs_all_times_median())
+        ws_send   = comm['compute'].allgather(self.system.rhs_wait_times_send_median())
+        ws_recv   = comm['compute'].allgather(self.system.rhs_wait_times_recv_median())
 
         # Per-rank medians
         all_med  = np.fromiter((float(all_times[r])  for r in range(P)),                                 dtype=float, count=P)
@@ -586,35 +762,12 @@ class BaseIntegrator:
         recv_mat = np.fromiter((float(ws_recv[i][j]) for i in range(P) for j in range(P)),dtype=float, count=P*P).reshape(P, P)
 
         # Root-only concise logs
-        if rank == root:
+        if rank['compute'] == root['compute']:
             print(f"all*1e6=\n{ np.array2string(all_med*1e6,  formatter={'float_kind':lambda x: f'{x:05.0f}'})}")
             print(f"send*1e6=\n{np.array2string(send_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
             print(f"recv*1e6=\n{np.array2string(recv_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
 
         return all_med, send_mat, recv_mat
-
-#    def get_median_matrices(self, g1idx=1):
-#        # World/compute comms
-#        comm, rank, root = get_comm_rank_root('world')
-#        P = comm.size
-#
-#        all_times = comm.allgather(self.system.rhs_all_times())
-#        ws_send   = comm.allgather(self.system.rhs_wait_times_send())
-#        ws_recv   = comm.allgather(self.system.rhs_wait_times_recv())
-#
-#        # Per-rank medians
-#        print(all_times)
-#        all_med = np.fromiter((float(all_times[r][g1idx][2]) for r in range(P)), dtype=float, count=P)
-#        send_mat = np.fromiter((float(ws_send[i][g1idx][j][2]) for i in range(P) for j in range(P)),dtype=float, count=P*P).reshape(P, P)
-#        recv_mat = np.fromiter((float(ws_recv[i][g1idx][j][2]) for i in range(P) for j in range(P)),dtype=float, count=P*P).reshape(P, P)
-#
-#        # Root-only concise logs
-#        if rank == root:
-#            print(f"all*1e6=\n{ np.array2string(all_med*1e6,  formatter={'float_kind':lambda x: f'{x:05.0f}'})}")
-#            print(f"send*1e6=\n{np.array2string(send_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
-#            print(f"recv*1e6=\n{np.array2string(recv_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
-#
-#        return all_med, send_mat, recv_mat
 
     @property
     def cfgmeta(self):
@@ -631,24 +784,20 @@ class BaseIntegrator:
             return {'config': cfg, 'config-0': cfg}
 
     def _check_abort(self):
-        comm, rank, root = get_comm_rank_root()
-
-        if scal_coll(comm.Allreduce, int(self._abort), op=mpi.LOR):
+        if scal_coll(comm['world'].Allreduce, int(self._abort), op=mpi.LOR):
             self._finalise_plugins()
 
             reason = self._abort_reason
-            sys.exit(comm.allreduce(reason, op=lambda x, y: x or y))
+            sys.exit(comm['world'].allreduce(reason, op=lambda x, y: x or y))
 
 
 class BaseCommon:
-    def _get_gndofs(self):
-        comm, rank, root = get_comm_rank_root()
-
+    def _get_gndofs(self):        
         # Get the number of degrees of freedom in this partition
         ndofs = sum(self.system.ele_ndofs)
 
         # Sum to get the global number over all partitions
-        return comm.allreduce(ndofs, op=mpi.SUM)
+        return comm['world'].allreduce(ndofs, op=mpi.SUM)
 
     @memoize
     def _get_axnpby_kerns(self, *rs, subdims=None):

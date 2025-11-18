@@ -115,10 +115,13 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         self.tpts = comm.reduce(tpts, op=mpi.SUM, root=root)
 
         # Check if we are restarting and not before when tavg begins
-        if intg.isrestart and intg.tcurr >= self.tstart:
-            self.tout_last = intg.tcurr
-        else:
-            self.tout_last = None
+        if intg.called_plugin_dt:
+            self.tout_last = intg.tstart
+            if intg.isrestart:
+                raise RuntimeError('Restarting from a time other '
+                                            'than t=0 is not supported')
+        elif not intg.isrestart:
+            self.tout_last -= self.dt_out
 
     def _prepare_exprs(self):
         cfg, cfgsect = self.cfg, self.cfgsect

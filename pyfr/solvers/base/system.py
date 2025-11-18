@@ -8,7 +8,7 @@ import numpy as np
 
 from pyfr.backends.base import NullKernel
 from pyfr.cache import memoize
-from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
+from pyfr.mpiutil import autofree, mpi, comm
 from pyfr.shapes import BaseShape
 from pyfr.util import subclasses
 
@@ -61,8 +61,7 @@ class BaseSystem:
         # Get all the solution point locations for the elements
         self.ele_ploc_upts = [e.ploc_at_np('upts') for e in eles]
 
-        comm, rank, root = get_comm_rank_root('compute')
-        if comm != mpi.COMM_NULL:
+        if comm['compute'] != mpi.COMM_NULL:
 
             if hasattr(eles[0], '_grad_upts'):
                 self.eles_vect_upts = [e._grad_upts for e in eles]
@@ -158,7 +157,6 @@ class BaseSystem:
         return mpi_inters
 
     def _load_bc_inters(self, mesh, elemap):
-        comm, rank, root = get_comm_rank_root('compute')
 
         bccls = self.bbcinterscls
         bcmap = {b.type: b for b in subclasses(bccls, just_leaf=True)}
@@ -172,7 +170,7 @@ class BaseSystem:
             # Construct an MPI communicator for this boundary
             bname = c.removeprefix('bc/')
             localbc = bname in mesh.bcon
-            bccomm = autofree(comm.Split(1 if localbc else mpi.UNDEFINED))
+            bccomm = autofree(comm['compute'].Split(1 if localbc else mpi.UNDEFINED))
 
             # Get the class
             cfgsect = f'soln-bcs-{bname}'
@@ -332,6 +330,8 @@ class BaseSystem:
         return stats
 
     def rhs_wait_times(self):
+        # Only consider n-1 graph execution across all stages in a time-step
+
         pairs = list(self._rhs_uin_fout)
         nstages = len(pairs) or 1
         ngraphs = int(sum(len(self._rhs_graphs(u, f)) for u, f in pairs) / nstages)
@@ -408,11 +408,9 @@ class BaseSystem:
 
     def rhs_wait_times_send(self):
 
-        comm, rank, root = get_comm_rank_root()
-
         # times_send[i][j] = list of dt ...
         # ... for sends (local rank -> rank j) at stage i
-        times_send = defaultdict(lambda: [[] for _ in range(comm.size)])
+        times_send = defaultdict(lambda: [[] for _ in range(comm['compute'].size)])
 
         # Collect all per-stage data
         for u, f in self._rhs_uin_fout:
@@ -425,7 +423,7 @@ class BaseSystem:
         num_stages = max(times_send.keys())+1 if times_send else 0
 
         for i in range(num_stages):
-            arr = np.zeros((comm.size, 3), dtype=np.float64)
+            arr = np.zeros((comm['compute'].size, 3), dtype=np.float64)
 
             for rank_j, dt_list in enumerate(times_send[i]):
                 if dt_list:
@@ -442,9 +440,7 @@ class BaseSystem:
 
     def rhs_wait_times_recv(self):
 
-        comm, rank, root = get_comm_rank_root()
-
-        times_recv = defaultdict(lambda: [[] for _ in range(comm.size)])
+        times_recv = defaultdict(lambda: [[] for _ in range(comm['compute'].size)])
 
         # Collect all per-stage data
         for u, f in self._rhs_uin_fout:
@@ -457,7 +453,7 @@ class BaseSystem:
         num_stages = max(times_recv.keys())+1 if times_recv else 0
 
         for i in range(num_stages):
-            arr = np.zeros((comm.size, 3), dtype=np.float64)
+            arr = np.zeros((comm['compute'].size, 3), dtype=np.float64)
 
             for rank_j, dt_list in enumerate(times_recv[i]):
                 if dt_list:
@@ -480,8 +476,7 @@ class BaseSystem:
         return statistics.median(t)
 
     def rhs_wait_times_send_median(self):
-        comm, _, _ = get_comm_rank_root()
-        P = comm.size
+        P = comm['compute'].size
 
         u, f = list(self._rhs_uin_fout)[-1]
 
@@ -494,8 +489,7 @@ class BaseSystem:
         return out
 
     def rhs_wait_times_recv_median(self):
-        comm, _, _ = get_comm_rank_root()
-        P = comm.size
+        P = comm['compute'].size
 
         u, f = list(self._rhs_uin_fout)[-1]
 

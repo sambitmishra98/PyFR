@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
+from pyfr.mpiutil import autofree, mpi, comm
 
 
 class MatrixBase:
@@ -211,21 +211,13 @@ class XchgMatrix(Matrix):
         return dict(type=kind, peer=peer, tag=tag, bytes=self.hdata.nbytes)
 
     def recvreq(self, pid, tag):
-        comm, rank, root = get_comm_rank_root()
-
-        r = autofree(comm.Recv_init(self.hdata, pid, tag))
+        r = autofree(comm['compute'].Recv_init(self.hdata, pid, tag))
         self.backend._req_info_map[id(r)] = self._info('recv', pid, tag)
-
-        #print(f"RECV {tag}: {rank}←{pid} bytes:{self.hdata.nbytes}")
         return r
 
     def sendreq(self, pid, tag):
-        comm, rank, root = get_comm_rank_root()
-
-        r = autofree(comm.Send_init(self.hdata, pid, tag))
+        r = autofree(comm['compute'].Send_init(self.hdata, pid, tag))
         self.backend._req_info_map[id(r)] = self._info('send', pid, tag)
-
-        #print(f"SEND {tag}: {rank}→{pid} bytes:{self.hdata.nbytes}")
         return r
 
 class View:
@@ -331,15 +323,14 @@ class Graph:
         self.mpi_req_info = []
 
         if backend.cfg.getbool('backend', 'collect-waitsome-times', False):
-            comm, rank, root = get_comm_rank_root()
 
             n = backend.cfg.getint('backend', 'collect-waitsome-times-len', 10000)
 
             # Instead of storing sums, store deques of times (rolling buffers)
             self._all_times = all_times = deque(maxlen=n)
             self._compute_times = compute_times = deque(maxlen=n)
-            self._recv_times    = [deque(maxlen=n) for _ in range(comm.size)]
-            self._send_times    = [deque(maxlen=n) for _ in range(comm.size)]    
+            self._recv_times    = [deque(maxlen=n) for _ in range(comm['compute'].size)]
+            self._send_times    = [deque(maxlen=n) for _ in range(comm['compute'].size)]    
             self._wait_times    = wait_times = deque(maxlen=n)
 
             self._prev_end = time.perf_counter_ns()
@@ -504,8 +495,7 @@ class Graph:
         from collections import defaultdict
 
         # byte volume *per peer* for this graph (one graph == one tag)
-        comm, rank, root = get_comm_rank_root()
-        npeer            = comm.size
+        npeer            = comm['compute'].size
 
         self._send_bytes = [0]*npeer
         self._recv_bytes = [0]*npeer

@@ -2,15 +2,13 @@ from pyfr.integrators.base import BaseIntegrator, _common_plugin_prop
 from pyfr.integrators.base import BaseCommon
 from pyfr.util import first
 
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.mpiutil import mpi, comm, execute
 
 class BaseStdIntegrator(BaseCommon, BaseIntegrator):
     formulation = 'std'
 
     def __init__(self, backend, systemcls, mesh, initsoln, cfg):
         super().__init__(backend, mesh, initsoln, cfg)
-
-        ccomm, crank, croot = get_comm_rank_root('compute')
 
         # Sanity checks
         if self.controller_needs_errest and not self.stepper_has_errest:
@@ -35,27 +33,24 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
         # Event handlers for advance_to
         self.plugins = self._get_plugins(initsoln)
 
-        if ccomm != mpi.COMM_NULL:
-            # Commit the sytem
-            self.system.commit()
-
-            # Pre-process solution
-            self.system.preproc(self.tcurr, self._idxcurr)
+        execute['compute'](lambda: self.system.commit())
+        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
 
         # Global degree of freedom count
         self._gndofs = self._get_gndofs()
 
     def copy_to_empty_system(self):
-        comm, rank, root = get_comm_rank_root('world')
-        ccomm, crank, croot = get_comm_rank_root('compute')
-
-        if ccomm != mpi.COMM_NULL:
+        
+        if comm['compute'] != mpi.COMM_NULL:
             convars = list(first(self.system.ele_map.values()).convars)
         else:
             convars = []
 
+        convars = execute['compute'](lambda: list(first(self.system.ele_map.values()).convars),
+                          default = [])
+
         # Ensure the empty systems have what plugins expect.
-        convars = comm.allgather(convars)
+        convars = comm['world'].allgather(convars)
         self.convars = list(first(c for c in convars if c))
 
     @_common_plugin_prop('_curr_soln', edim=2)
@@ -66,12 +61,9 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
     @property
     def compute_soln(self):
 
-        ccomm, crank, croot = get_comm_rank_root('compute')
-        if ccomm != mpi.COMM_NULL:
-            self.system.postproc(self._idxcurr)
-            p = self.system.ele_scal_upts(self._idxcurr)
-        else:
-            p = None
+        execute['compute'](lambda: self.system.postproc(self._idxcurr))
+        p = execute['compute'](lambda: self.system.ele_scal_upts(self._idxcurr),
+                    default = None)
 
         return p
 

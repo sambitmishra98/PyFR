@@ -96,7 +96,7 @@ class SamplerPlugin(BaseSolnPlugin):
         self.nsvars = (1 + self.ndims*self._sample_grads)*self.nvars
 
         # Construct and configure the point sampler
-        self.psampler = PointSampler(intg.system.mesh, spts)
+        self.psampler = PointSampler(intg.meshes['plugins'], spts)
         self.psampler.configure_with_intg_nvars(intg, self.nsvars)
 
         # Have the root rank open the output file
