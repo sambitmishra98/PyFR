@@ -148,7 +148,7 @@ class _IntegratorAdapter:
 
     @property
     def region_data(self):
-        return region_data(self.acfg, self.cfgsect, self.intg.system.mesh)
+        return region_data(self.acfg, self.cfgsect, self.intg.meshes['plugins'])
 
     def soln_op_vpts(self, ename, divisor):
         eles = self.intg.system.ele_map[ename]

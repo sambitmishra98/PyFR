@@ -96,7 +96,6 @@ class BaseStdController(BaseStdIntegrator):
 
             wallt_start = perf_counter_ns()
 
-            # Wait-time matrices (still needed by get_target)
             g1a, g1s, g1r = self.get_median_matrices()
 
             print('Switching, nacptsteps = ', self.nacptsteps)
@@ -117,7 +116,8 @@ class BaseStdController(BaseStdIntegrator):
             self.wallt_end = perf_counter_ns()
 
             # Only newcompute ranks compute targets / mask
-            targets = execute['newcompute'](lambda: self.get_target(ecurrs, g1a, g1s, g1r, scale=self.lb_target_scale), default=None)
+            targets = execute['newcompute'](lambda: self.calc_target_ecounts
+                                            (ecurrs, g1a, g1s, g1r), default=None)
             twoway_mask = execute['newcompute'](lambda: g1s + g1r > 0, default=None)
 
             # Broadcast to all world ranks so everyone agrees
@@ -125,7 +125,7 @@ class BaseStdController(BaseStdIntegrator):
             twoway_mask = comm['world'].bcast(twoway_mask)
 
             if rank['world'] == root['world']:
-                print(f"[lb] twoway_mask:\n{twoway_mask.astype(int)}", flush=True)
+                print(f"mask:\n{twoway_mask.astype(int)}", flush=True)
 
             # Extend targets to world size using rankmap['newcompute']
             targets = [
@@ -133,18 +133,40 @@ class BaseStdController(BaseStdIntegrator):
                 for i in range(comm['world'].size)
             ]
 
-            # Run diffusion on MetaMesh
-            mmesh.iterate_to_convergence(
-                targets,
-                etype_order=self.etype_order,
-                flowmat_relax=self.lb_flowmat_relax,
-                mask=twoway_mask
-            )
+            # RANK REMOVAL STRATEGY:
+            # Get all ranks with zero target and non-zero current, 
+            # load balance until one of the ranks reaches the zero target.
+                        
+            ranks_to_clear = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
+                              if t == 0 and n > 0 ]
 
-            wallt_iterate = perf_counter_ns() - wallt_start
+            if ranks_to_clear:
+                mmesh.iterate("to-remove-rank", targets, mask=twoway_mask,
+                              flowmat_relax=self.lb_flowmat_relax)
+            
+
+            else:
+
+                # RANK ADDITION STRATEGY:
+                # Get all ranks with non-zero target and zero current,
+                # sequentially seed the mesh until
+                #   all ranks are populated by at least one element.
+                # Then continue with the normal load balancing.
+                
+                for i in range(comm['world'].size):
+                    if targets[i] > 0 and ecurrs[i] == 0:
+                        print(f"Seeding rank {i}", flush=True)
+                        mmesh.seed_rank(i)
+    
+                # Run diffusion on MetaMesh
+                mmesh.iterate("to-target", targets, mask=twoway_mask,
+                                           flowmat_relax=self.lb_flowmat_relax)
+    
 
             # Convert back to mesh, relocate solution, and reinit system
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
+
+            wallt_iterate = perf_counter_ns() - wallt_start
 
             # Optional safety check: new element counts per world rank
             current_local_new = sum(len(eidxs)

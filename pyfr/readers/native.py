@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 
 from pyfr.inifile import Inifile
-from pyfr.mpiutil import (AlltoallMixin, Scatterer, SparseScatterer, autofree,
+from pyfr.mpiutil import (AlltoallMixin, Scatterer, SparseScatterer, autofree, get_comm_info,
                           mpi, comm, rank, root)
 from pyfr.nputil import iter_struct
 
@@ -101,12 +101,12 @@ class _MetaMesh:
                     prof[name] = (tot + dt, cnt + 1)
         return wrapper
 
-
     def _invalidate_topology(self) -> None:
-        """Bump topology epoch and drop any caches that depend on eidx ownership."""
+        """Bump topology epoch and drop caches that depend on eidx ownership."""
         self._ver['topology'] = int(self._ver.get('topology', 0)) + 1
-        # Drop owner-map cache (if present)
+        # Conservative: clear all known topology-dependent entries.
         self._cache.pop('owners_map', None)
+        self._cache.pop('nei_gid_sets', None)
 
     def __init__(self, *, mesh_src: _Mesh, etypes, e2i, bc2id, i: State, j: State):
         self.mesh_src  = mesh_src
@@ -118,7 +118,7 @@ class _MetaMesh:
         self.j         = j
         self.mpi_vertex_union = None
         self._cache = {}
-        self._ver = {'topology': 0, 'vertices': 0}
+        self._ver = {'topology': 0}
         self._prof = {}
 
     # --- tiny helpers (widely reused) ---
@@ -126,9 +126,24 @@ class _MetaMesh:
         """Fast path: (Ne,) int64 view of current GIDs for an etype."""
         return np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
 
-    def _etype_order(self, etype_order: Optional[List[str]]) -> List[str]:
-        """Resolve caller-provided order against available etypes."""
-        return [et for et in (etype_order or self.etypes) if et in self.etypes]
+    def _etype_order(self):
+        """
+        Resolve effective element-type order on this rank.
+
+        Priority:
+          1) MPICommInfo.etype_order (per-device preference),
+          2) self.etypes (whatever exists in this mesh).
+
+        Always intersect with self.etypes and preserve the order from (1)/(2).
+        """
+        # What exists in this mesh on this rank:
+        available = set(self.etypes)
+
+        info = get_comm_info('world')
+        base = list(info.etype_order) if info.etype_order else list(self.etypes)
+
+        # Filter to mesh-present etypes, preserving order
+        return [et for et in base if et in available]
 
     @fff
     def _apply_plan_and_commit(self, eidxs_diff: Dict[int, Dict[str, np.ndarray]]) -> None:
@@ -167,7 +182,7 @@ class _MetaMesh:
             rows.sort(key=lambda r: -float(r[1]))
 
             headers = ["function", "time_s", "calls", "avg_ms", "share"]
-            print("\n[prof] timing per iterate_to_convergence (aggregated across ranks)")
+            print("\n[prof] timing per iterate (aggregated across ranks)")
             print(tabulate(rows[:topk], headers=headers, tablefmt='github',
                            colalign=('left','right','right','right','right')))
         # reset everywhere
@@ -459,14 +474,11 @@ class _MetaMesh:
         return eidxs_dest
 
     @fff
-    def _compute_deltas(self, score_by: str):
-        mode = str(score_by).lower()
-        if mode in ('edge', 'edges', 'face', 'faces'):
-            return self.compute_mpi_face_deltas()
-        elif mode in ('vertex', 'vertices', 'vtx', 'vtxs'):
-            return self.compute_mpi_face_delta_from_vertices()
+    def _compute_deltas(self, mode: str):
+        if   mode in ('faces',):    return self.calc_mpi_faces_deltas()
+        elif mode in ('vertices',): return self.calc_mpi_vertices_delta()
         else:
-            raise ValueError(f"[itc4.mode] unknown score_by='{score_by}'; use 'edge' or 'vertex'")
+            raise ValueError(f"Unknown {mode = }' ≠ edges/vertices")
 
     @fff
     def _gid_owner_maps(self, eidxs) -> dict[str, dict[int, int]]:
@@ -503,62 +515,7 @@ class _MetaMesh:
         return out
 
     @fff
-    def compute_mpi_face_deltas(self) -> dict[int, dict[str, np.ndarray]]:
-        cons = {et: np.asarray(self.con_i.get(et, ()), dtype=np.int64) for et in self.etypes}
-
-        # Always rebuild neighbors from fresh gid->owner maps (safe/original logic)
-        owners_map = self._gid_owner_maps(self.eidxs_i)
-
-        # Neighbor discovery uses current ownership (not stored owner column)
-        neighbor_set = sorted({
-            int(owners_map[self.etypes[int(code)]].get(int(ngid), rank['world']))
-            for et, con in cons.items() if con.size
-            for code, ngid in zip(con[..., 1].ravel(), con[..., 2].ravel())
-            if code >= 0  # interior
-        } - {rank['world']})
-
-        empty = np.empty((0, 2), dtype=np.int64)
-        idx2et = self.etypes  # tiny alias
-
-        def per_et(et: str, con: np.ndarray, nrank: int) -> np.ndarray:
-            if con.size == 0:
-                return empty
-
-            codes = con[..., 1]                  # neighbor etype index
-            ngids = con[..., 2]                  # neighbor gid
-            valid = (codes >= 0)
-
-            # Vectorized owner lookup via Python dicts (unchanged semantics)
-            def owner_of(idx, gid):
-                if idx < 0:
-                    return -99
-                return owners_map[idx2et[int(idx)]].get(int(gid), rank['world'])
-
-            owners = np.vectorize(owner_of)(
-                np.where(valid, codes, -1),
-                np.where(valid, ngids, -1)
-            )
-
-            c_me = np.sum(valid & (owners ==  rank['world']), axis=1).astype(np.int16, copy=False)
-            c_n  = np.sum(valid & (owners ==  nrank), axis=1).astype(np.int16, copy=False)
-
-            sel = (c_n > 0)
-            if not np.any(sel):
-                return empty
-
-            lids  = np.nonzero(sel)[0].astype(np.int64, copy=False)
-            delta = (c_me - c_n)[sel].astype(np.int64, copy=False)
-
-            mat   = np.c_[lids, delta]
-            order = np.lexsort((mat[:, 0], mat[:, 1]))   # primary = delta
-            return mat[order]
-
-        return {n: {et: per_et(et, cons[et], n) for et in self.etypes} for n in neighbor_set}
-
-
-
-    @fff
-    def compute_mpi_face_delta_from_vertices(self) -> dict[int, dict[str, np.ndarray]]:
+    def calc_mpi_vertices_delta(self) -> dict[int, dict[str, np.ndarray]]:
         mvu = self.collect_mpi_vertex_nodes()
 
         all_sets  = [np.asarray(v, dtype=np.int64).ravel() for v in mvu.values() if v is not None]
@@ -647,14 +604,10 @@ class _MetaMesh:
         return {int(n): {et: np.asarray(sorted(s), np.int64) for et, s in per.items() if s}
                 for n, per in chosen.items()}
 
-    def build_parallel_moves_to_targets(
-        self,
-        target_counts: List[int],
-        rank_move_budget: Optional[List[int]] = None,
-        etype_order: Optional[List[str]] = None,
-        *,
-        verbose: bool = True,
-    ) -> Dict[int, Dict[str, np.ndarray]]:
+    def build_parallel_moves_to_targets(self, target_counts: List[int],
+         rank_move_budget: Optional[List[int]] = None,
+         etype_order: Optional[List[str]] = None, *,
+         verbose: bool = True) -> Dict[int, Dict[str, np.ndarray]]:
 
         R = len(target_counts)
         tgt = np.asarray(target_counts, dtype=np.int64)
@@ -737,7 +690,7 @@ class _MetaMesh:
                 caps[r][s] = int(floors[i])
 
         # ---- pick concrete elements guided by face-deltas (more negative is better) ----
-        deltas_by_rank = self.compute_mpi_face_deltas()  # {nbr: {et: int64[N,2] [lid, delta]}}
+        deltas_by_rank = self.calc_mpi_faces_deltas()  # {nbr: {et: int64[N,2] [lid, delta]}}
         order = [et for et in (etype_order or self.etypes) if et in self.etypes]
 
         moves_by_rank: Dict[int, Dict[str, np.ndarray]] = {}
@@ -800,12 +753,8 @@ class _MetaMesh:
         """
         Group *our* MPI faces by neighbor rank using self.con and gid->owner maps.
         Returns: { nbr_rank : [(etype, lid, fidx), ...], ... }
-        Accepts con[..., :] with 3 cols = (code, ngid, nfid) or
-                            with 4 cols = (owner, code, ngid, nfid).
+        Accepts con[..., :] with 4 cols = (owner, code, ngid, nfid).
         """
-
-        # Build gid->owner maps once (collective). Used if con is 3-col.
-        owners = self._gid_owner_maps(self.eidxs_i)
 
         per_nbr: dict[int, list[tuple[str, int, int]]] = {}
 
@@ -816,31 +765,13 @@ class _MetaMesh:
 
             con_et = np.asarray(con_et)
             Ne, nfaces, ncols = con_et.shape
-            if ncols not in (3, 4):
-                raise AssertionError(f"{et}: self.con must have 3 or 4 columns; got {ncols}")
 
             for lid in range(Ne):
                 for f in range(nfaces):
                     rec = con_et[lid, f]
-
-                    # decode
-                    if ncols == 4:
-                        owner, code, ngid, nf = map(int, rec)
-                    else:  # ncols == 3
-                        code, ngid, nf = map(int, rec)
-                        owner = rank['world']  # default; may be replaced below
-
-                    # skip unfilled / boundary
-                    if code == _CON_UNFILLED:
+                    owner, code, ngid, nf = map(int, rec)
+                    if code == _CON_UNFILLED or code < 0: # boundary (-1, bc_id, -1)
                         continue
-                    if code < 0:  # boundary (-1, bc_id, -1)
-                        continue
-
-                    net = self.etypes[int(code)]
-
-                    # if owner not provided (3-col), look it up
-                    if ncols == 3:
-                        owner = owners.get(net, {}).get(int(ngid), rank['world'])
 
                     if owner != rank['world']:
                         per_nbr.setdefault(int(owner), []).append((et, int(lid), int(f)))
@@ -932,13 +863,13 @@ class _MetaMesh:
                 [3, 0, 4],
             )]
 
-        raise NotImplementedError(f"_face_vertex_indices: etype '{et}' not implemented")
+        raise NotImplementedError(f"'{et}' not implemented")
 
 
     @fff
     def collect_mpi_vertex_nodes(self) -> dict[int, np.ndarray]:
         """
-        Return { nbr_rank : np.ndarray[int64] } = sorted-unique global vertex-node IDs
+        Return {nbr_rank: np.ndarray[int64]} = sorted-unique global vertex-node IDs
         on MPI faces to that neighbor.
         """
         if not hasattr(self, "spts_nodes_i") or self.spts_nodes_i is None:
@@ -975,165 +906,6 @@ class _MetaMesh:
     # ---------------------
     # Relocation iterations 
     # ---------------------
-
-    @fff
-    def plan_eidxs_dest_from_diff2(self, eidxs_diff, verbose=False):
-
-        send_plan = {
-            d: {et: np.asarray(eidxs_diff.get(d, {}).get(et, ()), dtype=np.int64)
-                for et in self.etypes}
-            for d in range(comm['world'].size) if d != rank['world']
-        }
-        all_plans = comm['world'].allgather(send_plan)
-
-        to_send = {et: set().union(*(send_plan[d][et] for d in send_plan)) 
-                   for et in self.etypes}
-
-        to_recv = {et: set() for et in self.etypes}
-        for sender, plan in enumerate(all_plans):
-            if sender == rank['world']:
-                continue
-            ed = plan.get(rank['world'], {})
-            for et in self.etypes:
-                if et in ed and ed[et].size:
-                    to_recv[et].update(map(int, ed[et]))
-
-        new_eidxs = {}
-        for et in self.etypes:
-            cur  = list(map(int, np.asarray(self.eidxs_i[et], dtype=np.int64)))
-            keep = [g for g in cur if g not in to_send[et]]
-            add  = [g for g in sorted(to_recv[et]) if g not in keep]
-            new_eidxs[et] = np.asarray(keep + add, dtype=np.int64)
-
-        if verbose:
-            # one-line sanity print per rank
-            ts = {et: len(to_send[et]) for et in self.etypes}
-            tr = {et: len(to_recv[et]) for et in self.etypes}
-            ne = {et: len(new_eidxs[et]) for et in self.etypes}
-            print(f"[plan] R{rank['world']} \t send:{ts} \t recv:{tr} \t target:{ne}")
-
-        return new_eidxs
-    
-    @fff
-    def plan_eidxs_dest_from_diff3(self, eidxs_diff, verbose=False):
-
-        # 1) Dense per-destination dict → uniform type across ranks
-        send_plan = {
-            d: {et: np.asarray(eidxs_diff.get(d, {}).get(et, ()), dtype=np.int64)
-                for et in self.etypes}
-            for d in range(comm['world'].size) if d != rank['world']
-        }
-
-        # 2) Gather everyone's plan
-        all_plans = comm['world'].allgather(send_plan)
-
-        # 3) to_send[et] = unique GIDs we’re sending out
-        to_send = {}
-        for et in self.etypes:
-            chunks = [send_plan[d][et] for d in send_plan if send_plan[d][et].size]
-            to_send[et] = np.unique(np.concatenate(chunks)) if chunks else np.empty(0, dtype=np.int64)
-
-        # 4) to_recv[et] = unique GIDs we’ll receive
-        to_recv = {et: np.empty(0, dtype=np.int64) for et in self.etypes}
-        for sender, plan in enumerate(all_plans):
-            if sender == rank['world']:
-                continue
-            per_me = plan.get(rank['world'], None)
-            if not per_me:
-                continue
-            for et in self.etypes:
-                a = np.asarray(per_me.get(et, ()), dtype=np.int64)
-                if a.size:
-                    to_recv[et] = np.concatenate((to_recv[et], a))
-        for et in self.etypes:
-            if to_recv[et].size:
-                to_recv[et] = np.unique(to_recv[et])
-
-        # 5) Build new_eidxs
-        new_eidxs = {}
-        for et in self.etypes:
-            cur = np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
-            ts = to_send[et]
-            keep = cur[~np.isin(cur, ts, assume_unique=False)] if (cur.size and ts.size) else cur
-
-            recv = to_recv[et]
-            if recv.size:
-                recv.sort()
-                add = recv[~np.isin(recv, keep, assume_unique=False)] if keep.size else recv
-                new = np.concatenate((keep, add)) if add.size else keep
-            else:
-                new = keep
-            new_eidxs[et] = new
-
-        if verbose:
-            tsz = {et: int(to_send[et].size) for et in self.etypes}
-            rsz = {et: int(to_recv[et].size) for et in self.etypes}
-            nsz = {et: int(new_eidxs[et].size) for et in self.etypes}
-            print(f"[plan] R{rank['world']} \t send:{tsz} \t recv:{rsz} \t target:{nsz}")
-
-        return new_eidxs
-
-    @fff
-    def plan_eidxs_dest_from_diff4(self, eidxs_diff, verbose=False,
-                                   *, use_alltoall=False):
-
-        if not use_alltoall:
-            # Allgather path (as before)
-            send_plan = {
-                d: {et: np.asarray(eidxs_diff.get(d, {}).get(et, ()), dtype=np.int64)
-                    for et in self.etypes}
-                for d in range(comm['world'].size) if d != rank['world']
-            }
-            all_plans = comm['world'].allgather(send_plan)
-
-            to_send = {}
-            for et in self.etypes:
-                chunks = [send_plan[d][et] for d in send_plan if send_plan[d][et].size]
-                to_send[et] = (np.unique(np.concatenate(chunks))
-                               if chunks else np.empty(0, dtype=np.int64))
-
-            to_recv = {et: np.empty(0, dtype=np.int64) for et in self.etypes}
-            for sender, plan in enumerate(all_plans):
-                if sender == rank['world']:
-                    continue
-                per_me = plan.get(rank['world'])
-                if not per_me:
-                    continue
-                for et in self.etypes:
-                    a = per_me.get(et)
-                    if a is not None and a.size:
-                        to_recv[et] = np.concatenate((to_recv[et], a))
-
-            for et in self.etypes:
-                if to_recv[et].size:
-                    to_recv[et] = np.unique(to_recv[et])
-
-            new_eidxs = {}
-            for et in self.etypes:
-                cur = np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
-                ts = to_send[et]
-                keep = cur[~np.isin(cur, ts, assume_unique=True)] if (cur.size and ts.size) else cur
-
-                rv = to_recv[et]
-                if rv.size:
-                    add = rv[~np.isin(rv, keep, assume_unique=True)] if keep.size else rv
-                    new = np.concatenate((keep, add)) if add.size else keep
-                else:
-                    new = keep
-
-                new_eidxs[et] = new
-
-            if verbose:
-                tsz = {et: int(to_send[et].size) for et in self.etypes}
-                rsz = {et: int(to_recv[et].size) for et in self.etypes}
-                nsz = {et: int(new_eidxs[et].size) for et in self.etypes}
-                print(f"[plan/ag] R{rank['world']}\tsend:{tsz}\trecv:{rsz}\ttarget:{nsz}")
-
-            return new_eidxs
-
-        # If use_alltoall=True, just defer to plan_eidxs_dest_from_diff
-        return self.plan_eidxs_dest_from_diff(eidxs_diff, verbose=verbose,
-                                              use_alltoall=True)
     
     @fff
     def plan_eidxs_dest_from_diff(self, eidxs_diff, verbose=False, *,
@@ -1239,10 +1011,7 @@ class _MetaMesh:
         self.i, self.j = self.j, self.i
         self._retag_con_owners_from_gid_maps()
         self.mpi_vertex_union = None
-
-        # Invalidate owner-map cache for correctness on next calls
-        self._ver['topology'] = int(self._ver.get('topology', 0)) + 1
-        self._cache.pop('owners_map', None)
+        self._invalidate_topology()
 
     def relocate_i_to_j(self, eidxs_diff):
         self.j = self.i.relocate_to(self.plan_eidxs_dest_from_diff(eidxs_diff))
@@ -1282,44 +1051,8 @@ class _MetaMesh:
 
     # -----------------
 
-    @fff
-    def diffuse_by_mpi_vertex(self, *, target_moves=1000, chooser_rank=1):
-        """
-        One diffusion step driven by MPI-face vertex overlap.
-
-        Parameters
-        ----------
-        target_moves : int
-            Soft cap on total GIDs to move across all neighbors.
-        chooser_rank : int
-            Rank that proposes the plan (others send empty plans).
-        last : bool
-            If True, skip relocating con/spts_nodes and return a materialized mesh
-            for the final step. If False, commit _j -> _i and return None.
-
-        Returns
-        -------
-        mesh | None
-            If last=True, returns a rebuilt mesh (ready for compute).
-            Otherwise returns None (state committed internally).
-        """
-
-        # 0) candidate from current
-        self._reset_j_with_i()
-
-        # 1) deltas from *_i* using face-vertex unions
-        deltas = self.compute_mpi_face_delta_from_vertices()
-
-        # 2) propose plan (only chooser_rank proposes; others send {})
-        eidxs_diff = self.build_moves_from_delta(deltas, target_moves) if rank == chooser_rank else {}
-
-        # 3) build _j from plan
-        self._apply_plan_and_commit(eidxs_diff)
-
-    def smooth_until_stagnates(self, *, max_iters: int = 20,
-                            patience: int = 1,
-                            min_change: int = 0,
-                            threshold = 0,
+    def smooth_until_stagnates(self, *, max_iters: int = 20, patience: int = 1,
+                            min_change: int = 0, threshold = 0,
                             target_counts: Optional[List[int]] = None,
                             restrict_src_dest: bool = False) -> list[int]:
         """
@@ -1392,7 +1125,7 @@ class _MetaMesh:
                 allowed_nbrs = set()
 
         # 1) per-neighbor, per-etype deltas
-        deltas_by_rank = self.compute_mpi_face_deltas()
+        deltas_by_rank = self.calc_mpi_faces_deltas()
 
         # 2) build move plan (respect allowed_nbrs if set)
         eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
@@ -1756,34 +1489,29 @@ class _MetaMesh:
         return _cancel_anti_parallel(M_full)
 
     @fff
-    def diffuse_smoothing2(self, flow_matrix: np.ndarray, *, threshold = 0, 
-        etype_order: List[str] = None, return_count = False, verbose = False, 
-        scale = 0.5, score_by: str = 'vertex',   # 'edge' | 'vertex'
+    def diffuse_smoothing2(self, flow_matrix: np.ndarray, mode, threshold, 
+                           scale = 0.5, return_count = False, 
     ) -> Optional[int]:
         """
-        score_by: 'edge' (default) uses compute_mpi_face_deltas()
-                'vertex'        uses compute_mpi_face_delta_from_vertices()
+        mode: 'edge' (default) uses calc_mpi_faces_deltas()
+                'vertex'        uses calc_mpi_vertices_delta()
         """
 
         # Validate flow matrix
         M = np.asarray(flow_matrix, dtype=np.int64)
         if M.ndim != 2 or M.shape[0] != M.shape[1]:
-            raise ValueError(f"[itc4] flow_matrix must be square; got shape {M.shape}")
+            raise ValueError(f"Need square matrix; got {M.shape = }")
         R = int(M.shape[0])
         if not (0 <= rank['world'] < R):
-            raise ValueError(f"[itc4] rank {rank['world']} out of range for flow_matrix of size {R}")
+            raise ValueError(f"{rank['world'] = } but flow_matrix size is {R}")
 
-        base_order = etype_order  # keep caller’s order exactly
+        base_order = self._etype_order()
 
         # 0) start from current snapshot
         self._reset_j_with_i()
 
-        # 0a) mode line (ALWAYS print one-liner so we can verify toggling)
-        if rank['world'] == root['world']:
-            print(f"[itc4.mode] rank={rank['world']} score_by={str(score_by).lower()} thr={int(threshold)} scale={float(scale):.3f}")
-
-        # 1) precompute per-neighbor deltas once (EDGE or VERTEX)  # <<<
-        deltas_by_rank = self._compute_deltas(score_by)           # <<<
+        # 1) precompute per-neighbor deltas once (EDGE or VERTEX)
+        deltas_by_rank = self._compute_deltas(mode)
 
         picked_by_et: dict[str, set[int]] = {et: set() for et in base_order}
 
@@ -1817,9 +1545,6 @@ class _MetaMesh:
                 order = [et for et in base_order if et in allowed_set]
             else:
                 order = base_order
-
-            if verbose and allowed_set is not None:
-                print(f"[itc4.recv-allow] rank={rank['world']} -> {int(nbr)} allow={order}")
 
             chosen: dict[str, list[int]] = {}
             cand = []
@@ -1868,18 +1593,17 @@ class _MetaMesh:
             out_total += int(tot)
             assert tot <= need <= cap, f"[itc4.pass] rank={rank['world']} nbr={nbr} tot={tot} need={need} cap={cap}"
 
-        if verbose:
-            print(f"[itc4.pass] rank={rank['world']} thr={int(threshold)} scale={float(scale):.3f} "
-                f"out_total={int(out_total)} by_nbr_total={by_nbr_total}")
-
         # 3) perform the relocation
         self._apply_plan_and_commit(eidxs_diff)
         return int(out_total) if return_count else None
 
 
+    def seed_rank(self, rank):
+        pass
+
+
     @fff
-    def iterate_to_convergence(self, target_counts, mask, *, 
-        etype_order: Optional[List[str]] = None, flowmat_relax=0.5, ):
+    def iterate(self, objective, target_counts, mask, *, flowmat_relax=0.5, ):
         """
         One round controller (as requested):
         1) Plan from current counts (M0).
@@ -1899,24 +1623,56 @@ class _MetaMesh:
 
         if rank['world'] == root['world']: print(f"[itc4.iter]  TARGET={target_counts}")
 
-        # prefer tuples for immutable steps
-        exec_order = (
-                      [(0, 'vertex')] \
-                   # + [(0, 'vertex')] \
-                   # + [(2,   'edge')] \
-                   # + [(2,   'edge')] \
-                    + [(0,   'edge')]*comm['world'].size)
-        
-        for step in exec_order:
-            cur0 = _cur_counts_total()
-            if rank['world'] == root['world']: print(f"[itc4.iter] CURRENT={cur0}")
-            M0   = self.element_flow_plan(cur0, target_counts, mask)
-            self.diffuse_smoothing2(M0, threshold=step[0], etype_order=etype_order, 
-                                    scale=flowmat_relax, score_by=step[1])
-            self.smooth_until_stagnates()
+        if objective == 'to-target':
+
+            exec_order = (
+                        [(0, 'vertices')]*comm['world'].size*4
+                    # + [(0, 'vertices')]
+                    # + [(2,   'faces')]
+                    # + [(2,   'faces')]
+                        + [(0,   'faces')]*comm['world'].size)
             
-        # ... existing code ...
-        self._prof_print_and_reset()   # <--- prints summary + resets counters
+            for step in exec_order:
+                cur0 = _cur_counts_total()
+                if rank['world'] == root['world']: 
+                    print(f"mode={step[1]} \t thr={int(step[0])} CURRENT={cur0}")
+                M0   = self.element_flow_plan(cur0, target_counts, mask)
+                self.diffuse_smoothing2(M0, mode=step[1], threshold=step[0],
+                                        scale=flowmat_relax)
+                self.smooth_until_stagnates()
+                
+            self._prof_print_and_reset()   # <--- prints summary + resets counters
+            
+        elif objective == 'to-remove-rank':
+            # Find targets with zero target counts
+            zero_target = [i for i, c in enumerate(target_counts) if c == 0]
+
+            cur0 = _cur_counts_total()
+            zero_curr0_base = [i for i, c in enumerate(cur0) if c == 0]
+
+            cur1 = [0 for _ in range(len(cur0))]
+
+            # As long as last curr is not same as this curr 
+            while cur1 != cur0:
+                cur0 = _cur_counts_total()
+                zero_curr0 = [i for i, c in enumerate(cur0) if c == 0]
+                if len(zero_curr0_base) > len(zero_curr0):
+                    if rank['world'] == root['world']:
+                        print(f"[itc4.iter] to-remove-rank done; "
+                              f"zero-targets={zero_target} zero-current={zero_curr0}")
+                    break
+
+                M0 = self.element_flow_plan(cur0, target_counts, mask)
+                self.diffuse_smoothing2(M0, mode='vertices', threshold=6,
+                                        scale=flowmat_relax)
+                self.smooth_until_stagnates()
+
+                cur1 = _cur_counts_total()
+                if rank['world'] == root['world']:
+                    print(f"[itc4.iter] to-remove-rank CURRENT={cur1} \t DIFF = {[cur1[i]-cur0[i] for i in range(len(cur0))]}")
+        else:
+            raise ValueError(f"Unknown objective '{objective}'")
+            
             
     @staticmethod
     def _partition_stats(mesh):
@@ -1995,49 +1751,6 @@ class _MetaMesh:
         print(tabulate(rows, headers=headers, tablefmt='github',
                        colalign=('left', *('right',) * (len(headers) - 1))))
 
-        @staticmethod
-        def info_to_csv(mesh, *, tcurr: float,
-                        csv_path: str = 'lb_elem_dist.csv'):
-
-            ps = _MetaMesh._partition_stats(mesh)
-
-            if rank['world'] != root['world'] or ps is None:
-                return
-
-            etypes, cnt, F = ps
-            R, E = cnt.shape
-            pairs = [(i, j) for i in range(R) for j in range(i + 1, R)]
-            pair_vals = [int(F[i, j]) for (i, j) in pairs]
-            pairs_nz  = sum(v > 0 for v in pair_vals)
-            faces_sum = sum(pair_vals)
-
-            if not os.path.exists(csv_path):
-                cols = (
-                    ['tcurr']
-                    + [c
-                    for r in range(R)
-                    for c in ([f'{r}-{et}' for et in etypes] + [f'{r}-total'])]
-                    + [f'i{i}-{j}' for (i, j) in pairs]
-                    + ['pairs', 'faces']
-                )
-                with open(csv_path, 'w') as f:
-                    f.write(','.join(cols) + '\n')
-                print(f"[info_to_csv] header_written path='{csv_path}' R={R} "
-                    f"etypes={list(etypes)} npairs={len(pairs)} "
-                    f"ncols={len(cols)}")
-
-            row = [f"{tcurr:.6f}"]
-            for r in range(R):
-                vals = cnt[r].astype(int).tolist()
-                row += list(map(str, vals)) + [str(sum(vals))]
-            row += list(map(str, pair_vals)) + [str(pairs_nz), str(faces_sum)]
-
-            with open(csv_path, 'a') as f:
-                f.write(','.join(row) + '\n')
-            print(f"[info_to_csv] row_append tcurr={tcurr:.6f} "
-                f"counts={R*(E+1)} pairs={len(pairs)} faces_sum={faces_sum}")
-
-
     @staticmethod
     def info_to_csv(mesh, *, tcurr: float, csv_path: str = 'lb_elem_dist.csv'):
 
@@ -2079,135 +1792,6 @@ class _MetaMesh:
         print(f"[info_to_csv] row_append tcurr={tcurr:.6f} "
               f"counts={R*(E+1)} pairs={len(pairs)} faces_sum={faces_sum}")
 
-
-    # -----------------
-    # Partition Writer
-    # -----------------
-
-    def init_part_pyfrs(self, intg, *, fields=('part_id', 'is_curved'), async_timeout=0.0):
-        """
-        Initialise a NativeWriter to dump *partition* snapshots only.
-        Data layout mimics the standard writer: (ne_local, nvars, nupts).
-        fields:
-            - 'part_id'  : MPI rank (int) replicated across nupts
-            - 'is_curved': {0,1} replicated across nupts (if available; else zeros)
-        """
-        # ---- MPI + basic config ----
-
-        basedir  = intg.cfg.get('partition', 'basedir', '.')
-        basename = intg.cfg.get('partition', 'basename')
-
-        # ---- resolve local element counts per etype ----
-        mesh = intg.system.meshes['compute']
-        etypes = tuple(sorted(mesh.eidxs))
-        erdata = {et: np.arange(len(mesh.eidxs.get(et, ())), dtype=np.int64) for et in etypes}
-
-        # ---- shapes per etype (use real nupts so VTU exporters remain happy) ----
-        # nvars = number of partition fields we're going to write
-        nvars = len(fields)
-        nupts = getattr(intg.system, 'nupts')  # dict: etype -> nupts
-        ershapes = {et: (nvars, int(nupts[et])) for et in erdata if len(erdata[et])}
-
-        # ---- construct the writer (prefix='partition') ----
-        self._writer = NativeWriter.from_integrator(
-            intg, basedir, basename, 'partition', fpdtype=np.float64
-        )
-        self._writer.set_shapes_eidxs(ershapes, erdata)
-
-        # ---- book-keeping for subsequent write calls ----
-        self._part_fields = tuple(fields)
-        self._part_async_timeout = float(async_timeout)
-        self._part_nvars = int(nvars)
-        self.nupts = {et: int(nupts[et]) for et in etypes}
-
-        # ---- trace (one line per rank) ----
-        counts = {et: int(len(erdata[et])) for et in etypes}
-        print(f"[part.init] rank={rank['world']} fields={list(self._part_fields)} nvars={self._part_nvars} "
-            f"etypes={list(etypes)} counts={counts}")
-
-    def write_to_pyfrs(self, intg, iter_round=1, relocation_round=1):
-        """
-        Write one HDF5 'partition' snapshot at current tcurr.
-        Data per etype is shaped (ne_local, nvars, nupts) of float64.
-        Field 0: part_id (MPI rank); Field 1: is_curved (if requested, else zeros).
-        """
-
-        t = float(intg.tcurr)
-
-        # Sanity: we must have been initialised
-        if not hasattr(self, '_writer'):
-            raise RuntimeError("init_part_pyfrs must be called before write_to_pyfrs")
-
-        mesh = intg.system.mesh
-        etypes = tuple(sorted(mesh.eidxs))
-
-        # Build data dict: etype -> (ne_local, nvars, nupts)
-        data = {}
-        want_curved = ('is_curved' in self._part_fields)
-
-        # Try to fetch curved flags per etype if present; else zeros
-        curved_map = {}
-        for et in etypes:
-            cf = getattr(mesh, 'spts_curved', {}).get(et, None)
-            if cf is None:
-                curved_map[et] = None
-            else:
-                # cf is expected shape (ne_local,) boolean/0/1; cast to int64
-                curved_map[et] = np.asarray(cf, dtype=np.int64).ravel()
-
-        for et in etypes:
-            gids_local = mesh.eidxs.get(et, ())
-            ne = int(len(gids_local))
-            if ne == 0 or et not in self.nupts:
-                continue
-
-            nv = self._part_nvars
-            npu = int(self.nupts[et])
-
-            # Allocate (ne, nvars, nupts)
-            arr = np.empty((ne, nv, npu), dtype=np.float64)
-
-            # Field 0: part_id = rank, replicated over nupts
-            arr[:, 0, :] = float(rank['world'])
-
-            # Field 1 (optional): is_curved
-            if want_curved and nv >= 2:
-                if curved_map[et] is not None and len(curved_map[et]) == ne:
-                    arr[:, 1, :] = curved_map[et][:, None]
-                else:
-                    arr[:, 1, :] = 0.0
-
-            # If more fields are ever added in the future, zero-fill the rest
-            if nv > 2:
-                arr[:, 2:, :] = 0.0
-
-            data[et] = arr
-
-        # ---- metadata (mirror WriterPlugin style) ----
-        stats = Inifile()
-        stats.set('data', 'fields', ','.join(self._part_fields))
-        stats.set('data', 'prefix', 'partition')
-        intg.collect_stats(stats)  # keep mesh/solver meta consistent
-
-        if rank['world'] == root['world']:
-            metadata = {**intg.cfgmeta,
-                        'stats': stats.tostr(),
-                        'mesh-uuid': intg.mesh_uuid,
-                        'partition/iter_round': np.array(str(iter_round), dtype='S'),
-                        'partition/relocation_round': np.array(str(relocation_round), dtype='S')}
-        else:
-            metadata = None
-
-        # ---- friendly trace ----
-        loc_counts = {et: int(data[et].shape[0]) for et in data}
-        print(f"[part.write] rank={rank['world']} tcurr={t:.6f} iter={int(iter_round)} reloc={int(relocation_round)} "
-            f"ne={loc_counts}")
-
-        # ---- write (sync by default; async if _part_async_timeout>0) ----
-        self._writer.write(data, t, metadata, timeout=self._part_async_timeout)            
-            
-
-
     # --- NEW: neighbor GID sets cache (per topology epoch) ---
     @fff
     def _neighbor_gid_sets_cached(self) -> dict[int, dict[str, np.ndarray]]:
@@ -2223,7 +1807,7 @@ class _MetaMesh:
             self._cache['nei_gid_sets'] = {'gen': gen, 'map': m}
             return m
 
-        ncomm = comm.Create_dist_graph_adjacent(neighbors, neighbors)
+        ncomm = comm['world'].Create_dist_graph_adjacent(neighbors, neighbors)
         send = {et: np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
                 for et in self.etypes}
         recvd = ncomm.neighbor_allgather(send)
@@ -2239,105 +1823,40 @@ class _MetaMesh:
         return m
 
     @fff
-    def compute_mpi_face_deltas(self) -> dict[int, dict[str, np.ndarray]]:
-        """
-        Compute per-neighbor Δ scores per element, with an optional
-        neighbor-only fast path controlled by PYFR_FACEDELTA_NEI.
-
-        Returns
-        -------
-        { nbr_rank : { etype : int64[:,2] } }
-        where each row is [local_id, delta].
-        """
-
+    def calc_mpi_faces_deltas(self) -> dict[int, dict[str, np.ndarray]]:
         cons = {et: np.asarray(self.con_i.get(et, ()), dtype=np.int64)
                 for et in self.etypes}
 
-        use_nei = os.getenv('PYFR_FACEDELTA_NEI', '0') not in ('', '0')
-        if not use_nei:
-            # Safe path: use global gid->owner maps
-            owners_map = self._gid_owner_maps(self.eidxs_i)
-            neighbor_set = sorted({
-                int(owners_map[self.etypes[int(code)]].get(int(ngid), rank['world']))
-                for et, con in cons.items() if con.size
-                for code, ngid in zip(con[..., 1].ravel(), con[..., 2].ravel())
-                if code >= 0
-            } - {rank['world']})
-
-            empty = np.empty((0, 2), np.int64)
-            idx2et = self.etypes
-
-            def per_et(et, con, nrank):
-                if con.size == 0:
-                    return empty
-                codes, ngids = con[..., 1], con[..., 2]
-                valid = (codes >= 0)
-
-                def owner_of(idx, gid):
-                    if idx < 0:
-                        return -99
-                    return owners_map[idx2et[int(idx)]].get(int(gid), rank['world'])
-
-                owners = np.vectorize(owner_of)(
-                    np.where(valid, codes, -1),
-                    np.where(valid, ngids, -1)
-                )
-                c_me = np.sum(valid & (owners == rank['world']), axis=1).astype(np.int16)
-                c_n  = np.sum(valid & (owners == nrank), axis=1).astype(np.int16)
-                sel  = (c_n > 0)
-                if not np.any(sel):
-                    return empty
-                lids  = np.nonzero(sel)[0].astype(np.int64)
-                delta = (c_me - c_n)[sel].astype(np.int64)
-                mat   = np.c_[lids, delta]
-                return mat[np.lexsort((mat[:, 0], mat[:, 1]))]
-
-            return {n: {et: per_et(et, cons[et], n) for et in self.etypes}
-                    for n in neighbor_set}
-
-        # Fast path: neighbor-only membership (no global map)
+        # Safe path: use global gid->owner maps
+        owners_map = self._gid_owner_maps(self.eidxs_i)
         neighbor_set = sorted({
-            int(rec[0])
-            for con in cons.values() if con.size
-            for rec in con.reshape(-1, con.shape[-1])
-            if rec[1] >= 0 and int(rec[0]) != rank['world']
-        })
-
-        my_gids  = {et: np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
-                    for et in self.etypes}
-        nei_gids = self._neighbor_gid_sets_cached()
+            int(owners_map[self.etypes[int(code)]].get(int(ngid), rank['world']))
+            for et, con in cons.items() if con.size
+            for code, ngid in zip(con[..., 1].ravel(), con[..., 2].ravel())
+            if code >= 0
+        } - {rank['world']})
 
         empty = np.empty((0, 2), np.int64)
+        idx2et = self.etypes
 
-        def per_et_nei(et: str, con: np.ndarray, nrank: int) -> np.ndarray:
+        def per_et(et, con, nrank):
             if con.size == 0:
                 return empty
-
-            codes = con[..., 1]
-            ngids = con[..., 2]
+            codes, ngids = con[..., 1], con[..., 2]
             valid = (codes >= 0)
 
-            c_me = np.zeros(ngids.shape[0], dtype=np.int16)
-            c_n  = np.zeros_like(c_me)
+            def owner_of(idx, gid):
+                if idx < 0:
+                    return -99
+                return owners_map[idx2et[int(idx)]].get(int(gid), rank['world'])
 
-            for k, net in enumerate(self.etypes):
-                mk = valid & (codes == k)
-                if not np.any(mk):
-                    continue
-
-                me_hit = np.isin(ngids[mk], my_gids[net], assume_unique=False)
-                ng = nei_gids.get(int(nrank), {}).get(net, np.empty(0, np.int64))
-                n_hit = np.isin(ngids[mk], ng, assume_unique=False)
-
-                tmp = np.zeros_like(mk, dtype=np.int8)
-                tmp[mk] = me_hit
-                c_me += tmp.sum(axis=1).astype(np.int16)
-
-                tmp[:] = 0
-                tmp[mk] = n_hit
-                c_n += tmp.sum(axis=1).astype(np.int16)
-
-            sel = (c_n > 0)
+            owners = np.vectorize(owner_of)(
+                np.where(valid, codes, -1),
+                np.where(valid, ngids, -1)
+            )
+            c_me = np.sum(valid & (owners == rank['world']), axis=1).astype(np.int16)
+            c_n  = np.sum(valid & (owners == nrank), axis=1).astype(np.int16)
+            sel  = (c_n > 0)
             if not np.any(sel):
                 return empty
             lids  = np.nonzero(sel)[0].astype(np.int64)
@@ -2345,10 +1864,8 @@ class _MetaMesh:
             mat   = np.c_[lids, delta]
             return mat[np.lexsort((mat[:, 0], mat[:, 1]))]
 
-        return {n: {et: per_et_nei(et, cons[et], n) for et in self.etypes}
+        return {n: {et: per_et(et, cons[et], n) for et in self.etypes}
                 for n in neighbor_set}
-
-
 class _MeshInterconnector(AlltoallMixin):
 
     def __init__(self, eidxs_src, eidxs_dest):

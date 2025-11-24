@@ -7,7 +7,7 @@ import re
 import h5py
 import numpy as np
 
-from pyfr.mpiutil import get_comm_rank_root, init_mpi
+from pyfr.mpiutil import get_comm_rank_root, init_mpi, rank
 from pyfr.plugins.base import (BaseCLIPlugin, BaseSolnPlugin, DatasetAppender,
                                cli_external, init_csv, open_hdf5_a)
 from pyfr.points import PointLocator, PointSampler
@@ -97,7 +97,8 @@ class SamplerPlugin(BaseSolnPlugin):
 
         # Construct and configure the point sampler
         self.psampler = PointSampler(intg.meshes['plugins'], spts)
-        self.psampler.configure_with_intg_nvars(intg, self.nsvars)
+        #self.psampler.configure_with_intg_nvars(intg, self.nsvars)
+        self.psampler.configure_with_cfg_nvars(self.cfg, self.nsvars)
 
         # Have the root rank open the output file
         if rank == root:
@@ -184,6 +185,11 @@ class SamplerPlugin(BaseSolnPlugin):
 
         # Perform the sampling
         samps = self.psampler.sample(soln, process=self._process)
+
+        # Print the plugin rank and compute rank too
+        prank = rank['plugins']
+        crank = rank['compute']
+        print(f'{prank = } {crank = } Sampling at t={intg.tcurr}')
 
         # If we're the root rank then output
         if samps is not None:

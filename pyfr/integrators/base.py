@@ -122,7 +122,6 @@ class BaseIntegrator:
 
         self.called_plugin_dt = False
         self.lb_iters = self.cfg.getint('partition', 'load-balancing-iterations', 1)
-        self.lb_target_scale = self.cfg.getfloat('partition', 'load-balancing-target-scale', 1.0)
         self.lb_flowmat_relax = self.cfg.getfloat('partition', 'load-balancing-flowmatrix-relax', 0.5)
 
         self.lb_best_score       = float('inf')
@@ -512,23 +511,10 @@ class BaseIntegrator:
         _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us))
         _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us))
 
-    def get_target(self, ecurrs, g1a, g1s, g1r, scale=1.0):
+    def calc_target_ecounts(self, ecurrs, g1a, g1s, g1r, scale=1.0):
         """
-        Build target using MPI wait-split data.
-
-        Parameters
-        ----------
-        ecurrs : Sequence[int]
-            Current element counts indexed by *world* rank.
-        g1a, g1s, g1r : np.ndarray
-            Median all / send / recv indexed by *old compute* rank (0..P_old-1).
-        scale : float
-            Scaling for the comm burden (typically 1.0).
-
-        Returns
-        -------
-        list[int]
-            Integer per-rank targets in the *newcompute* communicator order
+        Builds target element counts using MPI wait-split data.
+        Returns integer per-rank targets in *newcompute* comm
             (world-rank list from rankmap_new).
         """
         # --- Rankmaps for old and new compute comms ---
