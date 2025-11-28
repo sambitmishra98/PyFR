@@ -98,7 +98,8 @@ class BaseStdController(BaseStdIntegrator):
 
             g1a, g1s, g1r = self.get_median_matrices()
 
-            print('Switching, nacptsteps = ', self.nacptsteps)
+            if rank['world'] == root['world']:
+                print('Switching, nacptsteps = ', self.nacptsteps)
 
             # Build MetaMesh over the *world* communicator
             mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
@@ -110,22 +111,22 @@ class BaseStdController(BaseStdIntegrator):
             current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
             ecurrs = np.asarray(comm['world'].allgather(int(current_local)), dtype=np.int64)
 
-            print(f"[lb] world-rank {rank['world']} ecurrs={ecurrs.tolist()}")
-
-            # After this, we measure only iterate+reinit
-            self.wallt_end = perf_counter_ns()
+            #print(f"[lb] world-rank {rank['world']} ecurrs={ecurrs.tolist()}")
 
             # Only newcompute ranks compute targets / mask
-            targets = execute['newcompute'](lambda: self.calc_target_ecounts
-                                            (ecurrs, g1a, g1s, g1r), default=None)
-            twoway_mask = execute['newcompute'](lambda: g1s + g1r > 0, default=None)
+            if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
+                targets = self.calc_target_ecounts(ecurrs, g1a, g1s, g1r)
+                twoway_mask = (g1s + g1r) > 0
+            else:
+                targets = None
+                twoway_mask = None
 
             # Broadcast to all world ranks so everyone agrees
             targets     = comm['world'].bcast(targets)
             twoway_mask = comm['world'].bcast(twoway_mask)
 
-            if rank['world'] == root['world']:
-                print(f"mask:\n{twoway_mask.astype(int)}", flush=True)
+            # if rank['world'] == root['world']:
+            #     print(f"mask:\n{twoway_mask.astype(int)}", flush=True)
 
             # Extend targets to world size using rankmap['newcompute']
             targets = [
@@ -152,17 +153,27 @@ class BaseStdController(BaseStdIntegrator):
                 # sequentially seed the mesh until
                 #   all ranks are populated by at least one element.
                 # Then continue with the normal load balancing.
-                
+
+                # NEW: hard-coded vertex-cluster probe for now
+                #      (adjust rank_a, rank_b as needed)
+                rank_a, rank_b = 0, 1
+                cluster = mmesh.collect_mpi_vertex_cluster(rank_a, rank_b)
+                if rank['world'] == root['world']:
+                    sizes = {et: int(arr.size) for et, arr in cluster.items()}
+                    #print(f"vertex_cluster({rank_a},{rank_b}) per-etype={sizes}", flush=True)
+
                 for i in range(comm['world'].size):
                     if targets[i] > 0 and ecurrs[i] == 0:
                         print(f"Seeding rank {i}", flush=True)
-                        mmesh.seed_rank(i)
-    
+                        mmesh.seed_rank(i, cluster)    
+
+                # mmesh.refine(objective='cpd', mode='vertices', thr=10)
+
                 # Run diffusion on MetaMesh
                 mmesh.iterate("to-target", targets, mask=twoway_mask,
                                            flowmat_relax=self.lb_flowmat_relax)
-    
 
+    
             # Convert back to mesh, relocate solution, and reinit system
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
 
@@ -186,26 +197,26 @@ class BaseStdController(BaseStdIntegrator):
 
 
                 # 🔍 NEW: print state just before and after promote_comm
-                if rank['world'] == root['world']:
-                    print(
-                        f"[comm-debug] before-promote: "
-                        f"compute_size={comm['compute'].size} "
-                        f"rankmap_compute={rankmap['compute']} "
-                        f"newcompute_size={comm['newcompute'].size} "
-                        f"rankmap_newcompute={rankmap['newcompute']}",
-                        flush=True
-                    )
+                # if rank['world'] == root['world']:
+                #     print(
+                #         f"[comm-debug] before-promote: "
+                #         f"compute_size={comm['compute'].size} "
+                #         f"rankmap_compute={rankmap['compute']} "
+                #         f"newcompute_size={comm['newcompute'].size} "
+                #         f"rankmap_newcompute={rankmap['newcompute']}",
+                #         flush=True
+                #     )
 
                 # Now make 'newcompute' the canonical 'compute' communicator.
                 promote_comm('newcompute', 'compute')
 
-                if rank['world'] == root['world']:
-                    print(
-                        f"[comm-debug] after-promote: "
-                        f"compute_size={comm['compute'].size} "
-                        f"rankmap_compute={rankmap['compute']}",
-                        flush=True
-                    )
+                # if rank['world'] == root['world']:
+                #     print(
+                #         f"[comm-debug] after-promote: "
+                #         f"compute_size={comm['compute'].size} "
+                #         f"rankmap_compute={rankmap['compute']}",
+                #         flush=True
+                #     )
 
             # Reinitialise backend+system on the new 'compute' layout
             self.reinit_backend_and_system(self.meshes['compute'], soln)
@@ -225,7 +236,6 @@ class BaseStdController(BaseStdIntegrator):
     def reinit_mesh_soln(self, mesh, soln):
         # New mesh lives under the 'newcompute' logical name while we migrate.
         self.meshes['newcompute'] = mesh
-        _MetaMesh.info(self.meshes['newcompute'])
 
         # Build interconnector from old compute layout -> newcompute layout
         self._newcompute_intercon = self.initialise_interconnector('compute', 'newcompute')
@@ -243,19 +253,7 @@ class BaseStdController(BaseStdIntegrator):
 
         return soln
 
-
     def reinit_backend_and_system(self, mesh, soln):
-
-
-        # 🔍 NEW: log communicator state at entry
-        if comm['compute'] != mpi.COMM_NULL:
-            print(
-                f"[reinit-debug] world_rank={rank['world']} "
-                f"compute_size={comm['compute'].size} "
-                f"rankmap_compute={rankmap['compute']}",
-                flush=True
-            )
-
         self._invalidate_caches()
 
         del self.system

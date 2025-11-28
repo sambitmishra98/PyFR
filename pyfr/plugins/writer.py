@@ -122,7 +122,6 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
             return
 
         # Prepare the data and metadata
-        print(f'tcurr = {intg.tcurr}, writing solution')
         data = self._prepare_data(intg)
         metadata = self._prepare_metadata(intg)
 

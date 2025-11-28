@@ -22,12 +22,12 @@ def _append_csv_row(file_path: str, header_cols: list[str], values: list[int]):
     if not os.path.exists(file_path):
         with open(file_path, 'w', newline='') as f:
             f.write(','.join(header_cols) + '\n')
-        print(f"[g1csv] header_written file='{file_path}' ncols={len(header_cols)}")
+        #print(f"[g1csv] header_written file='{file_path}' ncols={len(header_cols)}")
 
     # Append row
     with open(file_path, 'a', newline='') as f:
         f.write(','.join(str(int(v)) for v in values) + '\n')
-    print(f"[g1csv] row_append file='{file_path}' ncols={len(header_cols)}")
+    #print(f"[g1csv] row_append file='{file_path}' ncols={len(header_cols)}")
 
 
 def _flatten_offdiag_labels(P: int) -> list[str]:
@@ -181,16 +181,28 @@ class BaseIntegrator:
             online_cfg = self.cfg
 
         if online_cfg.hasopt('partition', f'{goal}-ranklist'):
-            pranks = online_cfg.getliteral('partition', f'{goal}-ranklist')
+            # If pname is None, share with 'compute'
+            if goal == 'plugins' and pname is None:
+                pranks = online_cfg.getliteral('partition', 'compute-ranklist')
+
+                # Copy comm from 'compute' to 'plugins' by reference
+                comm['plugins'] = comm['compute']
+            else:
+                pranks = online_cfg.getliteral('partition', f'{goal}-ranklist')
+                initialise_new_comm(goal, pranks)
         else:
             pranks = list(range(comm['world'].size))
+            initialise_new_comm(goal, pranks)
 
-        initialise_new_comm(goal, pranks)
 
         if goal == 'plugins':
-            reader = NativeReader(self.meshes['compute'].fname, pname,
-                                construct_con=False, comm_name=goal)
-            self.meshes[goal] = reader.mesh
+            # If pname is None, share the mesh connectivity with 'compute'
+            if pname is None:
+                self.meshes[goal] = self.meshes['compute']
+            else:
+                reader = NativeReader(self.meshes['compute'].fname, pname,
+                                    construct_con=False, comm_name=goal)
+                self.meshes[goal] = reader.mesh
         else:
             reader = NativeReader(self.meshes['compute'].fname, pname,
                                 construct_con=True, comm_name=goal)
@@ -511,6 +523,24 @@ class BaseIntegrator:
         _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us))
         _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us))
 
+    def compute_cost(self, g1a, g1s, g1r, scale=1.0):
+        P_old = len(g1a)
+
+        g1a_old = np.asarray(g1a, dtype=float)
+        g1s_old = np.asarray(g1s, dtype=float)
+        g1r_old = np.asarray(g1r, dtype=float)
+
+        assert g1s_old.shape == (P_old, P_old)
+        assert g1r_old.shape == (P_old, P_old)
+
+        s_out = g1s_old.sum(axis=1)
+        r_in  = g1r_old.sum(axis=1)
+        r_out = g1r_old.sum(axis=0)
+
+        cost_old = g1a_old - (r_in + s_out) * scale + r_out * scale
+
+        return cost_old
+
     def calc_target_ecounts(self, ecurrs, g1a, g1s, g1r, scale=1.0):
         """
         Builds target element counts using MPI wait-split data.
@@ -530,21 +560,7 @@ class BaseIntegrator:
                 "[get_target] rank is not in newcompute but still reached get_target"
             )
 
-        # Devices from config: e.g. ['gpu', 'cpu', 'cpu', 'cpu', 'cpu']
-        devices = self.cfg.getliteral('backend', 'devices')
-
-        # On ranks that are actually in newcompute, log the mapping
-        if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
-            print(f"[load-balance] rankmap_old={rankmap['compute']}")
-            print(f"[load-balance] rankmap_new={rankmap['newcompute']}")
-            print(f"[load-balance] devices={devices}")
-
-        # Safeguard: we expect g1a/g1s/g1r to be over the old compute comm
-        P_old = len(g1a)
-        assert g1s.shape == (P_old, P_old)
-        assert g1r.shape == (P_old, P_old)
-        assert len(rankmap['compute']) == P_old, \
-            f"[load-balance] len(rankmap_old)={len(rankmap['compute'])} != len(g1a)={P_old}"
+        cost_old = self.compute_cost(g1a, g1s, g1r, scale=scale)
 
         # --- Restrict world-indexed element counts to old compute ranks ---
 
@@ -555,54 +571,26 @@ class BaseIntegrator:
         # Snapshot medians to CSV (uses whatever index space g1* live in)
         self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
 
-        # g1a/g1s/g1r are *already* in old-compute index space
-        g1a_old = np.asarray(g1a, dtype=float)
-        g1s_old = np.asarray(g1s, dtype=float)
-        g1r_old = np.asarray(g1r, dtype=float)
-
-        # --- Build COST / burden on old compute ranks ---
-
-        s_out = g1s_old.sum(axis=1)  # sender burden: row sum of send
-        r_in  = g1r_old.sum(axis=1)  # recv experienced locally
-        r_out = g1r_old.sum(axis=0)  # recv attributed to sender
-
-        # Masks in the old-compute space (used by MetaMesh)
-        self.twoway_mask = g1s_old + g1r_old   > 0
-
-        # Target burden (COST variant)
-        burden_target = g1a_old - (r_in + s_out) * scale + r_out * scale
-
         # Per-element inverse cost on old ranks
-        inv_cost = ecurrs_old / burden_target
+        inv_cost = ecurrs_old / cost_old
         N_star_old = Ntot * (inv_cost / inv_cost.sum())
-
-        if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
-            print(f"[load-balance] Ntot={Ntot}")
-            print(f"[load-balance] N_star_old={N_star_old.tolist()}")
 
         # --- Remap N_star_old from old->new using device groups (world space) ---
 
+        # Devices from config: e.g. ['gpu', 'cpu', 'cpu', 'cpu', 'cpu']
+        devices = self.cfg.getliteral('backend', 'devices')
+
         # rankmap_* are world-rank lists, matching ecurrs/devices indexing
         if list(rankmap['compute']) != list(rankmap['newcompute']):
-            N_star_new = self.remap_targets_by_ranklist(
-                N_star_old,
-                old_ranks=rankmap['compute'],
-                new_ranks=rankmap['newcompute'],
-                devices=devices,
-                tag="[lb-group]",
-            )
+            N_star_new = self.remap_targets_by_ranklist(N_star_old,
+                old_ranks=rankmap['compute'], new_ranks=rankmap['newcompute'],
+                devices=devices, tag="[lb-group]")
         else:
             # No rank change: old and new are the same
             N_star_new = N_star_old.copy()
 
         # --- Normalise and round to integer targets in newcompute order ---
-
-        N_int = self.normalise_and_round_targets(
-            N_star_new,
-            Ntot=Ntot,
-            tag="[lb-round]",
-        )
-
+        N_int = self.normalise_and_round_targets(N_star_new, Ntot=Ntot, tag="[lb-round]",)
         if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
             print(f"[load-balance] N_int={N_int.tolist()} (sum={int(N_int.sum())})")
 
@@ -678,7 +666,6 @@ class BaseIntegrator:
 
         return N_star_new
 
-
     def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):
         """
         Rescale continuous targets N_star to sum to Ntot and round to integers.
@@ -709,8 +696,8 @@ class BaseIntegrator:
 
         k = int(Ntot - N_floor.sum())
 
-        print(f"{tag} sum_star={sum_star:.6e} Ntot={Ntot} "
-              f"sum_floor={int(N_floor.sum())} residual_k={k}")
+        #print(f"{tag} sum_star={sum_star:.6e} Ntot={Ntot} "
+        #      f"sum_floor={int(N_floor.sum())} residual_k={k}")
 
         if k != 0:
             frac = N_scaled - N_floor
@@ -725,11 +712,10 @@ class BaseIntegrator:
                 N_floor[idxs] -= 1
                 print(f"{tag} -1 from indices={idxs.tolist()}")
 
-        print(f"{tag} N_scaled={N_scaled.tolist()}")
-        print(f"{tag} N_int={N_floor.tolist()} (sum={int(N_floor.sum())})")
+        #print(f"{tag} N_scaled={N_scaled.tolist()}")
+        #print(f"{tag} N_int={N_floor.tolist()} (sum={int(N_floor.sum())})")
 
         return N_floor
-
 
     def get_median_matrices(self):
         # World/compute comms
