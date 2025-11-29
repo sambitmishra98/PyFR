@@ -3,6 +3,7 @@ import gc
 
 from time import perf_counter_ns
 import numpy as np
+from numpy._core.fromnumeric import argmin
 
 from pyfr.integrators.std.base import BaseStdIntegrator
 from pyfr.mpiutil import (mpi, initialise_new_comm, 
@@ -106,6 +107,13 @@ class BaseStdController(BaseStdIntegrator):
             # Build MetaMesh over the *world* communicator
             mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
 
+            ndofs = execute['compute'](lambda: sum(self.system.ele_ndofs),
+                                       default=1e12)
+            # allgather across all world ranks
+            ndofs = comm['world'].allgather(ndofs)
+
+            print(f"Total DOFs = {ndofs}")
+
             _MetaMesh.info(self.meshes['compute'])
             _MetaMesh.info_to_csv(self.meshes['compute'], tcurr=self.tcurr)
 
@@ -155,9 +163,11 @@ class BaseStdController(BaseStdIntegrator):
                 mmesh.iterate("to-remove-rank", targets, mask=twoway_mask,
                                                 flowmat_relax=self.lb_flowmat_relax)
             
-                if ranks_to_remove[0] != comm['compute'].size - 1:
-                    mmesh.swap_partitions(ranks_to_remove[0], 
-                                          comm['compute'].size - 1)
+                # If we actually removed all elements from the rank to remove,
+                end_rank = len(rankmap['compute']) - 1
+                if ranks_to_remove[0] != end_rank and \
+                    sum([t!=0 for t in targets]) == end_rank:               
+                    mmesh.swap_partitions(ranks_to_remove[0], end_rank)
 
                 mmesh.smooth_until_stagnates(patience=1)
 

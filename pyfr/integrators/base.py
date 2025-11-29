@@ -499,14 +499,10 @@ class BaseIntegrator:
 
     def write_g1_median_csvs(self, g1a, g1s, g1r, g1idx: int = 1):
         """
-        Snapshot g1 medians to CSV in integer microseconds:
-        - g1-all-median-ms.csv   : columns r0,...,r{P-1}
-        - g1-cmp-median-ms.csv   : columns r0,...,r{P-1}
-        - g1-send-median-ms.csv  : columns i<sender>-<receiver> for all j!=i
-        - g1-recv-median-ms.csv  : same pattern as send
-        Header is created only if the file does not exist.
+        Snapshot g1 medians to CSV in integer microseconds.
+        Now always use world-size vectors/matrices and embed compute ranks.
         """
-        # Scale to microseconds and cast to int
+        # Scale to microseconds and cast to int (compute index space)
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
         send_us = np.rint(g1s * 1e6).astype(np.int64)
         recv_us = np.rint(g1r * 1e6).astype(np.int64)
@@ -514,14 +510,36 @@ class BaseIntegrator:
         if rank['compute'] != root['compute']:
             return
 
-        # --- ALL / CMP vectors ---
-        rcols = [f"r{r}" for r in range(comm['compute'].size)]
-        _append_csv_row('g1-all-median-ms.csv', rcols, all_us.tolist())
+        # ---- NEW: embed into world index space ----
+        P_world   = comm['world'].size
+        comp_wrs  = list(rankmap['compute'])   # world ranks in compute index order
+        P_compute = len(comp_wrs)
 
-        # --- SEND / RECV full directed off-diagonal matrices ---
-        mcols = _flatten_offdiag_labels(comm['compute'].size)
-        _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us))
-        _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us))
+        assert P_compute == len(all_us)
+        assert send_us.shape == (P_compute, P_compute)
+        assert recv_us.shape == (P_compute, P_compute)
+
+        # Default value for non-compute ranks (can change to -1 if you prefer)
+        missing_val = -1
+
+        all_us_w  = np.full(P_world, missing_val, dtype=np.int64)
+        send_us_w = np.full((P_world, P_world), missing_val, dtype=np.int64)
+        recv_us_w = np.full((P_world, P_world), missing_val, dtype=np.int64)
+
+        for ic, wr_i in enumerate(comp_wrs):
+            all_us_w[wr_i] = all_us[ic]
+            for jc, wr_j in enumerate(comp_wrs):
+                send_us_w[wr_i, wr_j] = send_us[ic, jc]
+                recv_us_w[wr_i, wr_j] = recv_us[ic, jc]
+
+        # --- ALL vector (world size) ---
+        rcols = [f"r{r}" for r in range(P_world)]
+        _append_csv_row('g1-all-median-ms.csv', rcols, all_us_w.tolist())
+
+        # --- SEND / RECV full directed off-diagonal matrices (world size) ---
+        mcols = _flatten_offdiag_labels(P_world)
+        _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us_w))
+        _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us_w))
 
     def compute_cost(self, g1a, g1s, g1r, scale=1.0):
         P_old = len(g1a)

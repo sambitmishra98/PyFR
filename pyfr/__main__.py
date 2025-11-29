@@ -511,7 +511,7 @@ def process_resample(args):
 
 def _process_common(args, soln, cfg):
     # Manually initialise MPI
-    init_mpi()
+    init_mpi(cfg)
 
     # If cfg provides a partitioning ranklist, use it
     if cfg is not None and cfg.hasopt('partition', 'compute-ranklist'):

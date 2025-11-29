@@ -170,7 +170,7 @@ class MPICommInfo:
 
         if etype_order is None:
             # global default; adjust as needed
-            etype_order = ['tet', 'pyr', 'hex']
+            etype_order = ['hex', 'pyr', 'tet']
 
         cls._etype_order = list(etype_order)
 
