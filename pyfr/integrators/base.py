@@ -661,9 +661,6 @@ class BaseIntegrator:
                     print(f"{tag} wr={wr} (dev={dev}) new_rank using global_avg: {val:.6e}")
                 N_star_new[k] = val
 
-        print(f"{tag} N_star_old={N_star_old.tolist()}")
-        print(f"{tag} N_star_new_raw={N_star_new.tolist()}")
-
         return N_star_new
 
     def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):

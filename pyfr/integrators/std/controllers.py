@@ -78,9 +78,11 @@ class BaseStdController(BaseStdIntegrator):
             online_cfg = Inifile.load(self.cfg.get('partition', 'online-file'))
             part_ranklist = online_cfg.getliteral('partition', 'compute-ranklist')
 
-            # Build / update 'newcompute' communicator
-            initialise_new_comm('newcompute', part_ranklist)
-
+            # If compute-ranklist differs from current communicator, reinitialise
+            if len(part_ranklist) != len(rankmap['compute']):
+                initialise_new_comm('newcompute', part_ranklist)
+            else:
+                initialise_new_comm('newcompute', list(range(len(part_ranklist))))
 
             # 🔍 NEW: print communicator state after creating newcompute
             if rank['world'] == root['world']:
@@ -138,41 +140,39 @@ class BaseStdController(BaseStdIntegrator):
             # Get all ranks with zero target and non-zero current, 
             # load balance until one of the ranks reaches the zero target.
                         
-            ranks_to_clear = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
+            ranks_to_remove = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
                               if t == 0 and n > 0 ]
 
-            if ranks_to_clear:
+            ranks_to_add = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
+                            if t > 0 and n == 0 ]
+
+            # If more than 1 rank to clear, raise 
+            if len(ranks_to_remove) > 1:
+                raise NotImplementedError(
+                    "Relocator supports removing one rank at a time."
+                )   
+            elif len(ranks_to_remove) == 1:
                 mmesh.iterate("to-remove-rank", targets, mask=twoway_mask,
-                              flowmat_relax=self.lb_flowmat_relax)
+                                                flowmat_relax=self.lb_flowmat_relax)
             
+                if ranks_to_remove[0] != comm['compute'].size - 1:
+                    mmesh.swap_partitions(ranks_to_remove[0], 
+                                          comm['compute'].size - 1)
 
+                mmesh.smooth_until_stagnates(patience=1)
+
+            elif len(ranks_to_add) > 1:
+                raise NotImplementedError("Add one rank at a time.")
+            elif len(ranks_to_add) == 1:
+                mmesh.seed_rank(ranks_to_add[0], targets, twoway_mask,)
             else:
-
-                # RANK ADDITION STRATEGY:
-                # Get all ranks with non-zero target and zero current,
-                # sequentially seed the mesh until
-                #   all ranks are populated by at least one element.
-                # Then continue with the normal load balancing.
-
-                # NEW: hard-coded vertex-cluster probe for now
-                #      (adjust rank_a, rank_b as needed)
-                rank_a, rank_b = 0, 1
-                cluster = mmesh.collect_mpi_vertex_cluster(rank_a, rank_b)
-                if rank['world'] == root['world']:
-                    sizes = {et: int(arr.size) for et, arr in cluster.items()}
-                    #print(f"vertex_cluster({rank_a},{rank_b}) per-etype={sizes}", flush=True)
-
-                for i in range(comm['world'].size):
-                    if targets[i] > 0 and ecurrs[i] == 0:
-                        print(f"Seeding rank {i}", flush=True)
-                        mmesh.seed_rank(i, cluster)    
-
                 # mmesh.refine(objective='cpd', mode='vertices', thr=10)
-
-                # Run diffusion on MetaMesh
                 mmesh.iterate("to-target", targets, mask=twoway_mask,
                                            flowmat_relax=self.lb_flowmat_relax)
 
+            # Build / update 'newcompute' communicator
+            #initialise_new_comm('newcompute', list(range(comm['newcompute'].size)))
+            initialise_new_comm('newcompute', list(range(len(part_ranklist))))
     
             # Convert back to mesh, relocate solution, and reinit system
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
@@ -192,31 +192,8 @@ class BaseStdController(BaseStdIntegrator):
 
             # Assert: any world-rank not in new_active has zero elements.
             # (If you want to be looser, just drop the assert.)
-            if all((i in new_active) or (ecurrs_new[i] == 0)
-                       for i in range(comm['world'].size)):
-
-
-                # 🔍 NEW: print state just before and after promote_comm
-                # if rank['world'] == root['world']:
-                #     print(
-                #         f"[comm-debug] before-promote: "
-                #         f"compute_size={comm['compute'].size} "
-                #         f"rankmap_compute={rankmap['compute']} "
-                #         f"newcompute_size={comm['newcompute'].size} "
-                #         f"rankmap_newcompute={rankmap['newcompute']}",
-                #         flush=True
-                #     )
-
-                # Now make 'newcompute' the canonical 'compute' communicator.
+            if all((i in new_active) or (ecurrs_new[i] == 0) for i in range(comm['world'].size)):
                 promote_comm('newcompute', 'compute')
-
-                # if rank['world'] == root['world']:
-                #     print(
-                #         f"[comm-debug] after-promote: "
-                #         f"compute_size={comm['compute'].size} "
-                #         f"rankmap_compute={rankmap['compute']}",
-                #         flush=True
-                #     )
 
             # Reinitialise backend+system on the new 'compute' layout
             self.reinit_backend_and_system(self.meshes['compute'], soln)

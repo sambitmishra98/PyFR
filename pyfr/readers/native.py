@@ -1592,7 +1592,8 @@ class _MetaMesh:
 
     @fff
     def diffuse_smoothing_vertices(self, flow_matrix: np.ndarray, scale: float = 1.0,
-                                   return_count: bool = False) -> Optional[int]:
+                                   return_count: bool = False,
+                                   max_iters = 10) -> Optional[int]:
         """
         Vertex-based smoothing that moves *all-or-none* candidate elements
         per interface (rank -> nbr), repeatedly, until no more full-interface
@@ -1628,11 +1629,9 @@ class _MetaMesh:
         base_order = self._etype_order()
 
         total_moved_local = 0
-        iter = 0
 
-        while True:
-            iter += 1
-            print(f"[itc4.vs] R{rank['world']} iteration {iter} starting")
+        for iter in range(int(max_iters)):
+            print(f"[itc4.vs] R{rank['world']} iteration {iter+1} starting")
             # Start from current state for this sweep
             self._reset_j_with_i()
 
@@ -1770,8 +1769,7 @@ class _MetaMesh:
             lidxs.append(lid)
         return np.array(owners, dtype=np.int32), np.array(lidxs, dtype=np.int64)
 
-    def seed_rank(self, new_rank: int, cluster: dict[str, np.ndarray],
-                  n_seed_per_etype: int = 32) -> None:
+    def seed_rank(self, new_rank: int, targets, twoway_mask, n_seed_per_etype: int = 1, ) -> None:
         """
         Collectively move a small patch of elements from an interface cluster
         into `new_rank` to seed it before diffusion.
@@ -1791,7 +1789,13 @@ class _MetaMesh:
             Max number of elements per etype that this rank will donate to
             `new_rank`. The global seeding size will be the sum across donors.
         """
-        import numpy as np
+
+        # Choose rank with highest DoFs as rank_a
+        rank_a = 0 
+        # Choose rank_b as the one rank_a has the least MPI vertices with. 
+        rank_b = 1
+
+        cluster = self.collect_mpi_vertex_cluster(rank_a, rank_b)
 
         # Build a per-destination diff for this rank only:
         #   eidxs_diff[new_rank][etype] = gids (owned by THIS rank)
@@ -1825,6 +1829,17 @@ class _MetaMesh:
         # IMPORTANT: still call the relocation pipeline on *all* ranks, even if
         # eidxs_diff is empty here, because it uses collectives internally.
         self._apply_plan_and_commit(eidxs_diff)
+        
+        def _cur_counts_total():
+            return list(comm['world'].allgather(self._local_count()))
+
+        cur0 = _cur_counts_total()
+        if rank['world'] == root['world']: 
+            print(f"mode=seed_rank \t CURRENT={cur0}")
+        M0   = self.element_flow_plan(cur0, targets, twoway_mask)
+
+        self.diffuse_smoothing_vertices(flow_matrix = M0, scale = 1.0,
+            return_count = False, max_iters = 2)
 
     @fff
     def iterate(self, objective, target_counts, mask, *, flowmat_relax=0.5, ):
@@ -1872,32 +1887,58 @@ class _MetaMesh:
             self._prof_print_and_reset()   # <--- prints summary + resets counters
             
         elif objective == 'to-remove-rank':
-            # Find targets with zero target counts
-            zero_target = [i for i, c in enumerate(target_counts) if c == 0]
 
-            cur0 = _cur_counts_total()
-            zero_curr0_base = [i for i, c in enumerate(cur0) if c == 0]
+            kill_rank = [r for r, c in enumerate(target_counts) if c == 0][0]
 
-            cur1 = [0 for _ in range(len(cur0))]
+            if rank['world'] == root['world']: print(f"{kill_rank = } ", flush=True,)
 
-            # As long as last curr is not same as this curr 
-            while cur1 != cur0:
+            # Evacuate kill_rank until it reaches zero
+            while True:
                 cur0 = _cur_counts_total()
-                zero_curr0 = [i for i, c in enumerate(cur0) if c == 0]
-                if len(zero_curr0_base) > len(zero_curr0):
-                    if rank['world'] == root['world']:
-                        print(f"[itc4.iter] to-remove-rank done; "
-                              f"zero-targets={zero_target} zero-current={zero_curr0}")
-                    break
-
                 M0 = self.element_flow_plan(cur0, target_counts, mask)
-                self.diffuse_smoothing2(M0, mode='vertices', threshold=6,
-                                        scale=flowmat_relax)
+
+                # Use vertex-based diffusion here, as in your sketch
+                self.diffuse_smoothing_vertices(M0, scale=flowmat_relax)
                 self.smooth_until_stagnates()
 
                 cur1 = _cur_counts_total()
+
                 if rank['world'] == root['world']:
-                    print(f"[itc4.iter] to-remove-rank CURRENT={cur1} \t DIFF = {[cur1[i]-cur0[i] for i in range(len(cur0))]}")
+                    diff = [cur1[i] - cur0[i] for i in range(len(cur0))]
+                    print(f"[itc4.iter] to-remove-rank CURRENT={cur1} \t DIFF = {diff}", flush=True,)
+
+                if cur1[kill_rank] == 0:
+                    if rank['world'] == root['world']:
+                        print(f"to-remove-rank done; kill_rank={kill_rank} cur={cur1}", flush=True,)
+                    break
+
+        # elif objective == 'to-remove-rank':
+        #     # Find targets with zero target counts
+        #     rm_idx = [i for i, c in enumerate(target_counts) if c == 0][0]
+# 
+        #     cur0 = _cur_counts_total()
+        #     zero_curr0_base = [i for i, c in enumerate(cur0) if c == 0]
+# 
+        #     cur1 = [0 for _ in range(len(cur0))]
+# 
+        #     # As long as last curr is not same as this curr 
+        #     while cur1 != cur0:
+        #         cur0 = _cur_counts_total()
+        #         zero_curr0 = [i for i, c in enumerate(cur0) if c == 0]
+        #         # if len(zero_curr0_base) > len(zero_curr0):
+        #         #     if rank['world'] == root['world']:
+        #         #         print(f"[itc4.iter] to-remove-rank done; "
+        #         #               f"zero-targets={zero_target} zero-current={zero_curr0}")
+        #         #     break
+# 
+        #         M0 = self.element_flow_plan(cur0, target_counts, mask)
+        #         self.diffuse_smoothing2(M0, mode='vertices', threshold=6,
+        #                                 scale=flowmat_relax)
+        #         self.smooth_until_stagnates()
+# 
+        #         cur1 = _cur_counts_total()
+        #         if rank['world'] == root['world']:
+        #             print(f"[itc4.iter] to-remove-rank CURRENT={cur1} \t DIFF = {[cur1[i]-cur0[i] for i in range(len(cur0))]}")
 
         else:
             raise ValueError(f"Unknown objective '{objective}'")
@@ -1920,6 +1961,83 @@ class _MetaMesh:
             pass
         else:
             raise ValueError(f"Unknown objective '{objective}'")
+
+
+    def _local_count(self) -> int:
+        """Total elements on this rank (all etypes)."""
+        return int(sum(len(self.eidxs_i.get(et, ())) for et in self.etypes))
+
+    @fff
+    def swap_partitions(self, r0: int, r1: int) -> None:
+        """
+        Swap the per-rank mesh partition (State `i`) between two *world* ranks.
+
+        Intended usage:
+          - After a 'to-remove-rank' iterate, when some rank r0 is empty and
+            you want to bubble that empty partition to the end (r1 = size - 1).
+          - Once swapped, your existing "remove last rank" logic can safely
+            drop the final rank without touching the MetaMesh internals.
+
+        This:
+          * exchanges `self.i` between ranks r0 and r1 via sendrecv,
+          * recomputes the gid->owner maps,
+          * retags con_i[..., 0] = owner_rank consistently,
+          * invalidates topology-dependent caches.
+        """
+
+        commw = comm['world']
+        myr   = int(rank['world'])
+        nr    = commw.size
+
+        # Normalise & validate inputs
+        r0 = int(r0)
+        r1 = int(r1)
+
+        if r0 == r1:
+            if myr == root['world']:
+                print(f"[mm.swap] noop swap_partitions r0=r1={r0}", flush=True)
+            return
+
+        if not (0 <= r0 < nr and 0 <= r1 < nr):
+            raise ValueError(
+                f"swap_partitions: ranks out of range: r0={r0} r1={r1} size={nr}"
+            )
+
+        # Local bookkeeping: element count before swap
+        before_local = self._local_count()
+
+        # Only the two ranks participate in the sendrecv; others are spectators
+        if myr == r0 or myr == r1:
+            partner    = r1 if myr == r0 else r0
+            send_state = self.i
+            # Send our State, receive partner's State (pickled Python object)
+            recv_state = commw.sendrecv(send_state, dest=partner, source=partner)
+            # Overwrite local State
+            self.i = recv_state
+
+        after_local = self._local_count()
+
+        # Collect before/after counts for a sanity log (all ranks participate)
+        before_all = commw.allgather(before_local)
+        after_all  = commw.allgather(after_local)
+
+        if myr == root['world']:
+            print(
+                f"[mm.swap] swap_partitions r0={r0} r1={r1} "
+                f"before={before_all} after={after_all}",
+                flush=True,
+            )
+
+        # Ownership tags in con_i have to be updated to reflect the new
+        # gid->owner distribution. Do this once per rank.
+        self._retag_con_owners_from_gid_maps()
+        self.mpi_vertex_union = None
+
+        # Invalidate topology-dependent caches (owners_map, nei_gid_sets, ...)
+        self._invalidate_topology()
+
+
+
 
     @staticmethod
     def _partition_stats(mesh):
