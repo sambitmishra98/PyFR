@@ -30,6 +30,11 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
         self._regidx = list(range(self.nregs))
         self._idxcurr = 0
 
+        self.initialise_comm_and_partition(goal='plugins')
+
+        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
+        self.ele_map_plugins = self.system._setup_elemap(self.meshes['plugins'])
+
         # Event handlers for advance_to
         self.plugins = self._get_plugins(initsoln)
 

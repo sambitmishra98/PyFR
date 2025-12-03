@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from pytools import prefork
 
-from pyfr.mpiutil import get_comm_rank_root, mpi, comm, rank, root, execute
+from pyfr.mpiutil import mpi, comm, rank, root
 from pyfr.regions import parse_region_expr
 from pyfr.writers.csv import CSVStream
 

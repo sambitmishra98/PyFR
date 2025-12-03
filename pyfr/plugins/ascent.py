@@ -7,7 +7,7 @@ import numpy as np
 
 from pyfr.ctypesutil import LibWrapper
 from pyfr.inifile import Inifile
-from pyfr.mpiutil import get_comm_rank_root, init_mpi
+from pyfr.mpiutil import get_comm_rank_root, init_mpi, comm, rank
 from pyfr.nputil import npeval
 from pyfr.plugins.base import (BaseCLIPlugin, BaseSolnPlugin, cli_external,
                                region_data)
@@ -151,7 +151,7 @@ class _IntegratorAdapter:
         return region_data(self.acfg, self.cfgsect, self.intg.meshes['plugins'])
 
     def soln_op_vpts(self, ename, divisor):
-        eles = self.intg.system.ele_map[ename]
+        eles = self.intg.ele_map_plugins[ename]
         shapecls = subclass_where(BaseShape, name=ename)
         shape = shapecls(eles.nspts, self.scfg)
 
@@ -248,7 +248,6 @@ class _AscentRenderer:
     v_filter = ['qcriterion', 'vorticity']
 
     def __init__(self, adapter, isrestart):
-        comm, rank, root = get_comm_rank_root()
 
         # Set order for subdivision
         sorder = adapter.scfg.getint('solver', 'order')
@@ -281,7 +280,7 @@ class _AscentRenderer:
         self.mesh_n = ConduitNode(self.conduit)
 
         # Determine our domain ID offset
-        doff = comm.exscan(len(adapter.region_data)) or 0
+        doff = comm['world'].exscan(len(adapter.region_data)) or 0
 
         # Build the Conduit blueprint mesh for the regions
         self._ele_regions_lin = []
@@ -300,7 +299,7 @@ class _AscentRenderer:
         d_str = f'domain_{domid}'
         e_str = f'{d_str}/topologies/mesh/elements'
 
-        eidx = adapter.etypes.index(etype)
+        eidx = list(adapter.intg.meshes['plugins'].eidxs).index(etype)
         soln_op, xd = adapter.soln_op_vpts(etype, divisor)
         self._ele_regions_lin.append((d_str, eidx, rgn, soln_op))
 
@@ -519,8 +518,6 @@ class _AscentRenderer:
         self._image_paths.append((f'scenes/{path}/image_name', gen))
 
     def render(self, adapter):
-        comm, rank, root = get_comm_rank_root()
-
         # Set file names
         for path, gen in self._image_paths:
             self._add_scene[path] = gen.send(adapter.tcurr)
@@ -531,7 +528,7 @@ class _AscentRenderer:
         self.lib.ascent_publish(self.ascent_ptr, self.mesh_n)
         self.lib.ascent_execute(self.ascent_ptr, self.actions)
 
-        comm.barrier()
+        comm['world'].barrier()
 
 
 class AscentPlugin(BaseSolnPlugin):

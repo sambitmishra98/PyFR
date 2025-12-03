@@ -129,6 +129,16 @@ class BaseIntegrator:
         self.lb_stop_relocating  = False
         self.lb_patience         = 10
 
+        # Cost scales
+        self.lb_cost_scale_g1r  = self.cfg.getfloat('partition', 'lb-cost-scale-g1r',  1.0)
+        self.lb_cost_scale_g1s  = self.cfg.getfloat('partition', 'lb-cost-scale-g1s',  1.0)
+        self.lb_cost_scale_g1rt = self.cfg.getfloat('partition', 'lb-cost-scale-g1rt', 0.0)
+
+        if rank['compute'] == root['compute']:
+            print(f"Cost = g1a "
+              f"- {self.lb_cost_scale_g1r}*R₁ - {self.lb_cost_scale_g1s}*S₁ "
+              f"+ {self.lb_cost_scale_g1rt}*R₁ᵀ")
+
         # Smoothly step to target time in the last near_t steps
         self.aminf = self.cfg.getfloat('solver-time-integrator', 
                                           'dt-adjust-min-fact', 0.9)
@@ -259,9 +269,6 @@ class BaseIntegrator:
 
 
     def _get_plugins(self, initsoln):
-
-        self.initialise_comm_and_partition(goal='plugins')
-        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
 
         plugins = []
 
@@ -541,7 +548,7 @@ class BaseIntegrator:
         _append_csv_row('g1-send-median-ms.csv', mcols, _flatten_offdiag_values(send_us_w))
         _append_csv_row('g1-recv-median-ms.csv', mcols, _flatten_offdiag_values(recv_us_w))
 
-    def compute_cost(self, g1a, g1s, g1r, scale=1.0):
+    def compute_cost(self, g1a, g1s, g1r):
         P_old = len(g1a)
 
         g1a_old = np.asarray(g1a, dtype=float)
@@ -555,11 +562,13 @@ class BaseIntegrator:
         r_in  = g1r_old.sum(axis=1)
         r_out = g1r_old.sum(axis=0)
 
-        cost_old = g1a_old - (r_in + s_out) * scale + r_out * scale
+        cost_old = g1a_old - r_in  * self.lb_cost_scale_g1r \
+                           - s_out * self.lb_cost_scale_g1s \
+                           + r_out * self.lb_cost_scale_g1rt
 
         return cost_old
 
-    def calc_target_ecounts(self, ecurrs, g1a, g1s, g1r, scale=1.0):
+    def calc_target_ecounts(self, ecurrs, g1a, g1s, g1r):
         """
         Builds target element counts using MPI wait-split data.
         Returns integer per-rank targets in *newcompute* comm
@@ -578,7 +587,7 @@ class BaseIntegrator:
                 "[get_target] rank is not in newcompute but still reached get_target"
             )
 
-        cost_old = self.compute_cost(g1a, g1s, g1r, scale=scale)
+        cost_old = self.compute_cost(g1a, g1s, g1r)
 
         # --- Restrict world-indexed element counts to old compute ranks ---
 

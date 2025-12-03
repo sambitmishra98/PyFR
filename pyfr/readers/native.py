@@ -1916,28 +1916,6 @@ class _MetaMesh:
             if moved_glob == 0:
                 break
 
-
-
-    def _rebuild_counts_and_graph(self):
-        # Recompute element counts per world rank (for each etype then sum)
-        self._rank_counts = np.zeros(self.n_ranks, dtype=np.int64)
-        for etype, per_rank in self.eidxs_j.items():
-            for r, arr in per_rank.items():
-                self._rank_counts[r] += arr.size
-
-        # Rebuild connectivity graph / Laplacian if you cache it
-        self._build_rank_graph()
-
-    def _build_gid_lookup(self):
-        """Build `{etype: {gid: (rank, local_idx)}}` once from eidxs_j."""
-        self._gid_lookup = {}
-        for etype, per_rank in self.eidxs_j.items():
-            lut = {}
-            for r, arr in per_rank.items():
-                for lid, gid in enumerate(arr):
-                    lut[int(gid)] = (r, lid)
-            self._gid_lookup[etype] = lut
-
     def _locate_elements(self, etype, gids):
         """Return arrays of (owner_rank, local_idx) for given gids."""
         lut = self._gid_lookup[etype]
@@ -2125,9 +2103,9 @@ class _MetaMesh:
                     flush=True,
                 )
 
-        # 2) Choose rank_b: neighbour of rank_a with minimal MPI faces, then
-        #    broadcast so everybody sees the same value.
-        rb_local = self._pick_rank_b_min_mpi_faces_local(rank_a)
+        # 2) Choose rank_b: neighbour of rank_a with a suitable interface for
+        #    the seed_etype (prefer neighbours with many faces of that etype).
+        rb_local = self._pick_rank_b_min_mpi_faces_local(rank_a, etype=seed_etype)
         rank_b = int(comm['world'].bcast(int(rb_local), root=rank_a))
 
         if this_rank == root['world']:
@@ -2173,11 +2151,28 @@ class _MetaMesh:
                         flush=True,
                     )
             else:
-                print(
-                    f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
-                    f"on interface (R{rank_a}, R{rank_b}); nothing donated",
-                    flush=True,
-                )
+                # Fallback: no seed_etype on this interface, but we still want to
+                # seed the new rank with *something* of seed_etype from rank_a.
+                cur = np.asarray(self.eidxs_i.get(seed_etype, ()), dtype=np.int64)
+
+                if cur.size:
+                    sel = cur[: int(n_seed_per_etype)]
+                    eidxs_diff.setdefault(int(new_rank), {})[seed_etype] = sel
+                    print(
+                        f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
+                        f"on interface (R{rank_a}, R{rank_b}); "
+                        f"fallback donating {sel.size} local {seed_etype} "
+                        f"element(s) to R{new_rank}: {sel.tolist()}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
+                        f"on interface (R{rank_a}, R{rank_b}) and has no local "
+                        f"{seed_etype} elements; nothing donated",
+                        flush=True,
+                    )
+
 
         # 4) Apply the seeding relocation collectively
         self._apply_plan_and_commit(eidxs_diff)
@@ -2230,7 +2225,7 @@ class _MetaMesh:
                 M0   = self.element_flow_plan(cur0, target_counts, mask)
 
                 if step[0] == 'vertices':
-                    self.diffuse_smoothing_vertices(M0,)
+                    self.diffuse_smoothing_vertices(M0,skip_last=True)
                 elif step[0] == 'faces':
                     self.diffuse_smoothing_edges(M0, threshold=step[1])
                     #self.diffuse_smoothing2(M0, mode='faces', threshold=step[1],

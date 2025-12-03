@@ -95,13 +95,18 @@ class BaseSystem:
         # Observed input/output bank numbers
         self._rhs_uin_fout = set()
 
-    def _load_eles(self, mesh, initsoln, nregs, nonce):
+    def _setup_elemap(self, mesh):
         basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
 
         # Load the elements
         elemap = {etype: self.elementscls(basismap[etype], spts, self.cfg)
                   for etype, spts in mesh.spts.items()}
 
+        return elemap
+
+    def _load_eles(self, mesh, initsoln, nregs, nonce):
+
+        elemap = self._setup_elemap(mesh)
         eles = list(elemap.values())
 
         # Set the initial conditions
