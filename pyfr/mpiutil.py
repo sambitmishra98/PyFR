@@ -320,24 +320,10 @@ def autofree(obj):
 
 
 class _CommView:
-    """
-    Lightweight view over MPICommInfo.comm
-
-    Usage
-    -----
-    comm['world']      -> MPI_Comm for 'world'
-    comm['compute']    -> MPI_Comm for 'compute' (may be COMM_NULL)
-    comm.world         -> same as comm['world']
-    comm.compute       -> same as comm['compute']
-
-    If you use an unknown name, you get KeyError (via get_comm_info).
-    """
-    def __getitem__(self, name: str = 'world'):
-        info = get_comm_info(name)
-        return info.comm
+    def __getitem__(self, name):
+        return comm_rank_roots[name].comm
 
     def __getattr__(self, name: str):
-        # Allow dot-style access: comm.world, comm.compute, etc.
         return self[name]
 
 
@@ -349,9 +335,8 @@ class _RankView:
     rank['compute']    -> int local rank in 'compute', or None if COMM_NULL
     rank.world         -> same as rank['world']
     """
-    def __getitem__(self, name: str = 'world'):
-        info = get_comm_info(name)
-        return info.rank
+    def __getitem__(self, name):
+        return comm_rank_roots[name].rank
 
     def __getattr__(self, name: str):
         return self[name]
@@ -365,9 +350,8 @@ class _RootView:
     root['compute']    -> root for 'compute', or None if COMM_NULL
     root.world         -> same as root['world']
     """
-    def __getitem__(self, name: str = 'world'):
-        info = get_comm_info(name)
-        return info.root
+    def __getitem__(self, name: str):
+        return comm_rank_roots[name].root
 
     def __getattr__(self, name: str):
         return self[name]
@@ -381,9 +365,8 @@ class _RankMapView:
     rankmap['compute']    -> e.g. [0, 2, 4]
     rankmap.world         -> same as rankmap['world']
     """
-    def __getitem__(self, name: str = 'world'):
-        info = get_comm_info(name)
-        return info.rankmap
+    def __getitem__(self, name: str):
+        return comm_rank_roots[name].rankmap
 
     def __getattr__(self, name: str):
         return self[name]
@@ -395,7 +378,7 @@ class _ExecView:
     executes fn() only on ranks active in communicator 'compute'.
     """
     def __getitem__(self, name: str):
-        info = get_comm_info(name)
+        info = comm_rank_roots[name]
 
         def _run(fn, default=None):
             if info.active:

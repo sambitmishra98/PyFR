@@ -1,14 +1,18 @@
 from dataclasses import dataclass, field, replace
+
+from collections import defaultdict
+
 import re
 from copy import deepcopy
 
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, List
 
 import h5py
 import numpy as np
 
 from pyfr.inifile import Inifile
-from pyfr.mpiutil import (AlltoallMixin, Scatterer, SparseScatterer, autofree, get_comm_info,
+from pyfr.mpiutil import (AlltoallMixin, Scatterer, SparseScatterer, 
+                          autofree, get_comm_info,
                           mpi, comm, rank, root, rankmap)
 from pyfr.nputil import iter_struct
 
@@ -17,13 +21,18 @@ from pyfr.shapes import BaseShape
 
 from tabulate import tabulate
 
-
-import time
-from functools import wraps
-from collections import defaultdict
-
 import os
 
+def _append_csv_row(file_path: str, header_cols: list[str], values: list[int]):
+    # TODO: Connect with pyfr.writers.csv.py
+
+    if not os.path.exists(file_path):
+        with open(file_path, 'w', newline='') as f:
+            f.write(','.join(header_cols) + '\n')
+
+    # Append row
+    with open(file_path, 'a', newline='') as f:
+        f.write(','.join(str(int(v)) for v in values) + '\n')
 
 @dataclass
 class _Mesh:
@@ -55,63 +64,123 @@ class _Mesh:
 
 _CON_UNFILLED = -2
 
-@dataclass(slots=True)
+@dataclass
 class State:
-    """Swappable per-rank element state (indices + light fields)."""
-    eidxs: Dict[str, np.ndarray]       # etype -> (Ne,) int64 GIDs
-    con: Dict[str, np.ndarray]         # etype -> (Ne, nfaces, ncols) int64
-    spts_nodes: Dict[str, np.ndarray]  # etype -> (Ne, nverts) int64
-    centroids: Dict[str, np.ndarray] = field(default_factory=dict)  # etype -> (Ne, 3) float64
+    eidxs:      Dict[str, np.ndarray]
+    con_idx:    Dict[str, np.ndarray]
+    con_mpi:    Dict[str, np.ndarray]
+
+    spts_nodes: Dict[str, np.ndarray]
+
+    eidxs_flat:   np.ndarray       = None
+    etype_slices: Dict[str, slice] = None
+    etypes:       List[str]        = None
+
+    def __post_init__(self):
+        self.etypes = self._mpi_sorted_union(self.eidxs.keys()) 
+
+        self.eidxs_flat, self.etype_slices = State._eidxs_to_flat(self.eidxs)
+
+    @property
+    def nelems_etype(self) -> Dict[str, int]:
+        return {et: self.eidxs.get(et, np.empty(0)).size for et in self.etypes}
+
+    @staticmethod
+    def _clone_no_mpi(src: "State") -> "State":
+        new = State.__new__(State)  # bypass __init__/__post_init__
+
+        # Deep-copy the data dicts (logic preserved: independent arrays)
+        new.eidxs      = {et: arr.copy() for et, arr in src.eidxs.items()}
+        new.con_mpi    = {et: arr.copy() for et, arr in src.con_mpi.items()}
+        new.con_idx    = {et: arr.copy() for et, arr in src.con_idx.items()}
+        new.spts_nodes = {et: arr.copy() for et, arr in src.spts_nodes.items()}
+
+        # Reuse meta-structure exactly as-is (no MPI, no recomputation)
+        new.eidxs_flat   = src.eidxs_flat.copy() if src.eidxs_flat is not None else None
+        new.etype_slices = dict(src.etype_slices) if src.etype_slices is not None else None
+        new.etypes       = list(src.etypes) if src.etypes is not None else None
+
+        return new
 
     def clone(self) -> "State":
-        # Deepcopy is fine here; these are small-ish, per-rank, and we want isolation.
-        return State(deepcopy(self.eidxs),      deepcopy(self.con), 
-                     deepcopy(self.spts_nodes), deepcopy(self.centroids),
-        )
-
-    def relocate_to(self, eidxs_dest: Dict[str, np.ndarray]) -> "State":
-        """Relocate con and spts_nodes from self.eidxs -> eidxs_dest."""
+        return State._clone_no_mpi(self)
+    def relocate_to(self, eidxs_dest: Dict[str, np.ndarray], 
+                    move_spts_nodes = True):
         inter = _MeshInterconnector(self.eidxs, eidxs_dest)
-        return State(
-            eidxs=eidxs_dest,
-            con=inter.relocate(self.con, edim=0),
-            spts_nodes=inter.relocate(self.spts_nodes, edim=0),
-            centroids=inter.relocate(self.centroids, edim=0),
-        )
+        return State(eidxs=eidxs_dest,
+                        con_mpi=inter.relocate(self.con_mpi, edim=0),
+                        con_idx=inter.relocate(self.con_idx, edim=0),
+                     spts_nodes=inter.relocate(self.spts_nodes, edim=0) if move_spts_nodes else self.spts_nodes)
+
+    @staticmethod
+    def _mpi_sorted_union(local):
+        return sorted(set().union(*comm['world'].allgather(set(local))))
+
+    @staticmethod
+    def _eidxs_to_flat(eidxs):
+
+        # Global, consistent etype ordering
+        etypes = State._mpi_sorted_union(eidxs.keys())
+
+        # Per-etype local max GID
+        max_local = np.empty(len(etypes), dtype=np.int64)
+        for k, et in enumerate(etypes):
+            arr = np.asarray(eidxs.get(et, ()), dtype=np.int64)
+            max_local[k] = arr.max() if arr.size else -1
+
+        # Allgather to get per-etype global max GID
+        all_max = comm['world'].allgather(max_local)
+        if all_max:
+            max_global = np.max(np.stack(all_max, axis=0), axis=0)
+        else:
+            max_global = np.empty(len(etypes), dtype=np.int64)
+
+        # Fixed offsets per etype (same on all ranks, all topologies)
+        offsets_et: Dict[str, int] = {}
+        off = 0
+        for k, et in enumerate(etypes):
+            mg = int(max_global[k])
+            width = (mg + 1) if mg >= 0 else 0
+            offsets_et[et] = off
+            off += width
+        # 'off' is max_global_id + 1; owners_global will be length 'off'
+
+        pieces: list[np.ndarray] = []
+        etype_slices: Dict[str, slice] = {}
+        start_local_flat = 0
+
+        for et in etypes:
+            gids = np.asarray(eidxs.get(et, ()), dtype=np.int64)
+            ne_loc = gids.size
+
+            if ne_loc == 0:
+                etype_slices[et] = slice(start_local_flat, start_local_flat)
+                continue
+
+            base = int(offsets_et[et])
+            gidxs = base + gids  # stable global IDs
+
+            pieces.append(gidxs)
+            etype_slices[et] = slice(start_local_flat, start_local_flat + ne_loc)
+            start_local_flat += ne_loc
+
+        eidxs_flat = np.concatenate(pieces) if pieces else np.empty(0, dtype=np.int64)
+
+        Ne_loc = int(eidxs_flat.size)
+        Ne_glob = int(off)  # max_global_id + 1 (may be >= true Ne_total if GIDs have holes)
+
+        return eidxs_flat, etype_slices
+
+
+    @staticmethod
+    def _flat_to_eidxs(eidxs_flat, etype_slices):
+        eidxs_flat = np.asarray(eidxs_flat, dtype=np.int64)
+        return {et: eidxs_flat[sl].copy() for et, sl in etype_slices.items()}
 
 
 class _MetaMesh:
-
-    __slots__ = ("etypes", "e2i", "bc2id", "mesh_src", "mesh_dest", "i", "j",
-        "mpi_vertex_union", "_cache", "_ver", "_prof", 
-        "centroids", "_cores"
-    )
-
-    # simple inclusive-time profiler for bound methods on _MetaMesh (or others with _prof)
-    def fff(fn):
-        name = fn.__qualname__
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            t0 = time.perf_counter()
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                dt = time.perf_counter() - t0
-                # record on instance if available; else drop on the floor
-                if args and hasattr(args[0], '_prof'):
-                    prof = args[0]._prof
-                    tot, cnt = prof.get(name, (0.0, 0))
-                    prof[name] = (tot + dt, cnt + 1)
-        return wrapper
-
-    def _invalidate_topology(self) -> None:
-        """Bump topology epoch and drop caches that depend on eidx ownership."""
-        self._ver['topology'] = int(self._ver.get('topology', 0)) + 1
-        # Conservative: clear all known topology-dependent entries.
-        self._cache.pop('owners_map', None)
-        self._cache.pop('nei_gid_sets', None)
-
-    def __init__(self, *, mesh_src: _Mesh, etypes, e2i, bc2id, i: State, j: State):
+    def __init__(self, *, mesh_src: _Mesh, etypes, e2i, bc2id, 
+                 i: State, j: State):
         self.mesh_src  = mesh_src
         self.mesh_dest = None
         self.etypes    = list(etypes)
@@ -119,16 +188,99 @@ class _MetaMesh:
         self.bc2id     = dict(bc2id)
         self.i         = i
         self.j         = j
-        self.mpi_vertex_union = None
         self._cache = {}
         self._ver = {'topology': 0}
-        self._prof = {}
-        self.centroids = {}
 
-    # --- tiny helpers (widely reused) ---
-    def _eids_i(self, et: str) -> np.ndarray:
-        """Fast path: (Ne,) int64 view of current GIDs for an etype."""
-        return np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
+        self._spts_valid = True
+
+        self._gids_i_flat = None      # np.ndarray[int64], shape (Ne_local,)
+        self._etype_i_flat = None     # np.ndarray[int8],  shape (Ne_local,)
+        self._etype_i_idx = None      # dict[str, np.ndarray[int64]] (indices into flat)
+
+        # default cost scales for wait-split → targets
+        self.lb_cost_scale_g1r  = 1.0
+        self.lb_cost_scale_g1s  = 1.0
+        self.lb_cost_scale_g1rt = 1.0
+
+    def _invalidate_topology(self) -> None:
+        """Bump topology epoch and drop caches that depend on eidx ownership."""
+        self._ver['topology'] += 1
+
+        # TODO: more fine-grained invalidation later; for now just wipe
+        self._cache.pop('owners_map', None)
+        self._cache.pop('nei_gid_sets', None)
+
+    class _FlatView:
+        __slots__ = ("gids", "etypes", "et_offsets", "et_index", "lids")
+
+        def __init__(self, gids, etypes, et_offsets, et_index, lids):
+            self.gids = gids              # (Ne_loc,) int64 global element IDs
+            self.etypes = etypes          # tuple[str, ...] in canonical order
+            self.et_offsets = et_offsets  # (n_et+1,) int64 prefix sums per etype
+            self.et_index = et_index      # (Ne_loc,) int16 etype index per element
+            self.lids = lids              # (Ne_loc,) int64 lid within that etype
+
+    def _flat_state(self, which: str):
+        if which not in ("i", "j"):
+            raise ValueError(f"which must be 'i' or 'j', got {which!r}")
+
+        # Pick the per-etype eidxs view
+        if which == "i":
+            eidxs = self.eidxs_i
+        else:
+            eidxs = self.eidxs_j
+
+        etypes = list(self.etypes)
+
+        gids_blocks = []
+        et_index_blocks = []
+        lid_blocks = []
+        offsets = [0]
+
+        for k, et in enumerate(etypes):
+            arr = np.asarray(eidxs.get(et, ()), dtype=np.int64)
+            n = int(arr.size)
+            if n:
+                gids_blocks.append(arr)
+                et_index_blocks.append(np.full(n, k, dtype=np.int16))
+                lid_blocks.append(np.arange(n, dtype=np.int64))
+            offsets.append(offsets[-1] + n)
+
+        if gids_blocks:
+            gids = np.concatenate(gids_blocks)
+            et_index = np.concatenate(et_index_blocks)
+            lids = np.concatenate(lid_blocks)
+        else:
+            gids = np.empty(0, dtype=np.int64)
+            et_index = np.empty(0, dtype=np.int16)
+            lids = np.empty(0, dtype=np.int64)
+
+        et_offsets = np.asarray(offsets, dtype=np.int64)
+
+        return _MetaMesh._FlatView(
+            gids=gids,
+            etypes=tuple(etypes),
+            et_offsets=et_offsets,
+            et_index=et_index,
+            lids=lids,
+        )
+
+
+    def _flat_owner_and_pos(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        owners_flat[g] = world rank that owns global flat index g
+        pos_flat[g]    = local flat row index on that owner, or -1
+        """
+        eflat = self.i.eidxs_flat
+        Ne_glob = comm['world'].allreduce(eflat.size, op=mpi.MAX)  # or use _eidxs_to_flat info
+        # Build owners as you already do in _get_global_owner_array
+        owners_flat = self._get_global_owner_array()  # length Ne_glob
+
+        # Local pos: only fill for gids we own
+        pos_flat = np.full_like(owners_flat, -1, dtype=np.int64)
+        pos_flat[eflat] = np.arange(eflat.size, dtype=np.int64)
+
+        return owners_flat, pos_flat
 
     def _etype_order(self):
         """
@@ -149,74 +301,173 @@ class _MetaMesh:
         # Filter to mesh-present etypes, preserving order
         return [et for et in base if et in available]
 
-    @fff
-    def _apply_plan_and_commit(self, eidxs_diff: Dict[int, Dict[str, np.ndarray]]) -> None:
-        """Common relocate pattern (reset -> build j -> accept)."""
-        self._reset_j_with_i()
-        self.relocate_i_to_j(eidxs_diff)
+    def _compute_restrict_last(self, skip_last: bool, etypes_all: list[str]) -> dict[int, bool]:
+        """
+        Device-aware 'protected etype' policy.
+
+        Returns
+        -------
+        restrict_last : dict[int, bool]
+            Mapping world-rank -> True if we should *protect* the last etype
+            on interfaces to that rank (i.e. do not export the last etype).
+        """
+        if not (skip_last and etypes_all):
+            return {}
+
+        local_order = tuple(etypes_all)
+        orders_all  = comm['world'].allgather(local_order)  # list[tuple]
+        restrict_last = {
+            int(r): (tuple(o) != local_order)
+            for r, o in enumerate(orders_all)
+        }
+        return restrict_last
+
+    def _apply_plan_and_commit(self, eidxs_diff, move_spts_nodes=True) -> None:
+        # self._reset_j_with_i()
+        eidxs_dest = self.plan_eidxs_dest_from_diff(eidxs_diff)
+
+        # fast path using mesh-global flat indexing from State
+        fast_conn = _MetaMeshInterconnector(
+            eidxs_src        = self.i.eidxs,
+            eidxs_dest       = eidxs_dest,
+            etypes           = self.etypes,
+            eidxs_flat_src   = self.i.eidxs_flat,
+            etype_slices_src = self.i.etype_slices,
+        )
+
+        spts_new = (
+            fast_conn.relocate_cons(self.i.spts_nodes)
+            if move_spts_nodes else
+            self.i.spts_nodes
+        )
+
+        self.j = State(
+            eidxs=eidxs_dest,
+            con_mpi=fast_conn.relocate_cons(self.i.con_mpi),
+            con_idx=fast_conn.relocate_cons(self.i.con_idx),
+            spts_nodes=spts_new,
+        )
+
         self._accept_j_into_i()
+        self._ne_i = self._local_count()
+        self._invalidate_topology()
+        if not move_spts_nodes:
+            self._spts_valid = False
 
+        
     def _local_count(self) -> int:
-        """Total elements on this rank (all etypes)."""
-        return int(sum(len(self.eidxs_i.get(et, ())) for et in self.etypes))
+        # Setup without flat_state
+        return sum(len(eidxs) for eidxs in self.eidxs_i.values())
+        
+        # return int(self._flat_state('i').gids.size)
 
-    # --- profiling helpers ---
-    def _prof_reset(self):
-        self._prof.clear()
+    def _cur_counts_total(self) -> list[int]:
+        local_nelems = self._local_count()
+        return list(comm['world'].allgather(int(local_nelems)))
 
-    def _prof_print_and_reset(self, topk: int = 20):
-        """Gather per-rank (time, calls) by function, print at root, then reset."""
+    def counts_per_etype_flat(self, which: str = 'i') -> np.ndarray:
+        fv = self._flat_state(which)
+        net = len(self.etypes)
+        if fv.gids.size == 0:
+            return np.zeros(net, dtype=np.int64)
 
-        # local -> list of tuples for easier aggregation
-        loc = [(k, float(v[0]), int(v[1])) for k, v in self._prof.items()]
-        all_loc = comm['world'].gather(loc, root=root['world'])
-
-        if rank['world'] == root['world']:
-            agg = defaultdict(lambda: [0.0, 0])
-            for lst in all_loc:
-                for name, t, c in lst:
-                    agg[name][0] += t
-                    agg[name][1] += c
-
-            rows = []
-            total_time = sum(t for t, _ in agg.values()) or 1e-12
-            for name, (t, c) in agg.items():
-                rows.append([name, f"{t:8.3f}", f"{c:7d}", f"{(t/c*1000.0) if c else 0:8.3f}", f"{100.0*t/total_time:6.2f}%"])
-            # sort by total time desc
-            rows.sort(key=lambda r: -float(r[1]))
-
-            headers = ["function", "time_s", "calls", "avg_ms", "share"]
-            print("\n[prof] timing per iterate (aggregated across ranks)")
-            print(tabulate(rows[:topk], headers=headers, tablefmt='github',
-                           colalign=('left','right','right','right','right')))
-        # reset everywhere
-        self._prof_reset()
+        return np.bincount(fv.et_index.astype(np.int64, copy=False), minlength=net)
 
     @property
     def eidxs_i(self): return self.i.eidxs
+
     @property
-    def con_i(self): return self.i.con
+    def con_mpi_i(self): return self.i.con_mpi
+    
+    @property
+    def con_idx_i(self): return self.i.con_idx
+
     @property
     def spts_nodes_i(self): return self.i.spts_nodes
-    @property
-    def centroids_i(self): return self.i.centroids
 
     @property
     def eidxs_j(self): return self.j.eidxs
     @eidxs_j.setter
     def eidxs_j(self, v): self.j.eidxs = v
+
     @property
-    def con_j(self): return self.j.con
-    @con_j.setter
-    def con_j(self, v): self.j.con = v
+    def con_mpi_j(self): return self.j.con_mpi
+    @con_mpi_j.setter
+    def con_mpi_j(self, v): self.j.con_mpi = v
+
+    @property
+    def con_idx_j(self): return self.j.con_idx
+    @con_idx_j.setter
+    def con_idx_j(self, v): self.j.con_idx = v
+
     @property
     def spts_nodes_j(self): return self.j.spts_nodes
     @spts_nodes_j.setter
     def spts_nodes_j(self, v): self.j.spts_nodes = v
+
     @property
-    def centroids_j(self): return self.j.centroids
-    @centroids_j.setter
-    def centroids_j(self, v): self.j.centroids = v
+    def ntotal(self) -> int:
+        """Total elements across all ranks."""
+        local_nelems = self._local_count()
+        return int(comm['world'].allreduce(local_nelems, op=mpi.SUM))
+
+    @property
+    def twoway_mask(self) -> np.ndarray:
+        """
+        Symmetric two-way adjacency mask between *compute* ranks, derived
+        from con_mpi / con_idx.
+
+        twoway_mask[r, s] == True  ⇔  there exists at least one face on rank r
+        whose neighbour is owned by rank s (s ≠ r).
+
+        Indexed in compute-rank order.
+        """
+
+        commc = comm['compute']
+        if commc == mpi.COMM_NULL:
+            return np.zeros((0, 0), dtype=np.bool_)
+
+        R_comp = commc.size
+        comp_wrs = list(rankmap['compute'])
+        assert len(comp_wrs) == R_comp
+
+        w2c = {int(wr): int(i) for i, wr in enumerate(comp_wrs)}
+
+        my_wr = int(rank['world'])
+        my_cr = w2c.get(my_wr, None)
+
+        loc = np.zeros((R_comp, R_comp), dtype=np.bool_)
+
+        if my_cr is not None:
+            for et in self.etypes:
+                con_mpi_et = self.i.con_mpi[et]
+                if con_mpi_et is None:
+                    continue
+
+                owners = np.asarray(con_mpi_et, dtype=np.int64)[..., 0]
+                if owners.size == 0:
+                    continue
+
+                # neighbour owner ≥ 0, and not myself
+                m = (owners >= 0) & (owners != my_wr)
+                if not np.any(m):
+                    continue
+
+                nbr_world = np.unique(owners[m].astype(np.int64))
+                for ow in nbr_world:
+                    oc = w2c[ow]
+                    if oc is None or oc == my_cr:
+                        continue
+                    loc[my_cr, oc] = True
+                    loc[oc, my_cr] = True
+
+        mask = np.zeros_like(loc, dtype=np.bool_)
+        commc.Allreduce(loc, mask, op=mpi.LOR)
+        np.fill_diagonal(mask, False)
+        return mask
+
+
+
 
     # -----------------
     # Looking into mesh 
@@ -231,311 +482,284 @@ class _MetaMesh:
         """Number of faces in an element of a given etype."""
         return len(subclass_where(BaseShape, name=etype).faces)
 
-    @staticmethod
-    def _mpi_sorted_union(local):
-        """Sorted union of a locally defined set across all ranks."""
-        return sorted(set().union(*comm['world'].allgather(set(local))))
-
-    # -----------------
-    # _Mesh <--> _MetaMesh
-
     @classmethod
     def from_mesh(cls, mesh: _Mesh) -> "_MetaMesh":
 
-        etypes   = cls._mpi_sorted_union(set(mesh.etypes or ()))
-        bc_names = cls._mpi_sorted_union(set((mesh.bcon or {}).keys()))
+        etypes   = State._mpi_sorted_union(set(mesh.etypes or ()))
+        bc_names = State._mpi_sorted_union(set((mesh.bcon or {}).keys()))
         e2i      = {et: i for i, et in enumerate(etypes)}
         bc2id    = {n: i for i, n in enumerate(bc_names)}
 
         eidxs = {et: np.asarray(mesh.eidxs.get(et, ()), dtype=np.int64)
                 for et in etypes}
-        con   = {et: np.full((eidxs[et].size, cls._nfaces(et), 4),
-                            _CON_UNFILLED, np.int64)
-                for et in etypes}
+        con_mpi = {et: np.full((eidxs[et].size, cls._nfaces(et)), _CON_UNFILLED, np.int64) for et in etypes}
+        con_idx = {et: np.full((eidxs[et].size, cls._nfaces(et)), _CON_UNFILLED, np.int64) for et in etypes}
+
         spts_nodes = deepcopy(mesh.spts_nodes)
+        # After self.i is fully built:
 
         mm = cls(mesh_src=mesh, etypes=etypes, e2i=e2i, bc2id=bc2id,
-                i=State(eidxs=deepcopy(eidxs), con=deepcopy(con),
-                        spts_nodes=deepcopy(spts_nodes),),
-                j=State(eidxs=deepcopy(eidxs), con=deepcopy(con), 
-                        spts_nodes=deepcopy(spts_nodes),)
-                )
+            i=State(eidxs=deepcopy(eidxs), con_mpi=deepcopy(con_mpi), con_idx=deepcopy(con_idx), spts_nodes=deepcopy(spts_nodes),),
+            j=State(eidxs=deepcopy(eidxs), con_mpi=deepcopy(con_mpi), con_idx=deepcopy(con_idx), spts_nodes=deepcopy(spts_nodes),)
+            )
+
         mm._encode_con(mesh)
         mm._fill_con_mpi(mesh)
 
-        # We need each element's centroid data too. 
-        # Computations can be performed with spts_nodes only.
-        # Output is 3-D coordinates of element centroids, so Nx3 per etype.
-        # Let us just get the appropriate centroid by taking average of vertices.
-        mm._init_centroids_from_mesh(mesh)
+        mm._ne_i = mm._local_count()
 
         return mm
 
-    @fff
+    # Switch from etype and local indexing within that etype to the global flat indexing
+    def etype_local_to_flat(self, etype: str, lids: np.ndarray) -> np.ndarray:
+        return self.i.eidxs_flat[self.i.etype_slices[etype].start + lids]
+
     def _encode_con(self, mesh):
         """
-            Encode the mesh connectivity as
-            con_i[etype][local_id, face_id] = (rank, i, ngid, nface)
-            where
-                rank  = rank owning the neighbor element ,    -1 for boundary
-                i     = idx of nbr etype in self.etypes  ,    -1 for boundary
-                ngid  = global ID of the neighbor element, bc_id for boundary
-                nface = face ID on the neighbor element  ,    -1 for boundary
+        Encode the *local* (same-rank) mesh connectivity and boundary faces as:
+
+            con_mpi[et][lid, f, 0] = neighbour owner rank (world index), or
+                                    -1 for boundary faces
+            con_idx[et][lid, f, 0] = neighbour global element ID (>= 0), or
+                                    gidx_bc = -(bc_id + 1) for boundaries
+
+        Global element IDs are the GIDs carried in State.eidxs_flat via
+        State._eidxs_to_flat.
         """
+
+        my_rank = int(rank['world'])
 
         conL, conR = (mesh.con or ([], []))
         bcon = getattr(mesh, 'bcon', {}) or {}
 
-        # Interior pairs: both sides are on *this* rank → owner_rank = rank
+        # Interior pairs: both sides are on *this* rank → owner_rank = my_rank
         for (etL, lidL, fL), (etR, lidR, fR) in zip(conL, conR):
-            gR = int(self.eidxs_i[etR][int(lidR)])
-            gL = int(self.eidxs_i[etL][int(lidL)])
-            self.con_i[etL][lidL, fL] = (int(rank['world']), self.e2i[etR], gR, int(fR))
-            self.con_i[etR][lidR, fR] = (int(rank['world']), self.e2i[etL], gL, int(fL))
+            etL = str(etL)
+            etR = str(etR)
 
-        # Boundary: owner=-1, code=-1, gid=bc_id, fid=-1
+            # neighbour global IDs via flat mapping
+            gR = int(self.etype_local_to_flat(etR, int(lidR)))
+            gL = int(self.etype_local_to_flat(etL, int(lidL)))
+
+            self.i.con_mpi[etL][int(lidL), int(fL)] = my_rank
+            self.i.con_idx[etL][int(lidL), int(fL)] = gR
+
+            self.i.con_mpi[etR][int(lidR), int(fR)] = my_rank
+            self.i.con_idx[etR][int(lidR), int(fR)] = gL
+
+        # Boundary: owner=-1, gidx=gidx_bc<0
         for bcname, triples in (bcon.items() if bcon else []):
-            bid = self.bc2id.get(bcname)
+            bid = self.bc2id[bcname]
             if bid is None:
                 continue
+
+            # strictly negative tag for all BCs
+            gidx_bc = -(int(bid) + 1)
+
             for et, lid, f in triples:
-                self.con_i[et][lid, f] = (-1, -1, int(bid), -1)
+                et = str(et)
+                self.i.con_mpi[et][int(lid), int(f)] = -1
+                self.i.con_idx[et][int(lid), int(f)] = gidx_bc
 
-    @fff
+                
     def _fill_con_mpi(self, mesh):
-        """
-        Fill nrank faces in con_i using mesh.con_p.
-
-        For each nbr,
-            build local list of MPI faces with their GIDs, 
-            allgather everyone's lists,
-            zip list with the nbr's reciprocal list to tag:
-            con_i[et, lid, fid] = (nbr, e2i[et_of_nbr], gid_of_nbr, fid_of_nbr)
-        """
         cp = getattr(mesh, "con_p", {}) or {}
 
-        # Our local export: {nbr: [(et, lid, fid, gid), ...]}
+        # Local export: {nbr: [(et, lid, fid, gidx_local), ...]}
         local = {
-            int(nbr): [(et, int(lid), int(fid), self.eidxs_i[et][int(lid)]) 
-                       for (et, lid, fid) in faces]
+            int(nbr): [
+                (
+                    str(et),
+                    int(lid),
+                    int(fid),
+                    int(self.etype_local_to_flat(str(et), int(lid))),  # gidx of THIS element
+                )
+                for (et, lid, fid) in faces
+            ]
             for nbr, faces in cp.items()
         }
 
-        # Everyone's exports
         all_cp = comm['world'].allgather(local)
 
+        my_rank = int(rank['world'])
+
         for nbr, A in local.items():
-            B = all_cp[int(nbr)].get(rank['world'], [])
-            for (etA, lidA, fA, _gidA), (etB, _lidB, fB, gidB) in zip(A, B):
-                self.con_i[etA][lidA, fA] = (int(nbr), self.e2i[etB], gidB, fB)
+            nbr = int(nbr)
+            # Faces where *this* rank is the neighbour of `nbr`
+            B = all_cp[nbr].get(my_rank, [])
 
-    @fff
-    def to_mesh(self, eidxs_dest):
-        ic = _MeshInterconnector(self.mesh_src.eidxs, eidxs_dest)
+            for (etA, lidA, fA, _gidxA), (etB, _lidB, fB, gidxB) in zip(A, B):
+                # Store neighbour owner + neighbour global ID
+                self.i.con_mpi[etA][lidA, fA] = nbr
+                self.i.con_idx[etA][lidA, fA] = int(gidxB)
 
-        mesh_int = replace(self.mesh_src, eidxs=eidxs_dest,
-            spts       =ic.relocate(self.mesh_src.spts,        edim=1), 
-            spts_nodes =ic.relocate(self.mesh_src.spts_nodes,  edim=0),
-            spts_curved=ic.relocate(self.mesh_src.spts_curved, edim=0),
-            faces_cidxs=ic.relocate(self.mesh_src.faces_cidxs, edim=0),
-            faces_offs =ic.relocate(self.mesh_src.faces_offs,  edim=0),
-            )
+        nfaces_mpi = sum(len(v) for v in local.values())
+        print(f"[con_mpi] rank={my_rank} nfaces_mpi={nfaces_mpi}")
 
-        self._reconstruct_con_conp_bcon(mesh_int)
 
-        eidxs_dest = self._apply_lex_ordering(mesh_int)
-        ic2 = _MeshInterconnector(mesh_int.eidxs, eidxs_dest)
-        
-        mesh_dest = replace(mesh_int, eidxs=eidxs_dest,
-            spts       =ic2.relocate(mesh_int.spts,        edim=1), 
-            spts_nodes =ic2.relocate(mesh_int.spts_nodes,  edim=0),
-            spts_curved=ic2.relocate(mesh_int.spts_curved, edim=0),
-            faces_cidxs=ic2.relocate(mesh_int.faces_cidxs, edim=0),
-            faces_offs =ic2.relocate(mesh_int.faces_offs,  edim=0),
-            )
-
-        self._reconstruct_con_conp_bcon(mesh_dest)
-
-        # Remove keys with empty entries
-        mesh_dest.eidxs = {k: v for k, v in mesh_dest.eidxs.items() if v.size}
-
-        return mesh_dest
-
-    @fff
-    def _reconstruct_con_conp_bcon(self, mesh):
-        
-        codec = list(mesh.codec or [])
-        mesh.bcon = {bc.split('/')[1]: [] for bc in codec if bc.startswith('bc/')}
-        
-        etypes = mesh.etypes
-        eidxs = {k: v.tolist() for k, v in mesh.eidxs.items()}
-        glmap = [{k: j for j, k in enumerate(eidxs[etype])} if etype in eidxs else {} for etype in etypes]
-
-        cdone, cefidx = [None]*len(codec), [None]*len(codec)
-        for cidx, c in enumerate(codec):
-            if (m := re.match(r'eles/(\w+)/(\d+)$', c)):
-                etype, fidx = m[1], m[2]
-                cdone[cidx] = set()
-                cefidx[cidx] = (etype, etypes.index(etype), int(fidx))
-
-        conl, conr = [], []
-        bcon = {i: [] for i, c in enumerate(codec) if c.startswith('bc/')}
-        resid = {}
-
-        for etype in etypes:
-            nfaces = self._nfaces(etype)
-            
-            efaces = np.empty((len(eidxs[etype]), nfaces), dtype=[('cidx', np.int16), ('off', np.int64)])
-            efaces['cidx'] = mesh.faces_cidxs.get(etype, np.empty((0, nfaces), np.int16))
-            efaces['off']  = mesh.faces_offs .get(etype, np.empty((0, nfaces), np.int64))
-
-            try:
-                for fidx, eface in enumerate(efaces.T):
-                    efcidx = codec.index(f'eles/{etype}/{fidx}')
-
-                    for j, (cidx, off) in enumerate(iter_struct(eface)):
-                        # Boundary
-                        if off == -1:
-                            bcon[cidx].append((etype, j, fidx))
-                        # Unpaired face
-                        elif j not in cdone[efcidx]:
-                            # Lookup the element type and face number
-                            ketype, ketidx, kfidx = cefidx[cidx]
-
-                            # If our rank has the element then pair it
-                            if (k := glmap[ketidx].get(off)) is not None:
-                                conl.append((etype, j, fidx))
-                                conr.append((ketype, k, kfidx))
-                                cdone[cidx].add(k)
-                            # Otherwise add it to the residual dict
-                            else:
-                                resid[efcidx, eidxs[etype][j]] = (cidx, off)
-            except Exception as e:
-                print(
-                    f"[_reconstruct_con_conp_bcon] ERROR on rank={rank['world']} "
-                    f"etype={etype}: {e.__class__.__name__}: {e}",
-                    flush=True
-                )
-                raise
-
-        # Add the internal connectivity to the mesh
-        mesh.con = (conl, conr)
-
-        for k, v in bcon.items():
-            if v:
-                mesh.bcon[codec[k][3:]] = v
-            else:
-                del mesh.bcon[codec[k][3:]]
-
-        neighbours = [i for i in range(comm['world'].size) if i != rank['world']]
-
-        ncomm = comm['world'].Create_dist_graph_adjacent(neighbours,
-                                                neighbours)
-
-        # Create a list of our unpaired faces
-        unpaired = list(resid.values())
-
-        # Distribute this to each of our neighbours
-        nunpaired = ncomm.neighbor_allgather(unpaired)
-
-        # See which of our neighbours unpaired faces we have
-        matches = [[resid[j] for j in nunp if j in resid] for nunp in nunpaired]
-
-        # Distribute this information back to our neighbours
-        nmatches = ncomm.neighbor_alltoall(matches)
-
-        for nrank, nmatch in zip(neighbours, nmatches):
-            if rank['world'] < nrank:
-                ncon = [r for l, r in sorted([(resid[m], m) for m in nmatch])]
-            else:
-                ncon = [l for l, r in sorted([(m, resid[m]) for m in nmatch])]
-
-            nncon = []
-            for cidx, off in ncon:
-                etype, etidx, fidx = cefidx[cidx]
-                nncon.append((etype, glmap[etidx][off], fidx))
-
-            # Add the connectivity to the mesh
-            mesh.con_p[nrank] = nncon
-
-        # Find elements sharing an MPI interface
-        ifmpi = {etype: [] for etype in self.etypes}
-        for nrank, ncon in mesh.con_p.items():
-            for etype, eidx, fidx in ncon:
-                ifmpi[etype].append(eidx)
-
-        for etype in self.etypes:
-            ifmpi[etype] = np.unique(ifmpi[etype])
-
-        # Size by number of elements of this etype on this rank
-        mesh.spts_internal = {
-            etype: np.ones(len(mesh.eidxs.get(etype, ())), dtype=bool)
-            for etype in self.etypes
-        }
-
-        for etype, eidxs_ifmpi in ifmpi.items():
-            if eidxs_ifmpi.size:
-                mesh.spts_internal[etype][eidxs_ifmpi.astype(int)] = False
-                
-        mesh.con_p = {k: v for k, v in mesh.con_p.items() if v}
-
-    @fff
-    def _apply_lex_ordering(self, mesh):
-        eidxs_dest = {}
-
-        for et in self.etypes:
-            gids = np.asarray(mesh.eidxs.get(et, ()), dtype=np.int64)
-            if not gids.size: eidxs_dest[et] = gids; continue
-            internal = mesh.spts_internal[et].astype(np.int8, copy=False)
-            curved   = mesh.spts_curved  [et].astype(np.int8, copy=False)
-            order = np.lexsort((gids, curved, internal))  # primary = internal
-            eidxs_dest[et] = gids[order]
-        
-        return eidxs_dest
-
-    @fff
-    def _compute_deltas(self, mode: str):
-        if   mode in ('faces',):    return self.calc_mpi_faces_deltas()
-        elif mode in ('vertices',): return self.calc_mpi_vertices_delta()
+    def _compute_deltas(self, mode):
+        if   mode == 'faces':    return self._calc_mpi_faces_deltas()
+        elif mode == 'vertices': return self._calc_mpi_vertices_deltas()
         else:
             raise ValueError(f"Unknown {mode = }' ≠ edges/vertices")
 
-    @fff
-    def _gid_owner_maps(self, eidxs) -> dict[str, dict[int, int]]:
+    def _calc_mpi_faces_deltas(self) -> dict[int, dict[str, np.ndarray]]:
         """
-        Compact (gid -> owner) per etype via one allgather.
-        Caching: if `eidxs` is exactly the current `self.eidxs_i`, return a cache
-        keyed by the current topology epoch; otherwise compute without caching.
+        Compute per-neighbour per-etype (lid, delta) matrices using the
+        owner column stored in con_mpi and neighbour gidx in con_idx.
+
+        For each element e and neighbour rank n:
+            c_me(e) = # faces of e whose neighbour owner == my_rank
+            c_n(e)  = # faces of e whose neighbour owner == n
+            delta   = c_me(e) - c_n(e)
+
+        For a given neighbour n and etype et we return all elements with
+        c_n(e) > 0 as an int64 array of shape (N, 2):
+            [ [lid_0, delta_0],
+            [lid_1, delta_1],
+            ...
+            ]
+        sorted by (delta, lid).
         """
-        # Only cache for the canonical "current" view of indices
-        if eidxs is self.eidxs_i:
-            gen = int(self._ver.get('topology', 0))
-            c   = self._cache.get('owners_map')
-            if c is not None and c.get('gen') == gen:
-                return c['map']
-            out = self._gid_owner_maps_uncached(eidxs)
-            self._cache['owners_map'] = {'gen': gen, 'map': out}
-            return out
-        # Cold path for foreign snapshots
-        return self._gid_owner_maps_uncached(eidxs)
+        my_rank = int(rank['world'])
+        empty = np.empty((0, 2), dtype=np.int64)
 
-    @fff
-    def _gid_owner_maps_uncached(self, eidxs) -> dict[str, dict[int, int]]:
+        # meta per etype: (boundary_lids, c_me_bound, owners_eff_bound)
+        per_et_meta: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray] | None] = {}
+        neighbor_ids: set[int] = set()
 
-        out: dict[str, dict[int, int]] = {}
         for et in self.etypes:
-            locg = np.asarray(eidxs.get(et, ()), dtype=np.int64)
-            gathered = comm['world'].allgather(locg)  # list of np.ndarrays
-            d: dict[int, int] = {}
-            for rr, arr in enumerate(gathered):
-                if isinstance(arr, np.ndarray) and arr.size:
-                    # one Python loop per contributor; no Nx2 arrays/vstack needed
-                    d.update({int(g): int(rr) for g in arr})
-            out[et] = d
+            con_mpi_et = self.i.con_mpi[et]
+            con_idx_et = self.i.con_idx[et]
+
+            if con_mpi_et.size == 0 or con_idx_et.size == 0:
+                per_et_meta[et] = None
+                continue
+
+            owners = np.asarray(con_mpi_et)
+            gidxs  = np.asarray(con_idx_et)
+
+            # Faces that connect to another element (drop BC/invalid faces)
+            valid = (gidxs >= 0) & (owners >= 0)
+
+            # Elements that see at least one MPI neighbour (owner != my_rank)
+            mpi_face_mask = valid & (owners != my_rank)
+            has_mpi_face  = np.any(mpi_face_mask, axis=1)
+
+            if not np.any(has_mpi_face):
+                per_et_meta[et] = None
+                continue
+
+            # Local element IDs that actually sit on MPI interfaces for this etype
+            lids_bnd = np.nonzero(has_mpi_face)[0].astype(np.int64, copy=False)
+
+            # Restrict owners/valid to just these boundary elements
+            owners_bnd = owners[has_mpi_face]
+            valid_bnd  = valid[has_mpi_face]
+
+            # Treat non-element faces (BCs etc.) as -1 so they do not contribute
+            owners_eff_bnd = np.where(valid_bnd, owners_bnd, -1)
+
+            # Neighbours seen anywhere on these boundary elements
+            uniq = np.unique(owners_eff_bnd)
+            uniq = uniq[(uniq >= 0) & (uniq != my_rank)]
+            for r in uniq:
+                neighbor_ids.add(int(r))
+
+            # Count faces attached to *this* rank for each boundary element
+            c_me_bnd = np.sum(owners_eff_bnd == my_rank,
+                            axis=1).astype(np.int16, copy=False)
+
+            per_et_meta[et] = (lids_bnd, c_me_bnd, owners_eff_bnd)
+
+        neighbor_set = sorted(neighbor_ids)
+        if not neighbor_set:
+            return {}
+
+        result: dict[int, dict[str, np.ndarray]] = {}
+
+        for nrank in neighbor_set:
+            nrank = int(nrank)
+            per_n: dict[str, np.ndarray] = {}
+
+            for et in self.etypes:
+                meta = per_et_meta[et]
+                if meta is None:
+                    per_n[et] = empty
+                    continue
+
+                lids_bnd, c_me_bnd, owners_eff_bnd = meta
+
+                # Faces to this neighbour for boundary elements only
+                c_n_bnd = np.sum(owners_eff_bnd == nrank,
+                                axis=1).astype(np.int16, copy=False)
+
+                sel = (c_n_bnd > 0)
+                if not np.any(sel):
+                    per_n[et] = empty
+                    continue
+
+                lids  = lids_bnd[sel]
+                delta = (c_me_bnd[sel] - c_n_bnd[sel]).astype(np.int64, copy=False)
+
+                mat = np.c_[lids, delta]
+                # Keep the previous ordering: by delta, then by lid
+                order = np.lexsort((mat[:, 0], mat[:, 1]))
+                per_n[et] = mat[order]
+
+            result[nrank] = per_n
+
+        return result
+
+
+
+
+    def collect_mpi_vertex_nodes(self) -> dict[int, np.ndarray]:
+        """
+        Return {nbr_rank: np.ndarray[int64]} = sorted-unique global vertex-node IDs
+        on MPI faces to that neighbor.
+        """
+
+        if not getattr(self, "_spts_valid", True):
+            raise RuntimeError(
+                "Vertex-based diffusion requested but spts_nodes are stale.\n"
+                "This usually means you ran edge-only smoothing with "
+                "move_spts_nodes=False and then called a vertex-based routine "
+                "on the same MetaMesh. Rebuild MetaMesh from a fresh mesh, or "
+                "keep move_spts_nodes=True in the preceding steps."
+            )
+
+        if not hasattr(self, "spts_nodes_i") or self.i.spts_nodes is None:
+            raise RuntimeError("self.i.spts_nodes missing")
+
+        # 1) which faces are MPI, grouped by neighbor
+        per_nbr_faces = self._mpi_faces_by_neighbor()
+
+        # 2) per-etype face->vertex columns
+        face_vtx_by_et = {et: self._face_vertex_indices(et) for et in self.etypes}
+
+        # 3) union vertex nodes per neighbor
+        out: dict[int, np.ndarray] = {}
+        for nbr, faces in per_nbr_faces.items():
+            vset: set[int] = set()
+            for et, lid, f in faces:
+                nds = self.i.spts_nodes[et]
+                if nds is None or nds.size == 0:
+                    continue
+                if lid < 0 or lid >= nds.shape[0]:
+                    continue
+                fv = face_vtx_by_et[et][int(f)]
+                verts = np.asarray(nds[int(lid), fv], dtype=np.int64).ravel()
+                for v in verts:
+                    iv = int(v)
+                    if iv >= 0:
+                        vset.add(iv)
+            out[int(nbr)] = (np.asarray(sorted(vset), dtype=np.int64)
+                             if vset else np.empty(0, dtype=np.int64))
+
         return out
 
-    @fff
-    def calc_mpi_vertices_delta(self) -> dict[int, dict[str, np.ndarray]]:
+    def _calc_mpi_vertices_deltas(self) -> dict[int, dict[str, np.ndarray]]:
         mvu = self.collect_mpi_vertex_nodes()
 
         all_sets  = [np.asarray(v, dtype=np.int64).ravel() for v in mvu.values() if v is not None]
@@ -569,234 +793,65 @@ class _MetaMesh:
         out: dict[int, dict[str, np.ndarray]] = {}
         for nrank, verts in mvu.items():
             vn  = np.asarray(verts, dtype=np.int64).ravel()
-            per = {et: per_et(self.spts_nodes_i.get(et), vn) for et in self.etypes}   # <<< _i here
+            per = {et: per_et(self.i.spts_nodes[et], vn) for et in self.etypes}
             out[int(nrank)] = per
         return out
 
-    @fff
-    def __build_moves_from_delta(self, deltas_by_rank, target_moves, etype_order=None):
-        order = [et for et in (etype_order or self.etypes) if et in self.etypes]
-
-        # Gather the min/max Δ to cap the search
-        def all_deltas():
-            for per_et in deltas_by_rank.values():
-                for et in order:
-                    a = per_et.get(et)
-                    if a is not None and a.size:
-                        yield from a[:, 1].tolist()
-
-        try:
-            dmin = min(all_deltas())
-            dmax = max(all_deltas())
-        except ValueError:
-            return {}
-
-        thresh = 0  # or start at dmin to be most permissive
-        chosen = {}
-        picked_once = set()
-
-        while len(picked_once) < target_moves and thresh <= dmax:
-            added = 0
-            for nrank in sorted(deltas_by_rank):
-                per_et = deltas_by_rank[nrank]
-                for et in order:
-                    arr = per_et.get(et)
-                    if arr is None or arr.size == 0:
-                        continue
-                    # allow Δ ≤ thresh (thresh grows even if we picked nothing last round)
-                    sel = arr[arr[:, 1] <= thresh]
-                    if sel.size == 0:
-                        continue
-                    lids = sel[:, 0].astype(np.int64, copy=False)
-                    gids = np.asarray(self.eidxs_i[et], np.int64)[lids]
-                    take = [int(g) for g in gids if g not in picked_once]
-                    if take:
-                        chosen.setdefault(int(nrank), {}).setdefault(et, set()).update(take)
-                        picked_once.update(take)
-                        added += len(take)
-                    if len(picked_once) >= target_moves:
-                        break
-                if len(picked_once) >= target_moves:
-                    break
-            # IMPORTANT: escalate even if added == 0
-            thresh += 1
-
-        return {int(n): {et: np.asarray(sorted(s), np.int64) for et, s in per.items() if s}
-                for n, per in chosen.items()}
-
-    def __build_parallel_moves_to_targets(self, target_counts: List[int],
-         rank_move_budget: Optional[List[int]] = None,
-         etype_order: Optional[List[str]] = None, *,
-         verbose: bool = True) -> Dict[int, Dict[str, np.ndarray]]:
-
-        R = len(target_counts)
-        tgt = np.asarray(target_counts, dtype=np.int64)
-
-        # ---- global symmetric neighbor graph (one allgather) ----
-        loc = set(self._mpi_faces_by_neighbor().keys())
-        rows = comm['world'].allgather(loc)
-        N = [set() for _ in range(R)]
-        for r, ns in enumerate(rows[:R]):
-            for s in ns:
-                if r != s:
-                    N[r].add(int(s)); N[int(s)].add(int(r))
-
-        # ---- global current counts and surplus/need ----
-        my_count = sum(len(self.eidxs_i.get(et, ())) for et in self.etypes)
-        cur = np.asarray(comm['world'].allgather(int(my_count)), dtype=np.int64)
-
-        surplus = np.maximum(0, cur - tgt)    # donors
-        need    = np.maximum(0, tgt - cur)    # receivers
-
-        if rank_move_budget is None:
-            budget = surplus.copy()
-        else:
-            budget = np.maximum(0, np.asarray(rank_move_budget, dtype=np.int64))
-
-        # ---- initial per-edge caps (receiver view) ----
-        caps = {r: {} for r in range(R)}      # caps[r][s] = max r may send to s
-        for s in range(R):
-            if need[s] == 0:
-                continue
-            donors = [r for r in N[s] if surplus[r] > 0]
-            if not donors:
-                continue
-            tot = int(sum(surplus[r] for r in donors))
-            if tot == 0:
-                continue
-
-            # proportional to donor surplus; integerize by largest remainder to match exactly need[s]
-            ideal  = {r: float(need[s]) * (float(surplus[r]) / float(tot)) for r in donors}
-            floors = {r: int(np.floor(ideal[r])) for r in donors}
-            left   = int(need[s] - sum(floors.values()))
-            if left > 0:
-                rema = sorted(((r, ideal[r] - floors[r]) for r in donors), key=lambda x: (-x[1], x[0]))
-                for r2, _ in rema:
-                    if left == 0: break
-                    floors[r2] += 1
-                    left -= 1
-
-            for r2 in donors:
-                # still edge-local for now
-                caps[r2][s] = int(min(floors[r2], surplus[r2], budget[r2]))
-
-        # ---- donor-pass clamp: enforce sum_s caps[r][s] <= budget[r] for every donor r ----
-        for r in range(R):
-            if not caps[r]:
-                continue
-            keys = sorted(caps[r])
-            vals = np.asarray([caps[r][s] for s in keys], dtype=np.int64)
-            total_cap = int(vals.sum())
-            b = int(min(budget[r], surplus[r], total_cap))
-            if total_cap <= b:
-                continue  # already within budget
-
-            # rescale proportionally, then integerize by largest remainder to sum exactly to b
-            if total_cap == 0 or b == 0:
-                for s in keys:
-                    caps[r][s] = 0
-                continue
-
-            prop = vals.astype(float) * (float(b) / float(total_cap))
-            floors = np.floor(prop).astype(int)
-            left = int(b - int(floors.sum()))
-            if left > 0:
-                rema = prop - floors
-                for i in np.argsort(-rema):
-                    if left == 0: break
-                    floors[i] += 1
-                    left -= 1
-            for i, s in enumerate(keys):
-                caps[r][s] = int(floors[i])
-
-        # ---- pick concrete elements guided by face-deltas (more negative is better) ----
-        deltas_by_rank = self.calc_mpi_faces_deltas()  # {nbr: {et: int64[N,2] [lid, delta]}}
-        order = [et for et in (etype_order or self.etypes) if et in self.etypes]
-
-        moves_by_rank: Dict[int, Dict[str, np.ndarray]] = {}
-        picked_gids_per_et: Dict[str, set] = {et: set() for et in order}
-
-        # helper to push chosen gids per neighbor/etype
-        def _add(nbr: int, et: str, gids: List[int]):
-            if not gids: return
-            a = np.asarray(sorted(gids), dtype=np.int64)
-            if a.size:
-                moves_by_rank.setdefault(int(nbr), {}).setdefault(et, a)
-
-        # iterate over my neighbors only; obey *clamped* per-edge caps[rank][nbr]
-        for nbr in sorted(deltas_by_rank):
-            cap = int(caps.get(rank['world'], {}).get(int(nbr), 0))
-            if cap <= 0:
-                continue
-
-            chosen_pairs: List[Tuple[str, int]] = []  # (etype, gid)
-            picked = 0
-
-            # gather candidates across etypes, sorted by delta ascending (most negative first)
-            cand = []
-            for et in order:
-                arr = deltas_by_rank[nbr].get(et)
-                if arr is None or arr.size == 0:
-                    continue
-                lids = arr[:, 0].astype(np.int64, copy=False)
-                dlt  = arr[:, 1].astype(np.int64, copy=False)
-                eids = np.asarray(self.eidxs_i[et], dtype=np.int64)
-                for lid, d in zip(lids, dlt):
-                    gid = int(eids[int(lid)])
-                    if gid in picked_gids_per_et[et]:
-                        continue
-                    cand.append((int(d), et, int(gid)))
-
-            cand.sort(key=lambda t: (t[0], t[2]))  # by delta, then gid for determinism
-
-            for _, et, gid in cand:
-                if picked >= cap:
-                    break
-                picked_gids_per_et[et].add(gid)
-                chosen_pairs.append((et, gid))
-                picked += 1
-
-            if chosen_pairs:
-                for et in order:
-                    gs = [g for e, g in chosen_pairs if e == et]
-                    _add(int(nbr), et, gs)
-
-        if verbose:
-            tot = sum(len(v) for d in moves_by_rank.values() for v in d.values())
-            print(f"[parallel.plan] rank={rank['world']} cur={int(cur[rank['world']])} tgt={int(tgt[rank['world']])} "
-                f"surplus={int(surplus[rank['world']])} budget={int(budget[rank['world']])} planned_moves={tot} ")
-
-        return moves_by_rank
-
-    @fff
     def _mpi_faces_by_neighbor(self) -> dict[int, list[tuple[str, int, int]]]:
         """
-        Group *our* MPI faces by neighbor rank using self.con and gid->owner maps.
-        Returns: { nbr_rank : [(etype, lid, fidx), ...], ... }
-        Accepts con[..., :] with 4 cols = (owner, code, ngid, nfid).
-        """
+        Return {nbr_rank: [(etype, lid, fidx), ...]} for MPI faces only.
 
+        A face is considered MPI if:
+            - neighbour owner >= 0,
+            - neighbour owner != my_rank,
+            - neighbour gidx >= 0 (element neighbour, not BC/invalid).
+        """
+        my_rank = int(rank['world'])
         per_nbr: dict[int, list[tuple[str, int, int]]] = {}
 
         for et in self.etypes:
-            con_et = self.con_i.get(et)
-            if con_et is None or con_et.size == 0:
+            con_mpi_et = self.i.con_mpi[et]
+            con_idx_et = self.i.con_idx[et]
+
+            if con_mpi_et is None or con_idx_et is None:
                 continue
 
-            con_et = np.asarray(con_et)
-            Ne, nfaces, ncols = con_et.shape
+            con_mpi_et = np.asarray(con_mpi_et, dtype=np.int64)
+            con_idx_et = np.asarray(con_idx_et, dtype=np.int64)
 
-            for lid in range(Ne):
-                for f in range(nfaces):
-                    rec = con_et[lid, f]
-                    owner, code, ngid, nf = map(int, rec)
-                    if code == _CON_UNFILLED or code < 0: # boundary (-1, bc_id, -1)
-                        continue
+            if con_mpi_et.size == 0 or con_idx_et.size == 0:
+                continue
 
-                    if owner != rank['world']:
-                        per_nbr.setdefault(int(owner), []).append((et, int(lid), int(f)))
+            owners = con_mpi_et[...]
+            gidxs  = con_idx_et[...]
+
+            # MPI faces: element neighbour, owner >= 0, owner != my_rank
+            mpi_mask = (gidxs >= 0) & (owners >= 0) & (owners != my_rank)
+
+            if not np.any(mpi_mask):
+                continue
+
+            lids, fidxs = np.nonzero(mpi_mask)
+            lids  = lids.astype(np.int64, copy=False)
+            fidxs = fidxs.astype(np.int64, copy=False)
+
+            nbrs = owners[lids, fidxs].astype(np.int64, copy=False)
+
+            uniq_nbrs = np.unique(nbrs)
+            for nbr in uniq_nbrs:
+                nbr = int(nbr)
+                if nbr == my_rank:
+                    continue
+
+                sel = (nbrs == nbr)
+                lids_n  = lids[sel]
+                fidxs_n = fidxs[sel]
+
+                lst = per_nbr.setdefault(nbr, [])
+                lst.extend((et, int(lid_i), int(f_i)) for lid_i, f_i in zip(lids_n, fidxs_n))
 
         return per_nbr
+
 
     def _face_vertex_indices(self, et: str) -> list[np.ndarray]:
         """
@@ -885,164 +940,25 @@ class _MetaMesh:
 
         raise NotImplementedError(f"'{et}' not implemented")
 
-
-    @fff
-    def collect_mpi_vertex_nodes(self) -> dict[int, np.ndarray]:
-        """
-        Return {nbr_rank: np.ndarray[int64]} = sorted-unique global vertex-node IDs
-        on MPI faces to that neighbor.
-        """
-        if not hasattr(self, "spts_nodes_i") or self.spts_nodes_i is None:
-            raise RuntimeError("self.spts_nodes_i missing")
-
-        # 1) which faces are MPI, grouped by neighbor
-        per_nbr_faces = self._mpi_faces_by_neighbor()
-
-        # 2) per-etype face->vertex columns
-        face_vtx_by_et = {et: self._face_vertex_indices(et) for et in self.etypes}
-
-        # 3) union vertex nodes per neighbor
-        out: dict[int, np.ndarray] = {}
-        for nbr, faces in per_nbr_faces.items():
-            vset: set[int] = set()
-            for et, lid, f in faces:
-                nds = self.spts_nodes_i.get(et)
-                if nds is None or nds.size == 0:
-                    continue
-                if lid < 0 or lid >= nds.shape[0]:
-                    continue
-                fv = face_vtx_by_et[et][int(f)]
-                verts = np.asarray(nds[int(lid), fv], dtype=np.int64).ravel()
-                for v in verts:
-                    iv = int(v)
-                    if iv >= 0:
-                        vset.add(iv)
-            out[int(nbr)] = (np.asarray(sorted(vset), dtype=np.int64)
-                             if vset else np.empty(0, dtype=np.int64))
-
-        self.mpi_vertex_union = out
-        return out
-
     # ---------------------
     # Relocation iterations 
     # ---------------------
-    
-    @fff
-    def plan_eidxs_dest_from_diff(self, eidxs_diff, verbose=False):
-        """
-        Build new per-etype GID lists after a proposed relocation plan.
-        """
-
-        send_plan = {d: {et: np.asarray(eidxs_diff.get(d, {}).get(et, ()), dtype=np.int64) 
-                                for et in self.etypes}
-                        for d in range(comm['world'].size) if d != rank['world']
-                    }
-        all_plans = comm['world'].allgather(send_plan)
-
-        to_send = {}
-        for et in self.etypes:
-            chunks = [send_plan[d][et] for d in send_plan if send_plan[d][et].size]
-            to_send[et] = (np.unique(np.concatenate(chunks))
-                            if chunks else np.empty(0, dtype=np.int64))
-
-        to_recv = {et: np.empty(0, dtype=np.int64) for et in self.etypes}
-        for sender, plan in enumerate(all_plans):
-            if sender == rank['world']:
-                continue
-            per_me = plan.get(rank['world'])
-            if not per_me:
-                continue
-            for et in self.etypes:
-                a = per_me.get(et)
-                if a is not None and a.size:
-                    to_recv[et] = np.concatenate((to_recv[et], a))
-
-        for et in self.etypes:
-            if to_recv[et].size:
-                to_recv[et] = np.unique(to_recv[et])
-
-        # --- Build new_eidxs ---
-        new_eidxs = {}
-        for et in self.etypes:
-            cur = np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
-
-            ts = to_send[et]
-            if cur.size and ts.size:
-                keep = cur[~np.isin(cur, ts, assume_unique=True)]
-            else:
-                keep = cur
-
-            rv = to_recv[et]
-            if rv.size:
-                add = rv[~np.isin(rv, keep, assume_unique=True)] if keep.size else rv
-                new = np.concatenate((keep, add)) if add.size else keep
-            else:
-                new = keep
-
-            new_eidxs[et] = new
-
-        if verbose:
-            tag = 'ag'
-            tsz = {et: int(to_send[et].size) for et in self.etypes}
-            rsz = {et: int(to_recv[et].size) for et in self.etypes}
-            nsz = {et: int(new_eidxs[et].size) for et in self.etypes}
-            print(f"[plan/{tag}] R{rank['world']}\tsend:{tsz}\trecv:{rsz}\ttarget:{nsz}")
-
-        return new_eidxs
-    
 
     def _reset_j_with_i(self):
         self.j = self.i.clone()
-        self.mpi_vertex_union = None
 
     def _accept_j_into_i(self):
         self.i, self.j = self.j, self.i
-        self._retag_con_owners_from_gid_maps()
-        self.mpi_vertex_union = None
+        self._retag_con_owners()
         self._invalidate_topology()
-
-    def relocate_i_to_j(self, eidxs_diff):
-        self.j = self.i.relocate_to(self.plan_eidxs_dest_from_diff(eidxs_diff))
-
-    @fff
-    def _retag_con_owners_from_gid_maps(self):
-        """
-            Retag owners in new con_i from current gid->owner maps
-        """
-
-        owners = self._gid_owner_maps(self.eidxs_i)              # {etype: {gid: owner_rank}}
-
-        for et in self.etypes:
-            con = self.con_i.get(et)
-            if con is None or not np.asarray(con).size:
-                continue
-
-            con = np.asarray(con, dtype=np.int64, copy=False)
-            codes = con[..., 1]                      # neighbor etype code (>=0 = paired)
-            ngids = con[..., 2]                      # neighbor GID
-
-            m = (codes >= 0)
-            if not np.any(m):
-                continue
-
-            # Update owner column from the current gid->owner map
-            # Loop by neighbor etype to avoid per-face string work
-            for k, net in enumerate(self.etypes):
-                mk = m & (codes == k)
-                if not np.any(mk):
-                    continue
-                og = owners.get(net, {})
-                # per-face lookup; fast enough in practice
-                con[..., 0][mk] = np.array([og.get(int(g), rank['world']) for g in ngids[mk]], dtype=np.int64)
-
-            # keep boundary/unfilled as-is (codes < 0)
 
     # -----------------
 
     def smooth_until_stagnates(self, *, max_iters: int = 20, patience: int = 1,
                             min_change: int = 0, threshold = 0,
                             target_counts: Optional[List[int]] = None,
-                            restrict_src_dest: bool = False) -> list[int]:
+                            restrict_src_dest: bool = False,
+                            move_spts_nodes: bool = False) -> list[int]:
         """
         Run diffuse_smoothing repeatedly. The stopping decision is collective:
         we allreduce the local planned-move counts so every rank takes the same
@@ -1054,7 +970,9 @@ class _MetaMesh:
 
         for _ in range(int(max_iters)):
             moved_local = int(self.diffuse_smoothing(return_count=True, threshold=threshold,
-                target_counts=target_counts, restrict_src_dest=restrict_src_dest ) or 0)
+                target_counts=target_counts, restrict_src_dest=restrict_src_dest, 
+                move_spts_nodes = move_spts_nodes,
+                ) or 0)
 
             moved = comm['world'].allreduce(moved_local, op=mpi.SUM)
 
@@ -1081,22 +999,109 @@ class _MetaMesh:
 
     # change signature and add gating in diffuse_smoothing
 
-    @fff
+    def _build_eidxs_diff_from_flat(self, chosen_flat, chosen_nbrs, flat):
+        """
+        Convert a flat list of element indices + dest ranks into the
+        {nbr: {etype: gids[]}} structure expected by relocate_i_to_j.
+
+        Parameters
+        ----------
+        chosen_flat : array-like of int
+            Indices into the flat view (flat.gids / flat.et_index).
+        chosen_nbrs : array-like of int
+            Destination ranks, same length as chosen_flat.
+        flat : object
+            Flat view with attributes:
+                - gids      : 1D array of global element IDs
+                - et_index  : 1D array of integer etype indices
+                - etypes    : list of etype names (str)
+        """
+        # Output: { nbr : { etype_name : np.ndarray[gids] } }
+        eidxs_diff = {}
+
+        chosen_flat = np.asarray(chosen_flat, dtype=np.int64)
+        chosen_nbrs = np.asarray(chosen_nbrs, dtype=np.int64)
+
+        if chosen_flat.size == 0:
+            return eidxs_diff
+
+        # Global IDs and etype indices for the selected elements
+        gids_all = np.asarray(flat.gids[chosen_flat], dtype=np.int64)
+        et_idx_all = np.asarray(flat.et_index[chosen_flat], dtype=np.int64)
+
+        # Sort once by (nbr, etype_index, gid) so that:
+        #   - elements for each (nbr, etype) are contiguous,
+        #   - gids within each group are ascending.
+        order = np.lexsort((gids_all, et_idx_all, chosen_nbrs))
+
+        nbrs_sorted = chosen_nbrs[order]
+        et_sorted   = et_idx_all[order]
+        gids_sorted = gids_all[order]
+
+        last_nbr = None
+        last_et  = None
+        acc_gids = []
+
+        for nbr, et_idx, gid in zip(nbrs_sorted, et_sorted, gids_sorted):
+            nbr = int(nbr)
+            et_idx = int(et_idx)
+            gid = int(gid)
+
+            if last_nbr is None:
+                # First entry
+                last_nbr, last_et = nbr, et_idx
+                acc_gids = [gid]
+                continue
+
+            if nbr != last_nbr or et_idx != last_et:
+                # Flush previous group
+                etname = flat.etypes[last_et]
+                per_et = eidxs_diff.setdefault(last_nbr, {})
+                per_et[etname] = np.asarray(acc_gids, dtype=np.int64)
+
+                # Start new group
+                last_nbr, last_et = nbr, et_idx
+                acc_gids = [gid]
+            else:
+                acc_gids.append(gid)
+
+        # Flush the final group
+        if acc_gids:
+            etname = flat.etypes[last_et]
+            per_et = eidxs_diff.setdefault(last_nbr, {})
+            per_et[etname] = np.asarray(acc_gids, dtype=np.int64)
+
+        return eidxs_diff
+
+
     def diffuse_smoothing(self, *,
                         return_count: bool = False,
                         threshold: int = 0,
                         target_counts: Optional[List[int]] = None,
-                        restrict_src_dest: bool = False) -> Optional[int]:
+                        restrict_src_dest: bool = False,
+                        move_spts_nodes: bool = False) -> Optional[int]:
+        """
+        Core diffusion step working on element faces.
+        """
 
         # 0) start candidate from current
         self._reset_j_with_i()
+
+        # Flat view of current state
+        flat_i = self._flat_state('i')
+        my_count = int(flat_i.gids.size)
 
         # Directional gating
         allowed_nbrs = None
         I_am_donor = True
         if restrict_src_dest and target_counts is not None:
-            my_count = int(sum(len(self.eidxs_i.get(et, ())) for et in self.etypes))
-            cur = np.asarray(comm['world'].allgather(int(my_count)), dtype=np.int64)
+            # If you want a one-shot debug check, keep this for a while:
+            if False:  # flip to True for a debug run
+                dict_count = int(sum(len(self.eidxs_i.get(et, ())) for et in self.etypes))
+                print(f"[MetaMesh/debug] rank={rank['world']} flat_count={my_count} dict_count={dict_count}")
+                assert my_count == dict_count
+
+            cur = np.asarray(comm['world'].allgather(my_count), dtype=np.int64)
             tgt = np.asarray(target_counts, dtype=np.int64)
             diff = cur - tgt  # +surplus / -deficit
             I_am_donor = diff[rank['world']] > 0
@@ -1108,88 +1113,93 @@ class _MetaMesh:
                 # receivers: we will still do the collective relocate (with empty plan)
                 allowed_nbrs = set()
 
-        # 1) per-neighbor, per-etype deltas
-        deltas_by_rank = self.calc_mpi_faces_deltas()
+        # 1) per-neighbor, per-etype deltas (still produced per-etype)
+        deltas_by_rank = self._compute_deltas('faces')
 
-        # 2) build move plan (respect allowed_nbrs if set)
-        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
+        # Mapping etype -> flat block index
+        et_to_idx = {et: i for i, et in enumerate(flat_i.etypes)}
+        et_offsets = flat_i.et_offsets
 
-        for et in self.etypes:
-            parts = []
-            for nbr, per_et in deltas_by_rank.items():
-                if allowed_nbrs is not None and int(nbr) not in allowed_nbrs:
-                    continue
-                arr = per_et.get(et)
+        # 2) collect all candidates in flat index space
+        all_flat = []
+        all_dlt = []
+        all_nbrs = []
+
+        thr_int = int(threshold)
+
+        for nbr, per_et in deltas_by_rank.items():
+            nbr = int(nbr)
+            if allowed_nbrs is not None and nbr not in allowed_nbrs:
+                continue
+
+            for et, arr in per_et.items():
                 if arr is None or arr.size == 0:
                     continue
+
+                et_idx = et_to_idx[et]
+                if et_idx is None:
+                    continue
+
                 lids = arr[:, 0].astype(np.int64, copy=False)
                 dlt  = arr[:, 1].astype(np.int64, copy=False)
-                nbrs = np.full(lids.shape, int(nbr), dtype=np.int64)
-                parts.append((lids, dlt, nbrs))
 
-            if not parts:
-                continue
+                if lids.size == 0:
+                    continue
 
-            lids = np.concatenate([p[0] for p in parts])
-            dlt  = np.concatenate([p[1] for p in parts])
-            nbrs = np.concatenate([p[2] for p in parts])
+                # Map (et, lid) -> flat index
+                base = int(et_offsets[et_idx])
+                lids_flat = base + lids
 
-            order = np.lexsort((dlt, lids))
-            lids_s, dlt_s, nbrs_s = lids[order], dlt[order], nbrs[order]
-            _, first_idx = np.unique(lids_s, return_index=True)
-            best_lids  = lids_s[first_idx]
-            best_dlt   = dlt_s[first_idx]
-            best_nbrs  = nbrs_s[first_idx]
+                all_flat.append(lids_flat)
+                all_dlt.append(dlt)
+                all_nbrs.append(np.full(lids_flat.shape, nbr, dtype=np.int64))
 
-            # threshold semantics: < threshold → with threshold=1, allow Δ<=0
-            mkeep = (best_dlt < int(threshold))
-            if not np.any(mkeep):
-                continue
+        if not all_flat:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0 if return_count else None
 
-            chosen_lids = best_lids[mkeep]
-            chosen_nbrs = best_nbrs[mkeep]
+        lids_flat = np.concatenate(all_flat)
+        dlt_all   = np.concatenate(all_dlt)
+        nbrs_all  = np.concatenate(all_nbrs)
 
-            eids = np.asarray(self.eidxs_i[et], dtype=np.int64)
-            gids = eids[chosen_lids]
+        # --- arbitration per flat-id (unique element) ---
+        # Sort by (flat_id, delta) so we can pick a single best neighbor.
+        order = np.lexsort((dlt_all, lids_flat))
+        lids_s = lids_flat[order]
+        dlt_s  = dlt_all[order]
+        nbrs_s = nbrs_all[order]
 
-            if chosen_nbrs.size:
-                un, inv = np.unique(chosen_nbrs, return_inverse=True)
-                for i, nbr in enumerate(un.tolist()):
-                    gsel = np.asarray(sorted(gids[inv == i].tolist()), dtype=np.int64)
-                    if gsel.size:
-                        eidxs_diff.setdefault(int(nbr), {})[et] = gsel
+        _, first_idx = np.unique(lids_s, return_index=True)
+        best_flat = lids_s[first_idx]
+        best_dlt  = dlt_s[first_idx]
+        best_nbrs = nbrs_s[first_idx]
 
+        # threshold semantics: < threshold → with threshold=1, allow Δ<=0
+        mkeep = (best_dlt < thr_int)
+        if not np.any(mkeep):
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0 if return_count else None
+
+        chosen_flat = best_flat[mkeep]
+        chosen_nbrs = best_nbrs[mkeep]
+
+        # 3) build move plan in classic {nbr: {etype: gids}} format
+        eidxs_diff = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbrs, flat_i)
+
+        # breakdown + count (for debugging / tracing)
         breakdown, tot = {}, 0
         for nbr, per in eidxs_diff.items():
             b = {et: int(len(g)) for et, g in per.items()}
             breakdown[int(nbr)] = b
             tot += sum(b.values())
 
-        # Helpful trace (donor/receiver)
         role = "donor" if I_am_donor else "receiver"
 
-        # 3) ALWAYS participate in relocate (even with empty plan)
-        self._apply_plan_and_commit(eidxs_diff)
+        # 4) ALWAYS participate in relocate (even with empty plan)
+        self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
 
         return int(tot) if return_count else None
 
-    def _global_mpi_faces_total(self):
-        # Count MPI faces once, symmetrised, on the MetaMesh communicator
-
-        per = {}
-        for et in self.etypes:
-            con = np.asarray(self.con_i.get(et, ()), dtype=np.int64)
-            if con.size == 0:
-                continue
-            owners = con[..., 0]
-            codes  = con[..., 1]
-            m = (codes >= 0) & (owners != rank['world'])
-            per[et] = int(m.sum())
-        loc  = sum(per.values())
-        glob = comm['world'].allreduce(loc, op=mpi.SUM)
-        return glob // 2
-
-    @fff
     def element_flow_plan(self, cur_counts, tgt_counts, mask, *,
                           max_iters: int = 4) -> np.ndarray:
         """
@@ -1476,200 +1486,100 @@ class _MetaMesh:
 
         return _cancel_anti_parallel(M_full)
 
-    @fff
-    def diffuse_smoothing2(self, flow_matrix: np.ndarray, mode, threshold, 
-                           scale = 0.5, return_count = False):
+    @staticmethod
+    def _validate_flow_matrix(flow_matrix: np.ndarray) -> tuple[np.ndarray, int]:
         """
-        mode: 'edge'   uses calc_mpi_faces_deltas()
-              'vertex' uses calc_mpi_vertices_delta()
-        """
+        Common validation for flow matrices used by smoothing routines.
 
-        # Validate flow matrix
+        Returns
+        -------
+        M : np.ndarray[int64], shape (R, R)
+            Validated, int64 flow matrix.
+        R : int
+            Number of ranks (world size segment of the matrix).
+        """
         M = np.asarray(flow_matrix, dtype=np.int64)
         if M.ndim != 2 or M.shape[0] != M.shape[1]:
             raise ValueError(f"Need square matrix; got {M.shape = }")
         R = int(M.shape[0])
         if not (0 <= rank['world'] < R):
             raise ValueError(f"{rank['world'] = } but flow_matrix size is {R}")
-
-        # 0) start from current snapshot
-        self._reset_j_with_i()
-
-        # 1) precompute per-neighbor deltas once (EDGE or VERTEX)
-        deltas_by_rank = self._compute_deltas(mode)
-
-        picked_by_et: dict[str, set[int]] = {et: set() for et in self._etype_order()}
-
-        def _pick_for_neighbor(nbr: int, need: int) -> dict[str, np.ndarray]:
-            if need <= 0:
-                return {}
-
-            chosen: dict[str, list[int]] = {}
-            cand = []
-            per_et = deltas_by_rank.get(int(nbr), {})  # (lid, delta) pairs already sorted per-et
-
-            for et in self._etype_order():
-                arr = per_et.get(et)
-                if arr is None or arr.size == 0:
-                    continue
-                lids = arr[:, 0].astype(np.int64, copy=False)
-                dlt  = arr[:, 1].astype(np.int64, copy=False)
-                m = (dlt <= int(threshold))
-                if not np.any(m):
-                    continue
-                lids = lids[m]; dlt = dlt[m]
-                eids = np.asarray(self.eidxs_i[et], dtype=np.int64)
-                for lid, d in zip(lids, dlt):
-                    gid = int(eids[int(lid)])
-                    if gid not in picked_by_et[et]:
-                        cand.append((int(d), et, gid))
-
-            cand.sort(key=lambda t: (t[0], t[2]))  # delta ascending, then gid
-            take = min(int(need), len(cand))
-            for _, et, gid in cand[:take]:
-                chosen.setdefault(et, []).append(int(gid))
-                picked_by_et[et].add(int(gid))
-
-            return {et: np.asarray(sorted(v), dtype=np.int64) for et, v in chosen.items() if v}
-
-        # 2) build relocation diff from this rank
-        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
-        out_total = 0
-        by_nbr_total = {}
-
-        for nbr in range(R):
-            cap = int(M[rank['world'], int(nbr)])
-            if cap <= 0:
-                continue
-
-            need = int(np.ceil(cap * float(scale)))
-            per = _pick_for_neighbor(int(nbr), need)
-            if per:
-                eidxs_diff[int(nbr)] = per
-            tot = sum(len(g) for g in per.values())
-            by_nbr_total[int(nbr)] = int(tot)
-            out_total += int(tot)
-            assert tot <= need <= cap, f"[itc4.pass] rank={rank['world']} nbr={nbr} tot={tot} need={need} cap={cap}"
-
-        # 3) perform the relocation
-        self._apply_plan_and_commit(eidxs_diff)
-        return int(out_total) if return_count else None
+        return M, R
 
 
-    @fff
-    def diffuse_smoothing_edges(self, flow_matrix, threshold = 2, skip_last = False):
+    def diffuse_smoothing_edges(self, flow_matrix, threshold=2, skip_last=False):
         """
         Edge-based (face-based) smoothing that moves *all-or-none* candidate
         elements per interface (rank -> nbr), repeatedly, until no more
         full-interface moves are possible anywhere.
-
-        Semantics
-        ---------
-        - Uses `calc_mpi_faces_deltas()` as the selector for candidate
-          interface elements.
-        - For an interface (rank r, nbr s), we:
-              * collect all candidate elements whose face-delta
-                    Δ <= threshold
-                on that interface,
-              * if the remaining flow capacity
-                    M_rem[r, s] >= K  (K = number of candidates),
-                then ALL K are moved; otherwise, NONE are moved on that
-                interface in that sweep.
-        - If skip_last=True:
-              * We treat the last entry of `_etype_order()` on this rank as
-                this device’s “protected” etype.
-              * For neighbours whose `_etype_order()` is identical to ours
-                (same device / same preferences) we allow all etypes.
-              * For neighbours whose `_etype_order()` differs, we do not
-                export the protected etype to that neighbour (we only allow
-                `etypes_all[:-1]` on that interface).
         """
         # Validate flow matrix
-        M0 = np.asarray(flow_matrix, dtype=np.int64)
-        if M0.ndim != 2 or M0.shape[0] != M0.shape[1]:
-            raise ValueError(f"Need square matrix; got {M0.shape = }")
-        R = int(M0.shape[0])
-        if not (0 <= rank['world'] < R):
-            raise ValueError(f"{rank['world'] = } but flow_matrix size is {R}")
-
-        # Apply remaining capacity; keep as float for safety
+        M0, R = self._validate_flow_matrix(flow_matrix)
         M_rem = M0.astype(np.float64, copy=True)
 
         # Canonical etype order on THIS rank
         etypes_all = list(self._etype_order())
 
         # Device-aware “protected-type” logic:
-        # - When skip_last is False -> no restrictions, all etypes allowed.
-        # - When skip_last is True  -> for neighbours whose etype_order differs
-        #   from ours, we will *not* export the last etype in etypes_all.
-        if skip_last and etypes_all:
-            local_order = tuple(etypes_all)
-            orders_all  = comm['world'].allgather(local_order)  # list[tuple]
-            restrict_last = {
-                int(r): (tuple(o) != local_order)
-                for r, o in enumerate(orders_all)
-            }
-        else:
-            restrict_last = {}
+        restrict_last = self._compute_restrict_last(skip_last, etypes_all)
 
-        # Debug: log policy once per call, per rank
         if skip_last and etypes_all:
-            # Who do we actually restrict?
             restricted_nbrs = sorted(
                 r for r, v in restrict_last.items() if v and r != rank['world']
             )
         else:
             restricted_nbrs = []
 
-        print(
-            f"[itc4.es] R{rank['world']} setup "
-            f"threshold={int(threshold)} "
-            f"skip_last={bool(skip_last)} "
-            f"etypes_all={etypes_all} "
-            f"restricted_nbrs={restricted_nbrs}",
-            flush=True,
-        )
-
         total_moved_local = 0
         thr_int = int(threshold)
 
-        for iter in range(len(rankmap['world'])):
+        iter_no = 0
+        while True:
+            iter_no += 1
 
             # Start from current state for this sweep
             self._reset_j_with_i()
 
             # 1) Compute fresh face-based deltas on *current* topology
-            #    {nbr: {etype: int64[N,2] [lid, delta]}}
-            deltas_by_rank = self.calc_mpi_faces_deltas()
+            deltas_by_rank = self._compute_deltas('faces')
 
-            # We track picked GIDs per etype so we don’t export the same
-            # element to multiple neighbours. We initialise for all etypes.
-            picked_by_et: dict[str, set[int]] = {et: set() for et in etypes_all}
+            # Flat view for mapping (et, lid) -> mesh-global gid
+            flat = self._flat_state('i')
+            et_to_idx  = {et: i for i, et in enumerate(flat.etypes)}
+            et_offsets = flat.et_offsets
+            gids_flat  = flat.gids
 
-            # 2) Build eidxs_diff for this sweep with all-or-none per interface
+            # Track picked elements (by flat index) so they are not exported
+            # to multiple neighbours within the same sweep.
+            picked_mask = np.zeros_like(gids_flat, dtype=bool)
+
             eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
             moved_this_sweep_local = 0
+
+            # NEW: per-interface stopping reasons
+            per_nbr_reason: dict[int, str] = {}
 
             for nbr, per_et in deltas_by_rank.items():
                 nbr = int(nbr)
                 cap_float = float(M_rem[rank['world'], nbr])
                 if cap_float <= 0.0:
+                    per_nbr_reason[nbr] = (
+                        f"cap<=0 (M_rem[{rank['world']},{nbr}]={cap_float:.1f})"
+                    )
                     continue
 
                 # Decide which etypes are allowed on THIS interface.
-                # If skip_last is enabled AND this neighbour has a different
-                # etype_order, drop the last etype from our candidate set.
                 if skip_last and restrict_last.get(nbr, False) and len(etypes_all) > 0:
                     etypes_active = etypes_all[:-1]
                 else:
                     etypes_active = etypes_all
 
-                # Collect all candidate gids across *active* etypes,
-                # with Δ <= threshold, ordered by delta for determinism.
-                cand: list[tuple[int, str, int]] = []  # (delta, etype, gid)
+                # For this neighbour, accumulate candidates per etype as flat indices
+                per_nbr_flat_idx: dict[str, np.ndarray] = {}
+                per_nbr_delta:    dict[str, np.ndarray] = {}
 
                 for et in etypes_active:
-                    arr = per_et.get(et)
+                    arr = per_et[et]
                     if arr is None or arr.size == 0:
                         continue
 
@@ -1683,48 +1593,67 @@ class _MetaMesh:
 
                     lids_k = lids[mkeep]
                     dlt_k  = dlt[mkeep]
-                    eids   = np.asarray(self.eidxs_i[et], dtype=np.int64)
 
-                    for lid, d in zip(lids_k, dlt_k):
-                        gid = int(eids[int(lid)])
-                        if gid in picked_by_et[et]:
-                            continue
-                        cand.append((int(d), et, gid))
+                    et_idx = et_to_idx.get(et, None)
+                    if et_idx is None:
+                        continue
 
-                if not cand:
+                    base = int(et_offsets[et_idx])
+                    flat_idx = base + lids_k
+
+                    # Drop elements already picked for some other neighbour
+                    mask_new = ~picked_mask[flat_idx]
+                    if not np.any(mask_new):
+                        continue
+
+                    lids_k   = lids_k[mask_new]
+                    dlt_k    = dlt_k[mask_new]
+                    flat_idx = flat_idx[mask_new]
+
+                    if lids_k.size == 0:
+                        continue
+
+                    per_nbr_flat_idx[et] = flat_idx
+                    per_nbr_delta[et]    = dlt_k
+
+                if not per_nbr_flat_idx:
+                    per_nbr_reason[nbr] = ("SKIP no cand")
                     continue
 
-                # Sort by delta then gid for determinism
-                cand.sort(key=lambda t: (t[0], t[2]))
-                n_cand = len(cand)
-
-                # Required capacity if we want to move ALL candidates:
+                # All-or-none decision on this interface
+                n_cand = sum(idx.size for idx in per_nbr_flat_idx.values())
                 need_float = float(n_cand)
 
                 if cap_float + 1e-9 < need_float:
-                    # Cannot move all; skip this interface entirely
+                    per_nbr_reason[nbr] = (
+                        f"SKIP {need_float:4.0f}>{cap_float:4.0f}"
+                    )
                     continue
 
-                # Enough capacity to move all candidates to this neighbour
-                per_nbr: dict[str, list[int]] = {}
-                for d, et, gid in cand:
-                    picked_by_et[et].add(gid)
-                    per_nbr.setdefault(et, []).append(gid)
+                # Enough capacity: move all candidates to this neighbour.
+                per_nbr_arr: dict[str, np.ndarray] = {}
+                for et, flat_idx in per_nbr_flat_idx.items():
+                    dlt_k = per_nbr_delta[et]
 
-                # Convert to sorted arrays per etype
-                per_nbr_arr = {
-                    et: np.asarray(sorted(gids), dtype=np.int64)
-                    for et, gids in per_nbr.items() if gids
-                }
+                    # Optional: keep deterministic ordering per etype (delta, then gid)
+                    order = np.lexsort((gids_flat[flat_idx], dlt_k))
+                    flat_idx = flat_idx[order]
 
-                if per_nbr_arr:
-                    eidxs_diff[nbr] = per_nbr_arr
-                    moved_this_sweep_local += sum(len(g) for g in per_nbr_arr.values())
-                    # Deduct capacity used (exact integer count)
-                    M_rem[rank['world'], nbr] -= need_float
+                    per_nbr_arr[et] = gids_flat[flat_idx].astype(np.int64, copy=False)
+
+                    # Mark as picked this sweep
+                    picked_mask[flat_idx] = True
+
+                eidxs_diff[nbr] = per_nbr_arr
+                moved_this_sweep_local += n_cand
+                per_nbr_reason[nbr] = (
+                    f"MOVE {n_cand:4.0f}<{M_rem[rank['world'], nbr]:4.0f}"
+                )
+                M_rem[rank['world'], nbr] -= need_float
+
 
             # 3) Collectively apply this sweep's relocation
-            self._apply_plan_and_commit(eidxs_diff)
+            self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=False)
 
             # 4) Global convergence check
             moved_glob = comm['world'].allreduce(
@@ -1732,45 +1661,29 @@ class _MetaMesh:
             )
             total_moved_local += moved_this_sweep_local
 
-            # Print once only, on root rank
             if rank['compute'] == root['compute']:
-                print(f"Iter: {iter+1} {moved_glob = } {thr_int = }", flush=True)
+                reason_str = ", ".join(
+                    f"\t {rank['world']}->{nbr}: {msg}"
+                    for nbr, msg in sorted(per_nbr_reason.items())
+                )
+                print(
+                    f"Iter: {iter_no:2.0f} moved_glob = {moved_glob:4.0f} thr_int = {thr_int} :: {reason_str}",
+                    flush=True,
+                )
 
             if moved_glob == 0:
                 break
 
 
-    @fff
+
     def diffuse_smoothing_vertices(self, flow_matrix, skip_last = False, overshoot = 0.5):
         """
         Vertex-based smoothing that moves *all-or-none* candidate elements
         per interface (rank -> nbr), repeatedly, until no more full-interface
         moves are possible anywhere.
-
-        Semantics
-        ---------
-        - Uses `calc_mpi_vertices_delta()` as the selector for candidate
-          interface elements (no per-element threshold).
-        - For an interface (rank r, nbr s), if the set of candidate elements
-          from r -> s has size K and the remaining flow capacity
-              M_rem[r, s] >= K
-          then ALL K are moved; otherwise, NONE are moved on that interface
-          in that sweep.
-        - If skip_last=True:
-              * We treat the last entry of `_etype_order()` on this rank as
-                this device’s “protected” etype.
-              * For neighbours whose `_etype_order()` is identical to ours
-                we allow all etypes.
-              * For neighbours whose `_etype_order()` differs, we do not
-                export the protected etype to that neighbour.
         """
         # Validate flow matrix
-        M0 = np.asarray(flow_matrix, dtype=np.int64)
-        if M0.ndim != 2 or M0.shape[0] != M0.shape[1]:
-            raise ValueError(f"Need square matrix; got {M0.shape = }")
-        R = int(M0.shape[0])
-        if not (0 <= rank['world'] < R):
-            raise ValueError(f"{rank['world'] = } but flow_matrix size is {R}")
+        M0, R = self._validate_flow_matrix(flow_matrix)
 
         # Apply optional overshoot to capacities:
         # M_eff = round((1 + overshoot) * M0), clamped to >= 0.
@@ -1801,15 +1714,7 @@ class _MetaMesh:
         etypes_all = list(self._etype_order())
 
         # Device-aware “protected-type” semantics for skip_last (same as edges):
-        if skip_last and etypes_all:
-            local_order = tuple(etypes_all)
-            orders_all  = comm['world'].allgather(local_order)
-            restrict_last = {
-                int(r): (tuple(o) != local_order)
-                for r, o in enumerate(orders_all)
-            }
-        else:
-            restrict_last = {}
+        restrict_last = self._compute_restrict_last(skip_last, etypes_all)
 
         if skip_last and etypes_all:
             restricted_nbrs = sorted(
@@ -1818,20 +1723,29 @@ class _MetaMesh:
         else:
             restricted_nbrs = []
 
-        # Debug policy
+        # Debug policy (same formatting as before)
         print(
             f"R{rank['world']} setup skip_last={bool(skip_last)} "
             f"etypes_all={etypes_all} restricted_nbrs={restricted_nbrs}",
             flush=True,
         )
 
-        for iter in range(int(len(rankmap['world']))):
-
+        iter=  0
+        #for iter in range(int(len(rankmap['world']))):
+        while True: 
+            iter += 1
             # Start from current state for this sweep
             self._reset_j_with_i()
 
             # 1) Compute fresh vertex-based deltas on *current* topology
-            deltas_by_rank = self.calc_mpi_vertices_delta()
+            deltas_by_rank = self._compute_deltas('vertices')
+
+            # Flat view for mapping (et, lid) -> gid
+            flat = self._flat_state('i')
+            et_to_idx = {et: i for i, et in enumerate(flat.etypes)}
+            et_offsets = flat.et_offsets
+            gids_flat = flat.gids
+
             picked_by_et: dict[str, set[int]] = {
                 et: set() for et in etypes_all
             }
@@ -1859,16 +1773,20 @@ class _MetaMesh:
                 cand: list[tuple[int, str, int]] = []  # (delta, etype, gid)
 
                 for et in etypes_active:
-                    arr = per_et.get(et)
+                    arr = per_et[et]
                     if arr is None or arr.size == 0:
                         continue
 
                     lids = arr[:, 0].astype(np.int64, copy=False)
                     dlt  = arr[:, 1].astype(np.int64, copy=False)
-                    eids = np.asarray(self.eidxs_i[et], dtype=np.int64)
+
+                    et_idx = et_to_idx[et]
+                    if et_idx is None:
+                        continue
+                    base = int(et_offsets[et_idx])
 
                     for lid, d in zip(lids, dlt):
-                        gid = int(eids[int(lid)])
+                        gid = int(gids_flat[base + int(lid)])
                         if gid in picked_by_et[et]:
                             continue
                         cand.append((int(d), et, gid))
@@ -1904,10 +1822,10 @@ class _MetaMesh:
                     M_rem[rank['world'], nbr] -= float(n_cand)
 
             # 3) Collectively apply this sweep's relocation
-            self._apply_plan_and_commit(eidxs_diff)
+            self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=True)
 
             # 4) Global convergence check
-            moved_glob = comm['world'].allreduce(int(moved_this_sweep_local), 
+            moved_glob = comm['world'].allreduce(int(moved_this_sweep_local),
                                                  op=mpi.SUM)
 
             if rank['compute'] == root['compute']:
@@ -1999,7 +1917,6 @@ class _MetaMesh:
         rb = commw.bcast(rb, root=rank_a)
         return rb
 
-
     def _pick_seed_rank_for_new_rank(self, new_rank: int) -> tuple[int, str]:
         """
         Decide which existing rank should act as rank_a for seeding `new_rank`,
@@ -2036,7 +1953,7 @@ class _MetaMesh:
         seed_etype = et_order[0]
 
         # Local count of top-priority etype
-        local_count_seed = int(len(self.eidxs_i.get(seed_etype, ())))
+        local_count_seed = int(len(self.i.eidxs.get(seed_etype, ())))
         counts_seed = comm['world'].allgather(local_count_seed)
 
         # Argmax over counts; deterministic tie-break via lowest rank
@@ -2055,7 +1972,6 @@ class _MetaMesh:
 
         return rank_a, seed_etype
 
-    @fff
     def seed_rank(self, new_rank: int, targets, twoway_mask, 
         rank_a: int | None = None, n_seed_per_etype: int = 1, ) -> None:
         """
@@ -2124,7 +2040,7 @@ class _MetaMesh:
             gids = np.asarray(cluster.get(seed_etype, ()), dtype=np.int64)
 
             if gids.size:
-                cur = np.asarray(self.eidxs_i.get(seed_etype, ()), dtype=np.int64)
+                cur = np.asarray(self.i.eidxs.get(seed_etype, ()), dtype=np.int64)
                 if cur.size:
                     # Intersect with local gids (defensive; cluster is local)
                     mask = np.isin(gids, cur, assume_unique=False)
@@ -2153,7 +2069,7 @@ class _MetaMesh:
             else:
                 # Fallback: no seed_etype on this interface, but we still want to
                 # seed the new rank with *something* of seed_etype from rank_a.
-                cur = np.asarray(self.eidxs_i.get(seed_etype, ()), dtype=np.int64)
+                cur = np.asarray(self.i.eidxs.get(seed_etype, ()), dtype=np.int64)
 
                 if cur.size:
                     sel = cur[: int(n_seed_per_etype)]
@@ -2178,10 +2094,8 @@ class _MetaMesh:
         self._apply_plan_and_commit(eidxs_diff)
 
         # 5) Recompute counts and perform a short vertex-based diffusion
-        def _cur_counts_total():
-            return list(comm['world'].allgather(self._local_count()))
-
-        cur0 = _cur_counts_total()
+        cur0 = self._cur_counts_total()
+        
         if this_rank == root['world']:
             print(f"[itc4.seed] mode=seed_rank CURRENT={cur0}", flush=True)
 
@@ -2189,52 +2103,30 @@ class _MetaMesh:
 
         self.diffuse_smoothing_vertices(flow_matrix=M0, skip_last=True)
 
-    @fff
     def iterate(self, objective, target_counts, mask, *, flowmat_relax=0.5, ):
-        """
-        One round controller (as requested):
-        1) Plan from current counts (M0).
-        2) Single "nudge" pass with threshold=2 using M0.
-        3) Replan (M1).
-        4) One strict pass with threshold=0 using M1 (loop written as range(comm.size), break after first).
-        5) Final smoothing to stagnation (default threshold in existing smoother).
-
-        Notes:
-        - We recompute the plan after each phase (no residual-cap bookkeeping).
-        - threshold=0 pass does not move anything that would increase edge cuts.
-        - No "-1 polish" here by request.
-        """
-
-        def _cur_counts_total():
-            return list(comm['world'].allgather(self._local_count()))
-
-        if rank['world'] == root['world']: print(f"[itc4.iter]  TARGET={target_counts}")
+        if rank['world'] == root['world']: print(f"TARGET={target_counts}")
 
         if objective == 'to-target':
-
-            exec_order = (
-                        [('vertices',6)]
-                      + [('faces'   ,2)]
-                      + [('faces'   ,0)]
-                        )
-            
+            exec_order = (#[('vertices',6)] 
+                            [('faces'   ,6)]
+                          + [('faces'   ,5)]
+                          + [('faces'   ,4)]
+                          + [('faces'   ,3)]
+                          + [('faces'   ,2)]
+                          + [('faces'   ,1)]
+                          + [('faces'   ,0)])
             for step in exec_order:
-                cur0 = _cur_counts_total()
-                if rank['world'] == root['world']: 
-                    print(f"mode={step[0]} \t thr={int(step[1])} CURRENT={cur0}")
+                cur0 = self._cur_counts_total()
+                if rank['world'] == root['world']: print(f"mode={step[0]} \t thr={step[1]} CURRENT={cur0}")
                 M0   = self.element_flow_plan(cur0, target_counts, mask)
 
-                if step[0] == 'vertices':
-                    self.diffuse_smoothing_vertices(M0,skip_last=True)
-                elif step[0] == 'faces':
-                    self.diffuse_smoothing_edges(M0, threshold=step[1])
+                if   step[0] == 'vertices': self.diffuse_smoothing_vertices(M0,skip_last=True)
+                elif step[0] == 'faces':    self.diffuse_smoothing_edges(M0, threshold=step[1])
                     #self.diffuse_smoothing2(M0, mode='faces', threshold=step[1],
                     #                        scale=flowmat_relax)
 
                 self.smooth_until_stagnates()
                 
-            self._prof_print_and_reset()   # <--- prints summary + resets counters
-            
         elif objective == 'to-remove-rank':
 
             kill_rank = [r for r, c in enumerate(target_counts) if c == 0][0]
@@ -2243,14 +2135,14 @@ class _MetaMesh:
 
             # Evacuate kill_rank until it reaches zero
             while True:
-                cur0 = _cur_counts_total()
+                cur0 = self._cur_counts_total()
                 M0 = self.element_flow_plan(cur0, target_counts, mask)
 
                 # Use vertex-based diffusion here, as in your sketch
                 self.diffuse_smoothing_vertices(M0)
-                self.smooth_until_stagnates()
+                self.smooth_until_stagnates(move_spts_nodes=True)
 
-                cur1 = _cur_counts_total()
+                cur1 = self._cur_counts_total()
 
                 diff = [cur1[i] - cur0[i] for i in range(len(cur0))]
                 if rank['world'] == root['world']:
@@ -2266,32 +2158,9 @@ class _MetaMesh:
                     if rank['world'] == root['world']:
                         print(f"to-remove-rank stuck; kill_rank={kill_rank} cur={cur1}", flush=True,)
                     break
-    
-            self._prof_print_and_reset()   # <--- prints summary + resets counters
-
         else:
             raise ValueError(f"Unknown objective '{objective}'")
 
-    @fff
-    def refine(self, objective, mode, thr):
-
-        self._reset_j_with_i()
-
-        if objective == 'cpd':
-            self._compute_cores_from_centroids()
-            eidxs_diff = self.cpd_candidates_from_centroids(mode=mode, thr = thr,)
-            # print(f"diffs {eidxs_diff}")
-
-            self._apply_plan_and_commit(eidxs_diff)
-
-            # # Optional: a light smoothing to settle interfaces
-            self.smooth_until_stagnates()
-
-            pass
-        else:
-            raise ValueError(f"Unknown objective '{objective}'")
-
-    @fff
     def swap_partitions(self, r0: int, r1: int) -> None:
         """
         Swap the per-rank mesh partition (State `i`) between two *world* ranks.
@@ -2354,14 +2223,10 @@ class _MetaMesh:
 
         # Ownership tags in con_i have to be updated to reflect the new
         # gid->owner distribution. Do this once per rank.
-        self._retag_con_owners_from_gid_maps()
-        self.mpi_vertex_union = None
+        self._retag_con_owners()
 
         # Invalidate topology-dependent caches (owners_map, nei_gid_sets, ...)
         self._invalidate_topology()
-
-
-
 
     @staticmethod
     def _partition_stats(mesh):
@@ -2504,89 +2369,8 @@ class _MetaMesh:
         with open(csv_path, 'a') as f:
             f.write(','.join(row) + '\n')
 
-
-    # --- NEW: neighbor GID sets cache (per topology epoch) ---
-    @fff
-    def _neighbor_gid_sets_cached(self) -> dict[int, dict[str, np.ndarray]]:
-        gen = int(self._ver.get('topology', 0))
-        c   = self._cache.get('nei_gid_sets')
-        if c is not None and c.get('gen') == gen:
-            return c['map']
-
-        per_nbr = self._mpi_faces_by_neighbor()
-        neighbors = sorted(map(int, per_nbr.keys()))
-        if not neighbors:
-            m = {}
-            self._cache['nei_gid_sets'] = {'gen': gen, 'map': m}
-            return m
-
-        ncomm = comm['world'].Create_dist_graph_adjacent(neighbors, neighbors)
-        send = {et: np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
-                for et in self.etypes}
-        recvd = ncomm.neighbor_allgather(send)
-
-        m = {}
-        for nbr, pay in zip(neighbors, recvd):
-            m[int(nbr)] = {
-                et: np.asarray(pay.get(et, ()), dtype=np.int64)
-                for et in self.etypes
-            }
-
-        self._cache['nei_gid_sets'] = {'gen': gen, 'map': m}
-        return m
-
-    @fff
-    def calc_mpi_faces_deltas(self) -> dict[int, dict[str, np.ndarray]]:
-        cons = {et: np.asarray(self.con_i.get(et, ()), dtype=np.int64)
-                for et in self.etypes}
-
-        # Safe path: use global gid->owner maps
-        owners_map = self._gid_owner_maps(self.eidxs_i)
-        neighbor_set = sorted({
-            int(owners_map[self.etypes[int(code)]].get(int(ngid), rank['world']))
-            for et, con in cons.items() if con.size
-            for code, ngid in zip(con[..., 1].ravel(), con[..., 2].ravel())
-            if code >= 0
-        } - {rank['world']})
-
-        empty = np.empty((0, 2), np.int64)
-        idx2et = self.etypes
-
-        def per_et(et, con, nrank):
-            if con.size == 0:
-                return empty
-            codes, ngids = con[..., 1], con[..., 2]
-            valid = (codes >= 0)
-
-            def owner_of(idx, gid):
-                if idx < 0:
-                    return -99
-                return owners_map[idx2et[int(idx)]].get(int(gid), rank['world'])
-
-            owners = np.vectorize(owner_of)(
-                np.where(valid, codes, -1),
-                np.where(valid, ngids, -1)
-            )
-            c_me = np.sum(valid & (owners == rank['world']), axis=1).astype(np.int16)
-            c_n  = np.sum(valid & (owners == nrank), axis=1).astype(np.int16)
-            sel  = (c_n > 0)
-            if not np.any(sel):
-                return empty
-            lids  = np.nonzero(sel)[0].astype(np.int64)
-            delta = (c_me - c_n)[sel].astype(np.int64)
-            mat   = np.c_[lids, delta]
-            return mat[np.lexsort((mat[:, 0], mat[:, 1]))]
-
-        return {n: {et: per_et(et, cons[et], n) for et in self.etypes}
-                for n in neighbor_set}
-
-    @fff
-    def collect_mpi_vertex_cluster(
-        self,
-        rank_a: int,
-        rank_b: int,
-        seed_etype: str | None = None,
-    ) -> dict[str, np.ndarray]:
+    def collect_mpi_vertex_cluster(self, rank_a: int, rank_b: int, 
+                                   seed_etype: str | None = None, ):
         """
         Per-rank "seed" element on a vertex interface between two ranks.
 
@@ -2655,9 +2439,7 @@ class _MetaMesh:
             et_scan = base_order
 
         # Ensure we have up-to-date MPI-vertex sets per neighbour.
-        mvu = self.mpi_vertex_union
-        if mvu is None:
-            mvu = self.collect_mpi_vertex_nodes()
+        mvu = self.collect_mpi_vertex_nodes()
 
         if this_rank not in (ra, rb):
             # Not part of this interface; nothing to do.
@@ -2670,7 +2452,7 @@ class _MetaMesh:
 
         # Decide which neighbour's MPI-vertices are relevant on this rank.
         nbr = rb if this_rank == ra else ra
-        nbr_vertices = np.asarray(mvu.get(int(nbr), ()), dtype=np.int64)
+        nbr_vertices = np.asarray(mvu.get(nbr, ()), dtype=np.int64)
 
         if nbr_vertices.size == 0:
             # We *are* one of the pair, but there is no MPI-vertex interface.
@@ -2689,13 +2471,11 @@ class _MetaMesh:
         # local element whose spts_nodes contain any of the neighbour's
         # interface vertices.
         for et in et_scan:
-            nds = self.spts_nodes_i.get(et)
-            gids = np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64)
+            nds = self.i.spts_nodes[et]
+            gids = self.i.eidxs[et]
 
             if nds is None or nds.size == 0 or gids.size == 0:
                 continue
-
-            nds = np.asarray(nds, dtype=np.int64)
 
             # Elements which contain any of the neighbour's interface vertices.
             v_in = np.isin(nds, nbr_vertices, assume_unique=False)
@@ -2706,8 +2486,7 @@ class _MetaMesh:
                 continue
 
             # Pick exactly ONE element: the first in local index order
-            gid = np.asarray([gids[lids[0]]], dtype=np.int64)
-            cluster_by_et[et] = gid
+            cluster_by_et[et] = gids[lids[0]]
             chosen_total = 1
             chosen_etype = et
 
@@ -2728,372 +2507,874 @@ class _MetaMesh:
 
         return cluster_by_et
 
-    # ============================
-    # CPD
-    # ============================
+    def refine(self, mode, thr):
+        self._reset_j_with_i()
+        eidxs_diff = self._cpd.refine(mode=mode, thr=thr)
+        self._apply_plan_and_commit(eidxs_diff)
+        self.smooth_until_stagnates()
 
-    @fff
-    def _init_centroids_from_mesh(self, mesh: _Mesh) -> None:
+    def _get_global_owner_array(self) -> np.ndarray:
         """
-        Per-etype element centroids in physical space.
+        Debug helper: build a global owner array
 
-        centroids_i[et]: (Ne, 3) float64, same element ordering as eidxs_i[et].
-        For 2D meshes, z is padded with 0.
+            owners_global[g] = rank that owns global element ID g,
+
+        using State.eidxs_flat (global IDs local to this rank) and an
+        allgather across ranks.
         """
-        centroids: Dict[str, np.ndarray] = {}
+        cw = comm['world']
+        my_rank = int(rank['world'])
+        gen = int(self._ver.get('topology', 0))
+
+        c = self._cache.get('owner_global')
+        if c is not None and c['gen'] == gen:
+            return c['owners']
+
+        ids_local = np.asarray(self.i.eidxs_flat, dtype=np.int64)
+
+        # Determine Ne_global via max(global_id) + 1
+        all_max = cw.allgather(int(ids_local.max()) if ids_local.size else -1)
+        Ne_global = (max(all_max) + 1) if all_max else 0
+
+        owners_global = np.empty(Ne_global, dtype=np.int32)
+        owners_global.fill(-1)
+
+        # Enumerate across allgathered global IDs
+        for rr, gids_rr in enumerate(cw.allgather(ids_local)):
+            gids_rr = np.asarray(gids_rr, dtype=np.int64)
+            if gids_rr.size == 0:
+                continue
+            owners_global[gids_rr] = rr
+
+        self._cache['owner_global'] = {'gen': gen, 'owners': owners_global,}
+
+        return owners_global
+
+    def _retag_con_owners(self):
+        """
+        Retag connectivity owner fields using global IDs in con_idx.
+        """
+        owners_global = self._get_global_owner_array()
+        
+        for et, con_idx in self.i.con_idx.items():
+            con_idx_arr = con_idx
+            con_mpi_arr = self.i.con_mpi[et]
+
+            if con_idx_arr.size == 0 or con_mpi_arr.size == 0:
+                continue
+
+            gidx_flat   = con_idx_arr[...].reshape(-1)
+            owners_flat = con_mpi_arr[...].reshape(-1)
+
+            # Valid: element-neighbour faces (global ID >= 0)
+            valid = (gidx_flat >= 0)
+            nfaces_valid = int(valid.sum())
+
+            if nfaces_valid == 0:
+                continue
+
+            owners_flat[valid] = owners_global[gidx_flat[valid]].astype(np.int32)
+
+            new_owners = owners_flat.reshape(con_mpi_arr.shape)
+            self.i.con_mpi[et][...] = new_owners
+
+    def plan_eidxs_dest_from_diff(self, eidxs_diff, verbose=False):
+        """
+        Build new per-etype GID lists after a proposed relocation plan.
+        """
+
+        send_plan = {
+            d: {
+                et: np.asarray(eidxs_diff.get(d, {}).get(et, ()), dtype=np.int64)
+                for et in self.etypes
+            }
+            for d in range(comm['world'].size)
+            if d != rank['world']
+        }
+        all_plans = comm['world'].allgather(send_plan)
+
+        to_send = {}
+        for et in self.etypes:
+            chunks = [send_plan[d][et] for d in send_plan if send_plan[d][et].size]
+            to_send[et] = (np.unique(np.concatenate(chunks))
+                           if chunks else np.empty(0, dtype=np.int64))
+
+        to_recv = {et: np.empty(0, dtype=np.int64) for et in self.etypes}
+        for sender, plan in enumerate(all_plans):
+            if sender == rank['world']:
+                continue
+            per_me = plan[rank['world']]
+            if not per_me:
+                continue
+            for et in self.etypes:
+                a = per_me[et]
+                if a is not None and a.size:
+                    to_recv[et] = np.concatenate((to_recv[et], a))
 
         for et in self.etypes:
-            gids = np.asarray(mesh.eidxs.get(et, ()), dtype=np.int64)
-            Ne   = gids.size
+            if to_recv[et].size:
+                to_recv[et] = np.unique(to_recv[et])
 
-            if Ne == 0:
-                centroids[et] = np.zeros((0, 3), dtype=np.float64)
-                continue
+        # --- Build new_eidxs from *flat* view only ---
 
-            spts = mesh.spts.get(et)
-            if spts is None:
-                centroids[et] = np.zeros((Ne, 3), dtype=np.float64)
-                continue
-
-            spts = np.asarray(spts, dtype=np.float64)
-
-            if spts.ndim == 3:
-                # Layout: (npts, Ne, nd)  with element index on axis 1
-                npts, Ne_spts, nd = spts.shape
-                # average over points -> (Ne, nd)
-                c = spts.mean(axis=0)          # (Ne_spts, nd)
-            elif spts.ndim == 2:
-                # Degenerate: (Ne, nd) – already one point per element
-                Ne_spts, nd = spts.shape
-                c = spts
-            else:
-                raise RuntimeError(f"Unexpected spts[{et!r}].ndim={spts.ndim}")
-
-            # Ne_spts should match Ne; if not, clip to the common prefix
-            if Ne_spts != Ne:
-                m = min(Ne_spts, Ne)
-                c = c[:m, :]
-                if m < Ne:
-                    pad = np.zeros((Ne - m, c.shape[1]), dtype=np.float64)
-                    c = np.vstack([c, pad])
-
-            # Pad or trim to 3 coordinates
-            nd_eff = c.shape[1]
-            if nd_eff < 3:
-                c3 = np.zeros((Ne, 3), dtype=np.float64)
-                c3[:, :nd_eff] = c
-                c = c3
-            elif nd_eff > 3:
-                c = c[:, :3]
-
-            centroids[et] = c
-
-        # Same centroids for i and j; edim=0 relocation is correct with shape (Ne, 3)
-        self.i.centroids = {et: arr.copy() for et, arr in centroids.items()}
-        self.j.centroids = {et: arr.copy() for et, arr in centroids.items()}
-
-        if rank['world'] == root['world']:
-            ne_tot = sum(arr.shape[0] for arr in centroids.values())
-            print(f"[cpd.centroid] init: etypes={list(self.etypes)} total_elems={ne_tot}",
-                flush=True)
-
-    @fff
-    def _compute_cores_from_centroids(self) -> None:
-        """
-        Compute per-rank CPD cores from current element centroids.
-
-        For rank r, core_r is the arithmetic mean of all element centroids
-        owned by r (all etypes, equal weight).
-        Result stored in self._cores with shape (R, nd).
-        """
-        R = comm['world'].size
-
-        # Local sum and count
-        nd = None
-        sum_local = None
-        count_local = 0
-
-        # centroids_i[et]: (Ne, nd)
+        new_eidxs = {}
         for et in self.etypes:
-            c = getattr(self.i, 'centroids', {}).get(et) if hasattr(self.i, 'centroids') else None
-            if c is None:
-                continue
-            c = np.asarray(c, dtype=np.float64)
-            if c.size == 0:
-                continue
+            cur = self.i.eidxs[et]
 
-            if nd is None:
-                nd = c.shape[1]
-                sum_local = np.zeros(nd, dtype=np.float64)
-
-            sum_local += c.sum(axis=0)
-            count_local += c.shape[0]
-
-        if nd is None:
-            # No elements on this rank: keep a harmless default
-            nd = 3
-            sum_local = np.zeros(nd, dtype=np.float64)
-
-        sums   = comm['world'].allgather(sum_local)
-        counts = comm['world'].allgather(int(count_local))
-
-        cores = np.zeros((R, nd), dtype=np.float64)
-        for r in range(R):
-            if counts[r] > 0:
-                cores[r, :] = sums[r] / float(counts[r])
+            ts = to_send[et]
+            if cur.size and ts.size:
+                keep = cur[~np.isin(cur, ts, assume_unique=True)]
             else:
-                cores[r, :] = np.nan
+                keep = cur
 
-        self._cores = cores
+            rv = to_recv[et]
+            if rv.size:
+                add = rv[~np.isin(rv, keep, assume_unique=True)] if keep.size else rv
+                new = np.concatenate((keep, add)) if add.size else keep
+            else:
+                new = keep
 
-        if rank['world'] == root['world']:
-            line = " ".join(f"\nr{r}={cores[r].tolist()}" for r in range(R))
-            print(f"[cpd.core] cores_from_centroids: {line}", flush=True)
+            new_eidxs[et] = new
 
-    @fff
-    def __cpd_observe_quality(self, *, mode: str = "faces") -> None:
+        if verbose:
+            tag = 'ag'
+            tsz = {et: int(to_send[et].size) for et in self.etypes}
+            rsz = {et: int(to_recv[et].size) for et in self.etypes}
+            nsz = {et: int(new_eidxs[et].size) for et in self.etypes}
+            print(f"[plan/{tag}] R{rank['world']}\tsend:{tsz}\trecv:{rsz}\ttarget:{nsz}")
+
+        return new_eidxs
+
+    # --------------------------------------------------------------------------
+    # Cost to targets
+    # --------------------------------------------------------------------------
+
+    # Cost targets etc
+
+    @staticmethod
+    def compute_cost(g1a, g1s, g1r):
+        g1a_old = np.asarray(g1a, dtype=float)
+        g1s_old = np.asarray(g1s, dtype=float)
+        g1r_old = np.asarray(g1r, dtype=float)
+
+        s_out = g1s_old.sum(axis=1)
+        r_in  = g1r_old.sum(axis=1)
+        r_out = g1r_old.sum(axis=0)
+
+        return (g1a_old - r_in  * _MetaMesh.lb_cost_scale_g1r
+                        - s_out * _MetaMesh.lb_cost_scale_g1s
+                        + r_out * _MetaMesh.lb_cost_scale_g1rt)
+
+    @staticmethod
+    def calc_target_ecounts(ecurrs, g1a, g1s, g1r, cfg):
         """
-        Diagnose CPD 'mis-ownership' on MPI-interface elements.
-
-        mode:
-          - 'faces'    : use MPI faces (self._mpi_faces_by_neighbor)
-          - 'vertices' : use MPI vertex interface (self.calc_mpi_vertices_delta)
-
-        For each interface element e on rank r:
-            d_self = ||c_e - core_r||^2
-            d_best = min_s ||c_e - core_s||^2 over neighbour ranks s of e
-            Δ      = d_best - d_self
-
-        So:
-          Δ < 0  → element is geometrically closer (CPD sense) to some neighbour
-                    than to its current owner (candidate for moving).
-          Δ ≥ 0  → geometrically OK where it is.
-
-        We aggregate Δ over all ranks and print global statistics at root.
+        Builds target element counts using MPI wait-split data.
+        Returns integer per-rank targets in *newcompute* comm
+            (world-rank list from rankmap_new).
         """
+        # --- Rankmaps for old and new compute comms ---
+        # New compute: communicator built from online.ini compute-ranklist
+        if g1a is None or g1s is None or g1r is None:
+            raise RuntimeError(
+                f"[get_target] called with None g1-data on this rank; "
+                "this should only be called on ranks in the old compute comm."
+            )
 
-        R = comm['world'].size
-        r_me = int(rank['world'])
+        if comm['newcompute'] == mpi.COMM_NULL:
+            raise RuntimeError(
+                "[get_target] rank is not in newcompute but still reached get_target"
+            )
 
-        # --- cores: we assume you've already computed them and stored here ---
-        cores = np.asarray(self._cores, dtype=np.float64)  # (R, 3)
+        cost_old = _MetaMesh.compute_cost(g1a, g1s, g1r)
 
-        # --- per-element neighbour sets on MPI interface ---
-        # neighbours_per_et[et][lid] = {nbr0, nbr1, ...}
-        neighbours_per_et: dict[str, dict[int, set[int]]] = {et: {} for et in self.etypes}
+        # --- Restrict world-indexed element counts to old compute ranks ---
 
-        if mode == "edges":
-            per_nbr_faces = self._mpi_faces_by_neighbor()
-            for nbr, faces in per_nbr_faces.items():
-                nn = int(nbr)
-                for et, lid, _fidx in faces:
-                    lid = int(lid)
-                    neighbours_per_et[et].setdefault(lid, set()).add(nn)
+        # rankmap_old is a list of world ranks in old compute order
+        ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
+        Ntot = int(ecurrs_old.sum())
 
-        elif mode == "vertices":
-            deltas_by_rank = self.calc_mpi_vertices_delta()
-            for nbr, per_et in deltas_by_rank.items():
-                nn = int(nbr)
-                for et, arr in per_et.items():
-                    if arr is None or arr.size == 0:
-                        continue
-                    lids = arr[:, 0].astype(np.int64, copy=False)
-                    for lid in lids:
-                        lid = int(lid)
-                        neighbours_per_et[et].setdefault(lid, set()).add(nn)
+        # Snapshot medians to CSV (uses whatever index space g1* live in)
+        _MetaMesh.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
+
+        # Per-element inverse cost on old ranks
+        inv_cost = ecurrs_old / cost_old
+        N_star_old = Ntot * (inv_cost / inv_cost.sum())
+
+        # --- Remap N_star_old from old->new using device groups (world space) ---
+
+        # Devices from config: e.g. ['gpu', 'cpu', 'cpu', 'cpu', 'cpu']
+        devices = cfg.getliteral('backend', 'devices')
+
+        # rankmap_* are world-rank lists, matching ecurrs/devices indexing
+        if list(rankmap['compute']) != list(rankmap['newcompute']):
+            N_star_new = _MetaMesh.remap_targets_by_ranklist(N_star_old,
+                old_ranks=rankmap['compute'], new_ranks=rankmap['newcompute'],
+                devices=devices, tag="[lb-group]")
         else:
-            raise ValueError(f"cpd_observe_quality: unknown mode={mode!r} (use 'edges' or 'vertices')")
+            # No rank change: old and new are the same
+            N_star_new = N_star_old.copy()
 
-        # --- local Δ samples on this rank ---
-        deltas_local: list[float] = []
+        # --- Normalise and round to integer targets in newcompute order ---
+        N_int = _MetaMesh.normalise_and_round_targets(N_star_new, Ntot=Ntot, tag="[lb-round]",)
+        if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
+            print(f"[load-balance] N_int={N_int} (sum={int(N_int.sum())})")
 
-        for et in self.etypes:
-            cent = np.asarray(self.i.centroids.get(et, ()), dtype=np.float64)
-            if cent.size == 0:
-                continue
+        # Return in newcompute's world-rank order (rankmap_new)
+        return N_int.tolist()
 
-            per_lid = neighbours_per_et.get(et, {})
-            if not per_lid:
-                continue
-
-            core_self = cores[r_me]
-
-            for lid, nbrs in per_lid.items():
-                if not nbrs:
-                    continue
-                lid = int(lid)
-                c = cent[lid]    # (3,)
-
-                # distance to current owner core
-                ds = c - core_self
-                d_self = float(ds.dot(ds))
-
-                # best neighbour core distance
-                d_best = float("inf")
-                for nn in nbrs:
-                    dv = c - cores[int(nn)]
-                    d = float(dv.dot(dv))
-                    if d < d_best:
-                        d_best = d
-
-                # Δ = d_best - d_self
-                deltas_local.append(d_best - d_self)
-
-        arr_loc = np.asarray(deltas_local, dtype=np.float64)
-
-        # --- gather to root and print global statistics ---
-        gathered = comm['world'].gather(arr_loc, root=root['world'])
-
-        if rank['world'] != root['world']:
-            return
-
-        all_d = np.concatenate([g for g in gathered if g is not None and g.size]) \
-                if gathered else np.empty(0, dtype=np.float64)
-
-        N = int(all_d.size)
-        if N == 0:
-            print(f"[cpd.qual] mode={mode} N=0 (no MPI-interface elements seen)", flush=True)
-            return
-
-        n_bad = int((all_d < 0.0).sum())
-        frac_bad = 100.0 * float(n_bad) / float(N)
-
-        med = float(np.median(all_d))
-        p10 = float(np.percentile(all_d, 10.0))
-        p90 = float(np.percentile(all_d, 90.0))
-
-        print(
-            f"[cpd.qual] mode={mode} N={N} "
-            f"misowned(Δ<0)={n_bad} ({frac_bad:5.2f}%) "
-            f"Δ=d_best-d_self: median={med: .3e} p10={p10: .3e} p90={p90: .3e}",
-            flush=True
-        )
-
-    @fff
-    def cpd_candidates_from_centroids(self, *, mode="edges", thr=0.0):
+    @staticmethod
+    def write_g1_median_csvs(g1a, g1s, g1r, g1idx: int = 1):
         """
-        Centroid-based CPD candidate elements.
+        Snapshot g1 medians to CSV in integer microseconds.
+        Now always use world-size vectors/matrices and embed compute ranks.
+        """
+        # Scale to microseconds and cast to int (compute index space)
+        all_us  = np.rint(g1a * 1e6).astype(np.int64)
+        send_us = np.rint(g1s * 1e6).astype(np.int64)
+        recv_us = np.rint(g1r * 1e6).astype(np.int64)
 
-        For each MPI-interface element on this rank we compute:
-            d_self  = ||c_e - core_r||^2  (this rank)
-            d_best  = min_{s in nghbrs(e)} ||c_e - core_s||^2
-            Δ       = d_best - d_self
+        if rank['compute'] != root['compute']:
+            return
 
-        If Δ < -thr and the best rank is not this rank, the element is
-        marked as a candidate to move *away* from this rank, to that
-        best neighbour.
+        # ---- NEW: embed into world index space ----
+        P_world   = comm['world'].size
+        comp_wrs  = list(rankmap['compute'])   # world ranks in compute index order
+        P_compute = len(comp_wrs)
+
+        assert P_compute == len(all_us)
+        assert send_us.shape == (P_compute, P_compute)
+        assert recv_us.shape == (P_compute, P_compute)
+
+        # Default value for non-compute ranks (can change to -1 if you prefer)
+        missing_val = -1
+
+        all_us_w  = np.full(P_world, missing_val, dtype=np.int64)
+        send_us_w = np.full((P_world, P_world), missing_val, dtype=np.int64)
+        recv_us_w = np.full((P_world, P_world), missing_val, dtype=np.int64)
+
+        for ic, wr_i in enumerate(comp_wrs):
+            all_us_w[wr_i] = all_us[ic]
+            for jc, wr_j in enumerate(comp_wrs):
+                send_us_w[wr_i, wr_j] = send_us[ic, jc]
+                recv_us_w[wr_i, wr_j] = recv_us[ic, jc]
+
+        # --- ALL vector (world size) ---
+        rcols = [f"r{r}" for r in range(P_world)]
+        _append_csv_row('g1-all-median-ms.csv', rcols, all_us_w.tolist())
+
+        # --- SEND / RECV full directed off-diagonal matrices (world size) ---
+        mcols = [f"i{i}-{j}" for i in range(P_world) for j in range(P_world) if j != i]
+        _append_csv_row('g1-send-median-ms.csv', mcols, 
+                        [int(send_us_w[i, j]) for i in range(P_world) for j in range(P_world) if j != i])
+        _append_csv_row('g1-recv-median-ms.csv', mcols, 
+                        [int(recv_us_w[i, j]) for i in range(P_world) for j in range(P_world) if j != i])
+
+    @staticmethod
+    def remap_targets_by_ranklist(N_star_old, old_ranks, new_ranks, devices, tag="[lb-group]"):
+        """
+        Remap continuous targets N_star_old from old_ranks -> new_ranks using device groups.
+
+        Parameters
+        ----------
+        N_star_old : array-like of float, shape (P_old,)
+            Continuous targets on the old compute ranks, in old-compute index order.
+        old_ranks : list[int]
+            World ranks in old compute order (len == len(N_star_old)).
+        new_ranks : list[int]
+            World ranks in new compute order.
+        devices : Sequence[str]
+            Device label per *world* rank, e.g. ['gpu','cpu',...].
+        tag : str
+            Log prefix.
 
         Returns
         -------
-        eidxs_diff : Dict[int, Dict[str, np.ndarray]]
-            dest_rank -> { etype -> (Nmove,) int64 GIDs }.
-            These are elements this rank proposes to export to dest_rank.
+        np.ndarray of float, shape (len(new_ranks),)
+            Continuous targets in new compute order.
         """
-        r_me   = rank['world']
-        comm_w = comm['world']
+        N_star_old = np.asarray(N_star_old, dtype=float)
+        assert len(N_star_old) == len(old_ranks), \
+            f"{tag} len(N_star_old)={len(N_star_old)} != len(old_ranks)={len(old_ranks)}"
 
-        # 1. Per-rank cores from centroids (3-vector per rank)
-        cores = self._cores
-        core_self = cores[r_me]
+        # Map world rank -> index in old-compute array
+        wr_to_idx = {wr: i for i, wr in enumerate(old_ranks)}
 
-        # 2. Per-element neighbour sets on MPI interface
-        # neighbours_per_et[et][lid] = {nbr0, nbr1, ...}
-        neighbours_per_et: dict[str, dict[int, set[int]]] = {et: {} for et in self.etypes}
+        # Build device-group → list of old indices
+        group_to_indices = defaultdict(list)
+        for i, wr in enumerate(old_ranks):
+            dev = devices[wr]
+            group_to_indices[dev].append(i)
 
-        if mode == "edges":
-            per_nbr_faces = self._mpi_faces_by_neighbor()
-            for nbr, faces in per_nbr_faces.items():
-                nn = int(nbr)
-                for et, lid, _fidx in faces:
-                    lid = int(lid)
-                    neighbours_per_et[et].setdefault(lid, set()).add(nn)
+        removed = sorted(set(old_ranks) - set(new_ranks))
+        print(f"{tag} old_ranks={old_ranks} new_ranks={new_ranks}")
+        print(f"{tag} removed_ranks={removed}")
+        print(f"{tag} group_to_indices="
+              f"{{{', '.join(f'{g}:{idxs}' for g, idxs in group_to_indices.items())}}}")
 
-        elif mode == "vertices":
-            deltas_by_rank = self.calc_mpi_vertices_delta()
-            for nbr, per_et in deltas_by_rank.items():
-                nn = int(nbr)
-                for et, arr in per_et.items():
-                    if arr is None or arr.size == 0:
-                        continue
-                    lids = arr[:, 0].astype(np.int64, copy=False)
-                    for lid in lids:
-                        lid = int(lid)
-                        neighbours_per_et[et].setdefault(lid, set()).add(nn)
-        else:
-            raise ValueError(
-                f"cpd_candidates_from_centroids: unknown mode={mode!r} "
-                "(use 'edges' or 'vertices')"
+        N_star_new = np.zeros(len(new_ranks), dtype=float)
+
+        for k, wr in enumerate(new_ranks):
+            dev = devices[wr]
+            if wr in wr_to_idx:
+                # Rank survives: carry its own target
+                i_old = wr_to_idx[wr]
+                N_star_new[k] = N_star_old[i_old]
+                print(f"{tag} wr={wr} (dev={dev}) reused_old idx={i_old} "
+                      f"N_star_old={N_star_old[i_old]:.6e}")
+            else:
+                # New compute rank: use device-group average, else global average
+                idxs = group_to_indices.get(dev, [])
+                if idxs:
+                    val = float(N_star_old[idxs].mean())
+                    print(f"{tag} wr={wr} (dev={dev}) new_rank using group_avg over idxs={idxs}: "
+                          f"{val:.6e}")
+                else:
+                    val = float(N_star_old.mean())
+                    print(f"{tag} wr={wr} (dev={dev}) new_rank using global_avg: {val:.6e}")
+                N_star_new[k] = val
+
+        return N_star_new
+
+    @staticmethod
+    def normalise_and_round_targets(N_star, Ntot, tag="[lb-round]"):
+        """
+        Rescale continuous targets N_star to sum to Ntot and round to integers.
+
+        Parameters
+        ----------
+        N_star : array-like of float
+            Continuous targets (new compute order).
+        Ntot : int
+            Total element count to preserve.
+        tag : str
+            Log prefix.
+
+        Returns
+        -------
+        np.ndarray of int
+            Integer targets summing to Ntot.
+        """
+        N_star = np.asarray(N_star, dtype=float)
+        sum_star = float(N_star.sum())
+
+        if sum_star <= 0.0:
+            raise ValueError(f"{tag} sum(N_star) <= 0 (got {sum_star})")
+
+        scale = float(Ntot) / sum_star
+        N_scaled = N_star * scale
+        N_floor = np.floor(N_scaled).astype(np.int64)
+
+        k = int(Ntot - N_floor.sum())
+
+        if k != 0:
+            frac = N_scaled - N_floor
+            order = np.argsort(frac)  # ascending
+
+            if k > 0:
+                idxs = order[-k:]   # bump largest fractions
+                N_floor[idxs] += 1
+                print(f"{tag} +1 to indices={idxs}")
+            else:
+                idxs = order[:-k]   # k < 0 → drop smallest fractions
+                N_floor[idxs] -= 1
+                print(f"{tag} -1 from indices={idxs}")
+
+        return N_floor
+
+
+    # --------------------------------------------------------------------------
+    # Mesh to MetaMesh conversion
+    # --------------------------------------------------------------------------
+
+    def to_mesh(self, eidxs_dest):
+        ic = _MeshInterconnector(self.mesh_src.eidxs, eidxs_dest)
+
+        mesh_int = replace(self.mesh_src, eidxs=eidxs_dest,
+            spts       =ic.relocate(self.mesh_src.spts,        edim=1), 
+            spts_nodes =ic.relocate(self.mesh_src.spts_nodes,  edim=0),
+            spts_curved=ic.relocate(self.mesh_src.spts_curved, edim=0),
+            faces_cidxs=ic.relocate(self.mesh_src.faces_cidxs, edim=0),
+            faces_offs =ic.relocate(self.mesh_src.faces_offs,  edim=0),
             )
 
-        # 3. For each MPI-interface element on this rank, decide whether it
-        #    should move and where, and group by destination rank.
-        # moves_by_dest[dest_rank][etype] = [GID0, GID1, ...]
-        moves_by_dest: dict[int, dict[str, list[int]]] = {}
+        self._reconstruct_con_conp_bcon(mesh_int)
 
-        for et, nghbrs_map in neighbours_per_et.items():
-            if not nghbrs_map:
-                continue
+        eidxs_dest = self._apply_lex_ordering(mesh_int)
+        ic2 = _MeshInterconnector(mesh_int.eidxs, eidxs_dest)
+        
+        mesh_dest = replace(mesh_int, eidxs=eidxs_dest,
+            spts       =ic2.relocate(mesh_int.spts,        edim=1), 
+            spts_nodes =ic2.relocate(mesh_int.spts_nodes,  edim=0),
+            spts_curved=ic2.relocate(mesh_int.spts_curved, edim=0),
+            faces_cidxs=ic2.relocate(mesh_int.faces_cidxs, edim=0),
+            faces_offs =ic2.relocate(mesh_int.faces_offs,  edim=0),
+            )
 
-            eidxs_et = self.i.eidxs[et]     # (Ne_et,) global IDs
-            cent_et  = self.i.centroids[et] # (Ne_et, 3) centroids
+        self._reconstruct_con_conp_bcon(mesh_dest)
 
-            for lid, nghbr_ranks in nghbrs_map.items():
-                # centroid of this local element
-                c = cent_et[lid]
+        # Remove keys with empty entries
+        mesh_dest.eidxs = {k: v for k, v in mesh_dest.eidxs.items() if v.size}
 
-                dv = c - core_self
-                d_self = float(dv @ dv)
+        return mesh_dest
 
-                # Closest core among neighbours and self
-                d_best = d_self
-                best_r = r_me
+    def _reconstruct_con_conp_bcon(self, mesh):
+        
+        codec = list(mesh.codec or [])
+        mesh.bcon = {bc.split('/')[1]: [] for bc in codec if bc.startswith('bc/')}
+        
+        etypes = mesh.etypes
+        eidxs = {k: v.tolist() for k, v in mesh.eidxs.items()}
+        glmap = [{k: j for j, k in enumerate(eidxs[etype])} if etype in eidxs else {} for etype in etypes]
 
-                for r_nbr in nghbr_ranks:
-                    dv_n = c - cores[r_nbr]
-                    d_n  = float(dv_n @ dv_n)
-                    if d_n < d_best:
-                        d_best = d_n
-                        best_r = r_nbr
+        cdone, cefidx = [None]*len(codec), [None]*len(codec)
+        for cidx, c in enumerate(codec):
+            if (m := re.match(r'eles/(\w+)/(\d+)$', c)):
+                etype, fidx = m[1], m[2]
+                cdone[cidx] = set()
+                cefidx[cidx] = (etype, etypes.index(etype), int(fidx))
 
-                Δ = d_best - d_self
+        conl, conr = [], []
+        bcon = {i: [] for i, c in enumerate(codec) if c.startswith('bc/')}
+        resid = {}
 
-                # If some neighbour’s core is closer than self by > thr,
-                # and that neighbour is different from self, mark as candidate.
-                if best_r != r_me and Δ < -thr:
-                    moves_by_dest.setdefault(best_r, {}).setdefault(et, []).append(
-                        int(eidxs_et[lid])
+        for etype in etypes:
+            nfaces = self._nfaces(etype)
+            
+            efaces = np.empty((len(eidxs[etype]), nfaces), dtype=[('cidx', np.int16), ('off', np.int64)])
+            efaces['cidx'] = mesh.faces_cidxs.get(etype, np.empty((0, nfaces), np.int16))
+            efaces['off']  = mesh.faces_offs .get(etype, np.empty((0, nfaces), np.int64))
+
+            try:
+                for fidx, eface in enumerate(efaces.T):
+                    efcidx = codec.index(f'eles/{etype}/{fidx}')
+
+                    for j, (cidx, off) in enumerate(iter_struct(eface)):
+                        # Boundary
+                        if off == -1:
+                            bcon[cidx].append((etype, j, fidx))
+                        # Unpaired face
+                        elif j not in cdone[efcidx]:
+                            # Lookup the element type and face number
+                            ketype, ketidx, kfidx = cefidx[cidx]
+
+                            # If our rank has the element then pair it
+                            if (k := glmap[ketidx].get(off)) is not None:
+                                conl.append((etype, j, fidx))
+                                conr.append((ketype, k, kfidx))
+                                cdone[cidx].add(k)
+                            # Otherwise add it to the residual dict
+                            else:
+                                resid[efcidx, eidxs[etype][j]] = (cidx, off)
+            except Exception as e:
+                print(
+                    f"[_reconstruct_con_conp_bcon] ERROR on rank={rank['world']} "
+                    f"etype={etype}: {e.__class__.__name__}: {e}",
+                    flush=True
+                )
+                raise
+
+        # Add the internal connectivity to the mesh
+        mesh.con = (conl, conr)
+
+        for k, v in bcon.items():
+            if v:
+                mesh.bcon[codec[k][3:]] = v
+            else:
+                del mesh.bcon[codec[k][3:]]
+
+        neighbours = [i for i in range(comm['world'].size) if i != rank['world']]
+
+        ncomm = comm['world'].Create_dist_graph_adjacent(neighbours,
+                                                neighbours)
+
+        # Create a list of our unpaired faces
+        unpaired = list(resid.values())
+
+        # Distribute this to each of our neighbours
+        nunpaired = ncomm.neighbor_allgather(unpaired)
+
+        # See which of our neighbours unpaired faces we have
+        matches = [[resid[j] for j in nunp if j in resid] for nunp in nunpaired]
+
+        # Distribute this information back to our neighbours
+        nmatches = ncomm.neighbor_alltoall(matches)
+
+        for nrank, nmatch in zip(neighbours, nmatches):
+            if rank['world'] < nrank:
+                ncon = [r for l, r in sorted([(resid[m], m) for m in nmatch])]
+            else:
+                ncon = [l for l, r in sorted([(m, resid[m]) for m in nmatch])]
+
+            nncon = []
+            for cidx, off in ncon:
+                etype, etidx, fidx = cefidx[cidx]
+                nncon.append((etype, glmap[etidx][off], fidx))
+
+            # Add the connectivity to the mesh
+            mesh.con_p[nrank] = nncon
+
+        # Find elements sharing an MPI interface
+        ifmpi = {etype: [] for etype in self.etypes}
+        for nrank, ncon in mesh.con_p.items():
+            for etype, eidx, fidx in ncon:
+                ifmpi[etype].append(eidx)
+
+        for etype in self.etypes:
+            ifmpi[etype] = np.unique(ifmpi[etype])
+
+        # Size by number of elements of this etype on this rank
+        mesh.spts_internal = {
+            etype: np.ones(len(mesh.eidxs.get(etype, ())), dtype=bool)
+            for etype in self.etypes
+        }
+
+        for etype, eidxs_ifmpi in ifmpi.items():
+            if eidxs_ifmpi.size:
+                mesh.spts_internal[etype][eidxs_ifmpi.astype(int)] = False
+                
+        mesh.con_p = {k: v for k, v in mesh.con_p.items() if v}
+
+    def _apply_lex_ordering(self, mesh):
+        eidxs_dest = {}
+
+        for et in self.etypes:
+            gids = np.asarray(mesh.eidxs.get(et, ()), dtype=np.int64)
+            if not gids.size: eidxs_dest[et] = gids; continue
+            internal = mesh.spts_internal[et].astype(np.int8, copy=False)
+            curved   = mesh.spts_curved  [et].astype(np.int8, copy=False)
+            order = np.lexsort((gids, curved, internal))  # primary = internal
+            eidxs_dest[et] = gids[order]
+        
+        return eidxs_dest
+
+    # --------------------------------------------------------------------------
+
+class _MetaMeshInterconnector(AlltoallMixin):
+    """
+    Fast, MetaMesh-specific interconnector for inner diffusion iterations.
+
+    - No src_all/dest_all allgather.
+    - Per-etype "request then send" protocol over alltoallv.
+    - Currently specialised for element-wise arrays (axis 0 = element),
+      and we only use it for con_idx.
+    """
+    
+class _MetaMeshInterconnector(AlltoallMixin):
+    """
+    Fast, MetaMesh-specific interconnector for inner diffusion iterations.
+
+    Uses the same mesh-global flat indexing as State._eidxs_to_flat.
+    """
+
+    def __init__(self,
+                 eidxs_src: Dict[str, np.ndarray],
+                 eidxs_dest: Dict[str, np.ndarray],
+                 etypes,
+                 eidxs_flat_src: np.ndarray | None = None,
+                 etype_slices_src: Dict[str, slice] | None = None) -> None:
+        self.eidxs_src  = eidxs_src
+        self.eidxs_dest = eidxs_dest
+        self.etypes     = list(etypes)
+
+        W   = comm['world']
+        rnk = int(rank['world'])
+
+        # All-gather per-etype GID lists: same as before
+        self.src_all  = {
+            et: W.allgather(np.asarray(eidxs_src.get(et, ()), dtype=np.int64))
+            for et in self.etypes
+        }
+        self.dest_all = {
+            et: W.allgather(np.asarray(eidxs_dest.get(et, ()), dtype=np.int64))
+            for et in self.etypes
+        }
+
+        # Storage for per-etype traffic pattern
+        self.send_idxs: Dict[str, np.ndarray] = {}
+        self.scount:    Dict[str, np.ndarray] = {}
+        self.sdisp:     Dict[str, np.ndarray] = {}
+        self.rcount:    Dict[str, np.ndarray] = {}
+        self.rdisp:     Dict[str, np.ndarray] = {}
+        self.recv_to_dest: Dict[str, np.ndarray] = {}
+        self.n_dest:      Dict[str, int] = {}
+
+        # ---- NEW: mesh-global flat indexing exactly as in State ----
+        # Source side: either reuse from State or recompute.
+        if eidxs_flat_src is not None and etype_slices_src is not None:
+            self._src_flat        = np.asarray(eidxs_flat_src, dtype=np.int64)
+            self._src_flat_slices = dict(etype_slices_src)
+        else:
+            self._src_flat, self._src_flat_slices = State._eidxs_to_flat(eidxs_src)
+
+        # Destination side: flat view for possible later use / checks
+        self._dest_flat, self._dest_flat_slices = State._eidxs_to_flat(eidxs_dest)
+
+        # Per-etype global offsets: gidx = base[et] + gid
+        self._gidx_base: Dict[str, int] = {}
+        for et in self.etypes:
+            gids_local = np.asarray(self.eidxs_src.get(et, ()), dtype=np.int64)
+            sl = self._src_flat_slices[et]
+            if gids_local.size and sl.stop > sl.start:
+                gidx_local = self._src_flat[sl]
+                # Base is constant: gidx = base + gid
+                self._gidx_base[et] = int(gidx_local[0] - gids_local[0])
+            else:
+                self._gidx_base[et] = 0
+
+        # Single sorted mapping over the flat global IDs
+        if self._src_flat.size:
+            order_flat = np.argsort(self._src_flat)
+            self._src_flat_sorted = self._src_flat[order_flat]
+            self._src_flat_idx    = order_flat.astype(np.int64)
+        else:
+            self._src_flat_sorted = np.empty(0, np.int64)
+            self._src_flat_idx    = np.empty(0, np.int64)
+
+        # NEW: cached local src gids and sorted mapping
+        self._src_local: Dict[str, np.ndarray]   = {}
+        self._src_g_sorted: Dict[str, np.ndarray] = {}
+        self._src_i_sorted: Dict[str, np.ndarray] = {}
+
+        # NEW: cached mapping from send-gids to src-row indices
+        self._send_rows:      dict[str, np.ndarray] = {}
+
+        # Build per-etype comm pattern (same logic as your _build_plan_simple)
+        self._build_plan_simple()
+
+    def _flatten_eidxs_dict(
+        self,
+        eidxs: Dict[str, np.ndarray],
+    ) -> tuple[np.ndarray, Dict[str, slice]]:
+        """
+        Canonical flattening of per-etype eidxs into a 1D array of GIDs.
+
+        The ordering matches the canonical etype order in self.etypes.
+
+        Returns
+        -------
+        flat : np.ndarray
+            (Ne_flat_local,) int64 global element IDs on THIS rank.
+        slices : Dict[str, slice]
+            Per-etype slices back into flat.
+        """
+        pieces: list[np.ndarray] = []
+        slices: Dict[str, slice] = {}
+
+        start = 0
+        for et in self.etypes:
+            arr = np.asarray(eidxs.get(et, ()), dtype=np.int64)
+            n = int(arr.size)
+            if n:
+                pieces.append(arr)
+                slices[et] = slice(start, start + n)
+                start += n
+            else:
+                slices[et] = slice(start, start)
+
+        if pieces:
+            flat = np.concatenate(pieces)
+        else:
+            flat = np.empty(0, dtype=np.int64)
+
+        return flat, slices
+
+    def _build_plan_simple(self) -> None:
+        W    = comm['world']
+        rnk  = int(rank['world'])
+        P    = W.size
+
+        for et in self.etypes:
+            src_local  = np.asarray(self.src_all[et][rnk],  dtype=np.int64)
+            dest_local = np.asarray(self.dest_all[et][rnk], dtype=np.int64)
+
+            self._src_local[et] = src_local
+
+            # Precompute sorted view for fast gid -> row mapping
+            if src_local.size:
+                order_src = np.argsort(src_local)
+                src_sorted = src_local[order_src]
+                src_idx    = order_src.astype(np.int64)
+            else:
+                src_sorted = np.empty(0, np.int64)
+                src_idx    = np.empty(0, np.int64)
+
+            self._src_g_sorted[et] = src_sorted
+            self._src_i_sorted[et] = src_idx
+
+            # ---- per-dest send lists (which GIDs I must send to each rank p) ----
+            send_lists: list[np.ndarray] = []
+            for p in range(P):
+                dest_p = np.asarray(self.dest_all[et][p], dtype=np.int64)
+                if src_local.size and dest_p.size:
+                    sel = src_local[np.isin(src_local, dest_p, assume_unique=True)]
+                else:
+                    sel = np.empty(0, np.int64)
+                send_lists.append(sel)
+
+            # Flatten into one send buffer of GIDs
+            if any(a.size for a in send_lists):
+                sidxs = np.concatenate(send_lists)
+            else:
+                sidxs = np.empty(0, np.int64)
+
+            self.send_idxs[et] = sidxs
+
+            scount = np.array([a.size for a in send_lists], dtype=np.int32)
+            sdisp  = self._count_to_disp(scount)
+
+            self.scount[et] = scount
+            self.sdisp[et]  = sdisp
+
+            # --- build recv side as before (unchanged) ---
+            _, (rcount, rdisp) = self._alltoallcv(W, sidxs, scount, sdisp)
+            ridxs = np.empty(int(rcount.sum()), dtype=np.int64)
+            self._alltoallv(W, (sidxs, (scount, sdisp)),
+                               (ridxs, (rcount, rdisp)))
+            self.rcount[et] = rcount
+            self.rdisp[et]  = rdisp
+
+            # Map recv-buffer indices to local dest row indices
+            n_dest = int(dest_local.size)
+            pr = np.full(n_dest, -1, dtype=np.int64)
+            if n_dest:
+                recv_gids = ridxs
+                if recv_gids.size:
+                    order = np.argsort(recv_gids)
+                    recv_sorted = recv_gids[order]
+
+                    loc = np.searchsorted(recv_sorted, dest_local)
+                    mask_in = loc < recv_sorted.size
+                    loc_in  = loc[mask_in]
+                    same    = recv_sorted[loc_in] == dest_local[mask_in]
+
+                    mask = np.zeros_like(loc, dtype=bool)
+                    mask[mask_in] = same
+
+                    if not np.all(mask):
+                        bad = dest_local[~mask][:8].tolist()
+                        raise ValueError(
+                            f"[MetaMeshInter] r={rnk} et={et} "
+                            f"dest GIDs missing from recv: {bad}"
+                        )
+
+                    pr[mask] = order[loc_in[same]]
+
+            self.recv_to_dest[et] = pr
+            self.n_dest[et]       = n_dest
+
+            # ---------------------------------------------------
+            # NEW: map send GIDs -> local src-row indices once
+            #      and cache for all relocate_cons calls.
+            # ---------------------------------------------------
+            if sidxs.size:
+                loc = np.searchsorted(src_sorted, sidxs)
+                mask = (loc < src_sorted.size) & (src_sorted[loc] == sidxs)
+
+                if not np.all(mask):
+                    bad = sidxs[~mask][:8].tolist()
+                    raise ValueError(
+                        f"[MetaMeshInter] r={rnk} et={et} "
+                        f"send GIDs not found in src_local: {bad}"
                     )
 
-        # 4. Convert lists to np.ndarray and compute debug counts
-        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
-        n_loc = 0
+                rows = src_idx[loc]
+            else:
+                rows = np.empty(0, np.int64)
 
-        for r_dest, per_et in moves_by_dest.items():
-            sub = {}
-            for et, gids in per_et.items():
-                if not gids:
-                    continue
-                arr = np.asarray(gids, dtype=np.int64)
-                sub[et] = arr
-                n_loc += arr.size
-            if sub:
-                eidxs_diff[r_dest] = sub
+            self._send_rows[et] = rows
 
-        n_all = comm_w.allgather(n_loc)
-        if r_me == root['world']:
-            total = sum(n_all)
-            print(
-                f"[cpd.candidates] mode={mode} thr={thr} "
-                f"N_cand_total={total} N_cand_by_rank={n_all}",
-                flush=True,
-            )
 
-        return eidxs_diff
+    # ------------------------------------------------------------------
+    # Data relocation: con_idx only (axis 0 = element index)
+    # ------------------------------------------------------------------
+    def relocate_cons(self, cons_src: Dict[str, np.ndarray]
+                         ) -> Dict[str, np.ndarray]:
+        W   = comm['world']
+        rnk = int(rank['world'])
+
+        out: Dict[str, np.ndarray] = {}
+
+        for et in self.etypes:
+            a0 = cons_src.get(et, None)
+            src_local_gids = self._src_local.get(et, None)
+            if src_local_gids is None:
+                src_local_gids = np.asarray(self.src_all[et][rnk], dtype=np.int64)
+                self._src_local[et] = src_local_gids
+
+            Ne_src_local = int(src_local_gids.size)
+
+            if a0 is None:
+                # Should not happen with well-formed State, but keep a guard.
+                if Ne_src_local:
+                    raise ValueError(
+                        f"[MetaMeshInter] r={rnk} et={et} "
+                        f"con array missing but Ne_src_local={Ne_src_local}"
+                    )
+                out[et] = np.empty((0,), dtype=np.int32)
+                continue
+
+            # Assume np.ndarray stored by State; cheap assert only.
+            if not isinstance(a0, np.ndarray):
+                a0 = np.asarray(a0)
+
+            if a0.shape[0] != Ne_src_local:
+                raise ValueError(
+                    f"[MetaMeshInter] r={rnk} et={et} "
+                    f"rows={a0.shape[0]} vs Ne_src_local={Ne_src_local}"
+                )
+
+            trailing_shape = a0.shape[1:]
+
+            if Ne_src_local and a0.size:
+                # Normal case: at least one local element of this etype
+                a0_flat = a0.reshape(Ne_src_local, -1)
+            else:
+                # Corner case: this rank has zero source rows of this etype.
+                # We still need a well-typed, 2D empty array so that:
+                #   - svals = a0_flat[rows] works (rows will be empty)
+                #   - rvals uses a0_flat.shape[1] for its column count.
+                if trailing_shape:
+                    ncols = int(np.prod(trailing_shape, dtype=int))
+                else:
+                    # 1D input (shape (0,)); treat as one column
+                    ncols = 1
+                a0_flat = np.empty((0, ncols), dtype=a0.dtype)
+
+            # Reuse precomputed src rows for this etype
+            rows = self._send_rows[et]
+            if rows.size:
+                svals = a0_flat[rows]
+            else:
+                svals = np.empty((0, a0_flat.shape[1]), dtype=a0_flat.dtype)
+
+            sc, sd = self.scount[et], self.sdisp[et]
+            rc, rd = self.rcount[et], self.rdisp[et]
+
+            rtot = int(rc.sum())
+            rvals = np.empty((rtot, a0_flat.shape[1]), dtype=a0_flat.dtype)
+
+            self._alltoallv(W, (svals, (sc, sd)), (rvals, (rc, rd)))
+
+            pr    = self.recv_to_dest[et]
+            ndest = self.n_dest[et]
+            if pr.size != ndest:
+                raise ValueError(
+                    f"[MetaMeshInter] r={rnk} et={et} "
+                    f"recv_to_dest size mismatch ({pr.size} vs {ndest})"
+                )
+
+            if ndest:
+                out_flat = rvals[pr]
+                out[et] = out_flat.reshape((ndest,) + trailing_shape)
+            else:
+                out[et] = np.empty((0,) + trailing_shape, dtype=a0.dtype)
+
+        return out
+
 
 class _MeshInterconnector(AlltoallMixin):
 
     def __init__(self, eidxs_src, eidxs_dest):
-
         # Link to src and dest eidxs
         self.eidxs_src = eidxs_src
         self.eidxs_dest = eidxs_dest
@@ -3102,11 +3383,12 @@ class _MeshInterconnector(AlltoallMixin):
         etypes = comm['world'].allgather(sorted(set(eidxs_src) | set(eidxs_dest)))
         self.etypes = sorted(set().union(*etypes))
 
-        # WORLD-gather of per-rank global element IDs (empty for non-participants)
-        self.src_all  = {et: comm['world'].allgather(self._as64(eidxs_src.get(et, ())))
-                         for et in self.etypes}
-        self.dest_all = {et: comm['world'].allgather(self._as64(eidxs_dest.get(et, ())))
-                         for et in self.etypes}
+        # REMOVE ALLGATHER BELOW !!! 
+        # Data we currently own per etype
+        self.src_all  = {et: comm['world'].allgather(self._as64(eidxs_src.get(et, ())))  for et in self.etypes}
+
+        # Data we want to own per etype
+        self.dest_all = {et: comm['world'].allgather(self._as64(eidxs_dest.get(et, ()))) for et in self.etypes}
 
         # Storage
         self.send_idxs, self.recv_idxs = {}, {}
@@ -3115,10 +3397,148 @@ class _MeshInterconnector(AlltoallMixin):
         self.src_pos, self.recv_to_dest = {}, {}
         self.n_dest, self.ssum, self.rsum = {}, {}, {}
 
+        # NEW: vectorised lookup helpers (per etype)
+        self._src_g_sorted,  self._src_i_sorted  = {}, {}
+        self._recv_g_sorted, self._recv_i_sorted = {}, {}
+
         self._build_plan()
 
     def _as64(self, a):
         return np.asarray(a if a is not None else (), dtype=np.int64)
+
+    def _flatten_eidxs_dict(
+        self,
+        eidxs: dict[str, np.ndarray],
+    ) -> tuple[np.ndarray, dict[str, slice]]:
+        """
+        Canonical flattening of per-etype eidxs into a 1D array of GIDs.
+
+        The ordering matches what MetaMesh uses:
+            eidxs_flat = concat( eidxs[et] for et in self.etypes )
+
+        Returns
+        -------
+        flat : np.ndarray
+            (Ne_flat_local,) int64 global element IDs on THIS rank.
+        slices : Dict[str, slice]
+            Per-etype slices back into flat, for debugging / future use.
+        """
+        pieces: list[np.ndarray] = []
+        slices: dict[str, slice] = {}
+
+        start = 0
+        for et in self.etypes:
+            arr = self._as64(eidxs.get(et, ()))
+            n = int(arr.size)
+            if n:
+                pieces.append(arr)
+                slices[et] = slice(start, start + n)
+                start += n
+            else:
+                # Keep an empty slice for invertibility / consistency
+                slices[et] = slice(start, start)
+
+        if pieces:
+            flat = np.concatenate(pieces)
+        else:
+            flat = np.empty(0, dtype=np.int64)
+
+        return flat, slices
+
+    def relocate_eidxs_flat(
+        self,
+        eidxs_flat_src: np.ndarray | None = None,
+        *,
+        label: str = "eidxs-flat",
+    ) -> tuple[np.ndarray, dict[str, slice], dict[str, slice]]:
+        """
+        Compute destination eidxs_flat from eidxs_dest, and optionally
+        verify that the provided source eidxs_flat matches eidxs_src.
+
+        Parameters
+        ----------
+        eidxs_flat_src : np.ndarray or None
+            Rank-local flat GID array as built by MetaMesh on the SOURCE
+            layout. If provided, we check it against our own flattening
+            of eidxs_src and emit a diagnostic line.
+        label : str
+            Short label for log messages.
+
+        Returns
+        -------
+        eidxs_flat_dest : np.ndarray
+            Rank-local flat GID array for the DESTINATION layout.
+        slices_src : Dict[str, slice]
+            Per-etype slices describing how src-flat was built.
+        slices_dest : Dict[str, slice]
+            Per-etype slices describing how dest-flat was built.
+        """
+        # Canonical flattening of src/dest layouts
+        src_flat, slices_src = self._flatten_eidxs_dict(self.eidxs_src)
+        dst_flat, slices_dest = self._flatten_eidxs_dict(self.eidxs_dest)
+
+        # --------------------------------------------------------------
+        # 1) Local consistency check with provided MetaMesh eidxs_flat
+        # --------------------------------------------------------------
+        if eidxs_flat_src is not None:
+            given = self._as64(eidxs_flat_src)
+
+            same_shape = (given.shape == src_flat.shape)
+            same_vals  = same_shape and np.array_equal(given, src_flat)
+
+            if same_vals:
+                print(
+                    f"[MeshInter/{label}-check] rank={rank['world']} "
+                    f"OK src_flat matches eidxs_src "
+                    f"Ne_local={src_flat.size}"
+                )
+            else:
+                print(
+                    f"[MeshInter/{label}-check] rank={rank['world']} "
+                    f"MISMATCH src_flat vs eidxs_src "
+                    f"shape_given={given.shape} shape_expected={src_flat.shape}"
+                )
+
+        # --------------------------------------------------------------
+        # 2) Global invariants to catch gross inconsistencies
+        # --------------------------------------------------------------
+        Ne_src_local  = int(src_flat.size)
+        Ne_dest_local = int(dst_flat.size)
+
+        # Global element counts
+        Ne_src_total = comm['world'].allreduce(
+            Ne_src_local, op=lambda a, b: a + b
+        )
+        Ne_dest_total = comm['world'].allreduce(
+            Ne_dest_local, op=lambda a, b: a + b
+        )
+
+        # Simple checksum invariants (sums of GIDs)
+        sum_src_local = int(src_flat.sum()) if Ne_src_local  else 0
+        sum_dst_local = int(dst_flat.sum()) if Ne_dest_local else 0
+
+        sum_src_total = comm['world'].allreduce(
+            sum_src_local, op=lambda a, b: a + b
+        )
+        sum_dst_total = comm['world'].allreduce(
+            sum_dst_local, op=lambda a, b: a + b
+        )
+
+        # Rank-0 global summary
+        if rank['world'] == 0:
+            print(
+                f"[MeshInter/{label}-global] "
+                f"Ne_src_total={Ne_src_total} Ne_dest_total={Ne_dest_total} "
+                f"sum_src={sum_src_total} sum_dest={sum_dst_total}"
+            )
+
+        # Per-rank local summary
+        print(
+            f"[MeshInter/{label}-local] rank={rank['world']} "
+            f"Ne_src_local={Ne_src_local} Ne_dest_local={Ne_dest_local}"
+        )
+
+        return dst_flat, slices_src, slices_dest
 
     def _build_plan(self):
 
@@ -3142,18 +3562,58 @@ class _MeshInterconnector(AlltoallMixin):
             _, (rcount, rdisp) = self._alltoallcv(comm['world'], sidxs, scount, sdisp)
 
             ridxs = np.empty(int(rcount.sum()), dtype=np.int64)
-            self._alltoallv(comm['world'], (sidxs, (scount, sdisp)), (ridxs, (rcount, rdisp)))
+            self._alltoallv(comm['world'], (svals := sidxs, (scount, sdisp)), (ridxs, (rcount, rdisp)))
 
             # Save counts, disps, and recv list
             self.send_idxs[et], self.recv_idxs[et] = sidxs, ridxs
             self.scount[et], self.sdisp[et] = scount, sdisp
             self.rcount[et], self.rdisp[et] = rcount, rdisp
 
-            # Map global->local on this rank (source side)
+            # Map global->local on this rank (source side) – keep dict for compatibility
             self.src_pos[et] = {int(g): i for i, g in enumerate(src_local)}
-            rpos = {int(g): i for i, g in enumerate(self.recv_idxs[et])}
-            pr = np.fromiter((rpos.get(int(g), -1) for g in dest_local),
-                                                count=dest_local.size, dtype=np.int64)
+
+            # ---- NEW: build sorted lookup tables for src and recv ----
+            # For src: gid -> local row index on this rank
+            if src_local.size:
+                order_src = np.argsort(src_local)
+                self._src_g_sorted[et] = src_local[order_src]
+                self._src_i_sorted[et] = order_src.astype(np.int64)
+            else:
+                self._src_g_sorted[et] = np.empty(0, np.int64)
+                self._src_i_sorted[et] = np.empty(0, np.int64)
+
+            # For recv: gid -> index in flat recv buffer rvals
+            recv_gids = self.recv_idxs[et]
+            if recv_gids.size:
+                order_recv = np.argsort(recv_gids)
+                self._recv_g_sorted[et] = recv_gids[order_recv]
+                self._recv_i_sorted[et] = order_recv.astype(np.int64)
+            else:
+                self._recv_g_sorted[et] = np.empty(0, np.int64)
+                self._recv_i_sorted[et] = np.empty(0, np.int64)
+
+            # Compute mapping dest_local -> recv index (pr) WITHOUT fromiter,
+            # but preserving the "-1 for missing" convention.
+            if dest_local.size:
+                pr = np.full(dest_local.shape, -1, dtype=np.int64)
+
+                recv_sorted = self._recv_g_sorted[et]
+                recv_idx    = self._recv_i_sorted[et]
+
+                if recv_sorted.size:
+                    loc = np.searchsorted(recv_sorted, dest_local)
+                    mask = loc < recv_sorted.size
+                    if mask.any():
+                        loc_m   = loc[mask]
+                        dest_m  = dest_local[mask]
+                        same    = recv_sorted[loc_m] == dest_m
+
+                        pr_m = pr[mask]
+                        pr_m[same] = recv_idx[loc_m[same]]
+                        pr[mask] = pr_m
+            else:
+                pr = np.empty(0, np.int64)
+
             if (pr < 0).any() and dest_local.size:
                 # This happens only if dest asks for a GID nobody sent -> mapping bug
                 bad = [int(g) for g, p in zip(dest_local.tolist(), pr.tolist()) if p < 0][:8]
@@ -3164,6 +3624,7 @@ class _MeshInterconnector(AlltoallMixin):
             self.n_dest[et] = int(dest_local.size)
             self.ssum[et]   = int(scount.sum())
             self.rsum[et]   = int(rcount.sum())
+
 
     def relocate(self, edict_src, edim):
         src0 = self.preproc_edict(edict_src, edim=edim)
@@ -3217,21 +3678,50 @@ class _MeshInterconnector(AlltoallMixin):
         out0 = {}
         for et in self.etypes:
             a0 = edict0.get(et, None)
+            if a0 is None:
+                # Should not happen if preproc_edict did its job; keep behaviour.
+                continue
+
             gids = self.send_idxs[et]
-            pos = np.fromiter((self.src_pos[et].get(int(g), -1) for g in gids),
-                              count=self.ssum[et], dtype=np.int64)
+            ndest = self.n_dest.get(et, 0)
+
+            # Build mapping gids -> local src row indices WITHOUT fromiter,
+            # preserving "-1 for missing" semantics.
+            if gids.size:
+                src_sorted = self._src_g_sorted[et]
+                src_idx    = self._src_i_sorted[et]
+
+                pos = np.full(gids.shape, -1, dtype=np.int64)
+                if src_sorted.size:
+                    loc = np.searchsorted(src_sorted, gids)
+                    mask = loc < src_sorted.size
+                    if mask.any():
+                        loc_m  = loc[mask]
+                        gids_m = gids[mask]
+                        same   = src_sorted[loc_m] == gids_m
+
+                        pos_m = pos[mask]
+                        pos_m[same] = src_idx[loc_m[same]]
+                        pos[mask] = pos_m
+            else:
+                pos = np.empty(0, np.int64)
+
+            # pos is now int64 with "-1" for any impossible GID,
+            # exactly like dict.get(..., -1). We rely on the plan being correct
+            # so in practice pos should be >= 0 always.
             svals = a0[pos]
+
             sc, sd = self.scount[et], self.sdisp[et]
             rc, rd = self.rcount[et], self.rdisp[et]
 
             rtot = int(rc.sum())
             rvals = np.empty((rtot, *a0.shape[1:]), dtype=a0.dtype)
             self._alltoallv(comm['world'], (svals, (sc, sd)), (rvals, (rc, rd)))
-    
+
             pr = self.recv_to_dest[et]
-            if pr.size != self.n_dest[et]:
+            if pr.size != ndest:
                 raise ValueError(f"[xfer] r={rank['world']} et={et} recv_to_dest size mismatch "
-                                 f"({pr.size} vs {self.n_dest[et]})")
+                                 f"({pr.size} vs {ndest})")
 
             out0[et] = rvals[pr]
 
@@ -3244,7 +3734,6 @@ class _MeshInterconnector(AlltoallMixin):
             if a0.shape[0] == 0: continue
             out[et] = np.moveaxis(a0, 0, edim) if edim else a0
         return out
-
 
 class NativeReader:
     def __init__(self, fname, pname=None, *, construct_con=True,

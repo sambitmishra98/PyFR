@@ -125,7 +125,8 @@ class BaseStdController(BaseStdIntegrator):
 
             # Only newcompute ranks compute targets / mask
             if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
-                targets = self.calc_target_ecounts(ecurrs, g1a, g1s, g1r)
+                targets = _MetaMesh.calc_target_ecounts(ecurrs, g1a, g1s, g1r, 
+                                                        self.cfg)
                 twoway_mask = (g1s + g1r) > 0
             else:
                 targets = None
