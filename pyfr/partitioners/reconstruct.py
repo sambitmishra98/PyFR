@@ -55,8 +55,22 @@ def reconstruct_partitioning(mesh, soln, progress=NullProgressSequence):
 
 def reconstruct_by_diffusion(mesh, part_wts, progress=NullProgressSequence):
     initialise_new_comm('compute', rankmap['world'])
+
     mmesh = _MetaMesh.from_mesh(mesh)
+
+    exec_order= [
+        dict(kind="all-verts",    name="vertex-push",      mode="vertices", iface="all-or-none", threshold=  0, use_flow=True , overshoot=1.0, max_sweeps=  1, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 1a) vertex push along flow
+        dict(kind="smooth-faces", name="faces-final-flow", mode="faces",    iface="per-element", threshold= -1, use_flow=False, overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        dict(kind="smooth-faces", name="faces-final-flow", mode="faces",    iface="per-element", threshold= -1, use_flow=False, overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        dict(kind="smooth-faces", name="faces-final-flow", mode="faces",    iface="per-element", threshold= -1, use_flow=False, overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        dict(kind="all-faces",    name="faces-push",       mode="faces",    iface="per-element", threshold=  0, use_flow=True , overshoot=0.0, max_sweeps=  4, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        dict(kind="smooth-faces", name="faces-final-flow", mode="faces",    iface="per-element", threshold= -1, use_flow=False, overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        ]
+
+    mmesh.exec_order = exec_order
+
     mmesh.info(mesh)
+
     pw = np.asarray(part_wts, dtype=np.float64)
 
     if len(pw) < comm['compute'].size:
@@ -71,8 +85,7 @@ def reconstruct_by_diffusion(mesh, part_wts, progress=NullProgressSequence):
             print(f"{target_counts = }", flush=True)
 
     with progress.start('Diffuse elements'):
-        mmesh.iterate(objective='to-target', target_counts=target_counts,
-                      mask=mmesh.twoway_mask)
+        mmesh.iterate(objective='to-target', target_counts=target_counts)
 
         # Also refine
         # for _ in range(10):
@@ -80,7 +93,7 @@ def reconstruct_by_diffusion(mesh, part_wts, progress=NullProgressSequence):
     
     # --- rebuild a "relocated" mesh for this rank and extract vparts ---
     with progress.start('Create relocated mesh'):
-        mesh = mmesh.to_mesh(mmesh.eidxs_i)
+        mesh = mmesh.to_mesh(mmesh.i.eidxs)
         # Print final element coutns for each rank from compute_rank
         local_ecounts = sum(len(eidxs) for eidxs in mesh.eidxs.values())
         all_ecounts = comm['compute'].gather(local_ecounts, root=root['compute'])

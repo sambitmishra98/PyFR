@@ -42,6 +42,13 @@ class BaseStdController(BaseStdIntegrator):
                 f.write('tcurr,others,iterate,reinit\n')
                 self.wallt_end = perf_counter_ns()
 
+        self.exec_order = self.cfg.getliteral('partition', 'diffusion-exec-order')
+        #[
+        #    dict( kind="all-verts",    name="vertex-push",      mode="vertices", iface="all-or-none", threshold= 6, use_flow=True , overshoot=0.0, max_sweeps=  4, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 1a) vertex push along flow
+        #    dict( kind="all-faces",    name="faces-push",       mode="faces",    iface="all-or-none", threshold= 0, use_flow=True , overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False,                     ), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        #    dict( kind="smooth-faces", name="faces-final-flow", mode="faces",    iface="per-element", threshold= 0, use_flow=False, overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False,                     ), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
+        #] 
+
     def _accept_step(self, dt, idxcurr, err=None):
         self.tcurr += dt
         self.nacptsteps += 1
@@ -106,6 +113,8 @@ class BaseStdController(BaseStdIntegrator):
 
             # Build MetaMesh over the *world* communicator
             mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
+            
+            mmesh.exec_order = self.exec_order
 
             ndofs = execute['compute'](lambda: sum(self.system.ele_ndofs),
                                        default=1e12)
@@ -127,23 +136,23 @@ class BaseStdController(BaseStdIntegrator):
             if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
                 targets = _MetaMesh.calc_target_ecounts(ecurrs, g1a, g1s, g1r, 
                                                         self.cfg)
-                twoway_mask = (g1s + g1r) > 0
             else:
                 targets = None
-                twoway_mask = None
 
             # Broadcast to all world ranks so everyone agrees
             targets     = comm['world'].bcast(targets)
-            twoway_mask = comm['world'].bcast(twoway_mask)
-
-            # if rank['world'] == root['world']:
-            #     print(f"mask:\n{twoway_mask.astype(int)}", flush=True)
 
             # Extend targets to world size using rankmap['newcompute']
             targets = [
                 targets[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
                 for i in range(comm['world'].size)
             ]
+
+            if rank['world'] == root['world']:
+                print(f"{ecurrs  = }")
+                print(f"{targets = }")
+            # 
+
 
             # RANK REMOVAL STRATEGY:
             # Get all ranks with zero target and non-zero current, 
@@ -161,8 +170,7 @@ class BaseStdController(BaseStdIntegrator):
                     "Relocator supports removing one rank at a time."
                 )   
             elif len(ranks_to_remove) == 1:
-                mmesh.iterate("to-remove-rank", targets, mask=twoway_mask,
-                                                flowmat_relax=self.lb_flowmat_relax)
+                mmesh.iterate("to-remove-rank", targets)
             
                 # If we actually removed all elements from the rank to remove,
                 end_rank = len(rankmap['compute']) - 1
@@ -175,18 +183,21 @@ class BaseStdController(BaseStdIntegrator):
             elif len(ranks_to_add) > 1:
                 raise NotImplementedError("Add one rank at a time.")
             elif len(ranks_to_add) == 1:
-                mmesh.seed_rank(ranks_to_add[0], targets, twoway_mask,)
+                mmesh.seed_rank(ranks_to_add[0], targets)
             else:
                 # mmesh.refine(objective='cpd', mode='vertices', thr=10)
-                mmesh.iterate("to-target", targets, mask=twoway_mask,
-                                           flowmat_relax=self.lb_flowmat_relax)
+                
+                
+                #mmesh.iterate("to-target", targets)
+                mmesh.iterate_to_convergence(targets, )
+
 
             # Build / update 'newcompute' communicator
             #initialise_new_comm('newcompute', list(range(comm['newcompute'].size)))
             initialise_new_comm('newcompute', list(range(len(part_ranklist))))
     
             # Convert back to mesh, relocate solution, and reinit system
-            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.eidxs_j), self.compute_soln)
+            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.j.eidxs), self.compute_soln)
 
             wallt_iterate = perf_counter_ns() - wallt_start
 
@@ -220,6 +231,10 @@ class BaseStdController(BaseStdIntegrator):
                             f"{wallt_reinit/1e9}\n")
 
             self.wallt_end = perf_counter_ns()
+
+            _MetaMesh.info(self.meshes['compute'])
+
+            # import sys ; sys.exit()
 
     def reinit_mesh_soln(self, mesh, soln):
         # New mesh lives under the 'newcompute' logical name while we migrate.
