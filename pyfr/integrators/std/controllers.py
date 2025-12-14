@@ -121,7 +121,8 @@ class BaseStdController(BaseStdIntegrator):
             # allgather across all world ranks
             ndofs = comm['world'].allgather(ndofs)
 
-            print(f"Total DOFs = {ndofs}")
+            if rank['world'] == root['world']:
+                print(f"Total DOFs = {ndofs}", flush=True)
 
             _MetaMesh.info(self.meshes['compute'])
             _MetaMesh.info_to_csv(self.meshes['compute'], tcurr=self.tcurr)
@@ -189,15 +190,19 @@ class BaseStdController(BaseStdIntegrator):
                 
                 
                 #mmesh.iterate("to-target", targets)
-                mmesh.iterate_to_convergence(targets, )
-
+                #mmesh.partition_scotch(targets) # , opts={"ufactor": 200, "strat": "speed" , "seed": 2079})
+                parts_g = mmesh.partition_scotch(targets, ufactor=10)
+                mmesh.apply_global_partition(parts_g)  # you implement: build eidxs_dest + relocate
+                # mmesh.iterate_to_convergence(targets, )
 
             # Build / update 'newcompute' communicator
             #initialise_new_comm('newcompute', list(range(comm['newcompute'].size)))
             initialise_new_comm('newcompute', list(range(len(part_ranklist))))
     
             # Convert back to mesh, relocate solution, and reinit system
-            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.j.eidxs), self.compute_soln)
+            #soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.j.eidxs), self.compute_soln)
+            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
+
 
             wallt_iterate = perf_counter_ns() - wallt_start
 
