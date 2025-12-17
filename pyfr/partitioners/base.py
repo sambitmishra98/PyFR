@@ -366,3 +366,25 @@ class BasePartitioner:
                                                 vparts)
 
         return pinfo
+
+class RandomPartitioner(BasePartitioner):
+    name = 'random'
+    has_part_weights = False
+    has_multiple_constraints = True  # so BasePartitioner allows elewts=None
+
+    dflt_opts = [('seed', -1)]
+    int_opts = {'seed'}
+    enum_opts = {}
+
+    def _partition_graph(self, graph, partwts):
+        nparts = len(partwts)
+        nvert = len(graph.vtab) - 1
+
+        if nparts == 1:
+            return np.zeros(nvert, dtype=np.int32)
+
+        seed = self.opts.get('seed', -1)
+        rng = np.random.default_rng(None if seed < 0 else seed)
+
+        # Uniform random partition IDs in [0, nparts)
+        return rng.integers(0, nparts, size=nvert, dtype=np.int32)

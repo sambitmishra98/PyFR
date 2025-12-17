@@ -7,8 +7,8 @@ from pyfr.mpiutil import mpi, comm, execute
 class BaseStdIntegrator(BaseCommon, BaseIntegrator):
     formulation = 'std'
 
-    def __init__(self, backend, systemcls, mesh, initsoln, cfg):
-        super().__init__(backend, mesh, initsoln, cfg)
+    def __init__(self, backend, systemcls, mmesh, initsoln, cfg):
+        super().__init__(backend, mmesh, initsoln, cfg)
 
         # Sanity checks
         if self.controller_needs_errest and not self.stepper_has_errest:
@@ -18,7 +18,7 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
         self.nregs = self.stepper_nregs
 
         # Construct the relevant system
-        self.system = systemcls(backend, mesh, initsoln, nregs=self.nregs,
+        self.system = systemcls(backend, mmesh.mesh, initsoln, nregs=self.nregs,
                                 cfg=cfg)
 
         self._systemcls = systemcls

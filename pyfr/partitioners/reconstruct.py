@@ -8,8 +8,7 @@ from pyfr.mpiutil import comm, rank, root, rankmap, initialise_new_comm
 from pyfr.partitioners.base import BasePartitioner
 from pyfr.progress import NullProgressSequence
 
-from pyfr.readers.native import _MetaMesh, _MeshInterconnector
-
+from pyfr.partitioners.online.base import _MetaMesh
 
 def reconstruct_partitioning(mesh, soln, progress=NullProgressSequence):
     if mesh['mesh-uuid'][()] != soln['mesh-uuid'][()]:
@@ -85,7 +84,8 @@ def reconstruct_by_diffusion(mesh, part_wts, progress=NullProgressSequence):
             print(f"{target_counts = }", flush=True)
 
     with progress.start('Diffuse elements'):
-        mmesh.iterate(objective='to-target', target_counts=target_counts)
+        #mmesh.iterate(objective='to-target', target_counts=target_counts)
+        mmesh.iterate_to_convergence(target_counts)
 
         # Also refine
         # for _ in range(10):

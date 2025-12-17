@@ -3,17 +3,11 @@ import gc
 
 from time import perf_counter_ns
 import numpy as np
-from numpy._core.fromnumeric import argmin
 
 from pyfr.integrators.std.base import BaseStdIntegrator
 from pyfr.mpiutil import (mpi, initialise_new_comm, 
                           comm, rank, root, rankmap, execute,
                           promote_comm)
-
-from pyfr.readers.native import _MetaMesh
-
-from pyfr.inifile import Inifile
-
 
 class BaseStdController(BaseStdIntegrator):
     def __init__(self, *args, **kwargs):
@@ -41,13 +35,6 @@ class BaseStdController(BaseStdIntegrator):
             with open('lb_walltimes.csv', 'a') as f:
                 f.write('tcurr,others,iterate,reinit\n')
                 self.wallt_end = perf_counter_ns()
-
-        self.exec_order = self.cfg.getliteral('partition', 'diffusion-exec-order')
-        #[
-        #    dict( kind="all-verts",    name="vertex-push",      mode="vertices", iface="all-or-none", threshold= 6, use_flow=True , overshoot=0.0, max_sweeps=  4, patience=0, min_change=0, restrict_src_dest=False, move_spts_nodes=True), # 1a) vertex push along flow
-        #    dict( kind="all-faces",    name="faces-push",       mode="faces",    iface="all-or-none", threshold= 0, use_flow=True , overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False,                     ), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
-        #    dict( kind="smooth-faces", name="faces-final-flow", mode="faces",    iface="per-element", threshold= 0, use_flow=False, overshoot=0.0, max_sweeps=100, patience=0, min_change=0, restrict_src_dest=False,                     ), # 3a) final flow-based faces push (thr=0, as in your old exec_order)
-        #] 
 
     def _accept_step(self, dt, idxcurr, err=None):
         self.tcurr += dt
@@ -81,10 +68,9 @@ class BaseStdController(BaseStdIntegrator):
 
     def load_balance(self):
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
-        if self.nacptsteps % self.lb_iters == 0 and not self.lb_iters == 1:
+        if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
             # Read inifile  from /scratch/EFFORTS/LoadBalancer3/c3900/online.ini
-            online_cfg = Inifile.load(self.cfg.get('partition', 'online-file'))
-            part_ranklist = online_cfg.getliteral('partition', 'compute-ranklist')
+            part_ranklist = self.mmesh.online_cfg.getliteral('partition', 'compute-ranklist')
 
             # If compute-ranklist differs from current communicator, reinitialise
             if len(part_ranklist) != len(rankmap['compute']):
@@ -112,20 +98,21 @@ class BaseStdController(BaseStdIntegrator):
                 print('Switching, nacptsteps = ', self.nacptsteps)
 
             # Build MetaMesh over the *world* communicator
-            mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
+            #mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
+            mmesh = self.mmesh
+            mmesh.restart()
             
-            mmesh.exec_order = self.exec_order
-
             ndofs = execute['compute'](lambda: sum(self.system.ele_ndofs),
                                        default=1e12)
+
             # allgather across all world ranks
             ndofs = comm['world'].allgather(ndofs)
 
             if rank['world'] == root['world']:
                 print(f"Total DOFs = {ndofs}", flush=True)
 
-            _MetaMesh.info(self.meshes['compute'])
-            _MetaMesh.info_to_csv(self.meshes['compute'], tcurr=self.tcurr)
+            mmesh.i.info()
+            mmesh.i.info_to_csv(tcurr=self.tcurr)
 
             # Element counts per world rank
             current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
@@ -133,32 +120,12 @@ class BaseStdController(BaseStdIntegrator):
 
             #print(f"[lb] world-rank {rank['world']} ecurrs={ecurrs.tolist()}")
 
-            # Only newcompute ranks compute targets / mask
-            if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
-                targets = _MetaMesh.calc_target_ecounts(ecurrs, g1a, g1s, g1r, 
-                                                        self.cfg)
-            else:
-                targets = None
-
-            # Broadcast to all world ranks so everyone agrees
-            targets     = comm['world'].bcast(targets)
-
-            # Extend targets to world size using rankmap['newcompute']
-            targets = [
-                targets[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
-                for i in range(comm['world'].size)
-            ]
-
-            if rank['world'] == root['world']:
-                print(f"{ecurrs  = }")
-                print(f"{targets = }")
-            # 
-
+            targets = mmesh.calc_target_ecounts(ecurrs, g1a, g1s, g1r)
 
             # RANK REMOVAL STRATEGY:
             # Get all ranks with zero target and non-zero current, 
             # load balance until one of the ranks reaches the zero target.
-                        
+
             ranks_to_remove = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
                               if t == 0 and n > 0 ]
 
@@ -186,14 +153,19 @@ class BaseStdController(BaseStdIntegrator):
             elif len(ranks_to_add) == 1:
                 mmesh.seed_rank(ranks_to_add[0], targets)
             else:
-                # mmesh.refine(objective='cpd', mode='vertices', thr=10)
+                # parts_g = mmesh.partition_scotch(targets, ufactor=10)
+                # mmesh.apply_global_partition(parts_g)  # you implement: build eidxs_dest + relocate
+
+                while True:
+                    nrms = mmesh.remove_small_islands_step()
+                    mmesh.remove_outliers()
                 
-                
-                #mmesh.iterate("to-target", targets)
-                #mmesh.partition_scotch(targets) # , opts={"ufactor": 200, "strat": "speed" , "seed": 2079})
-                parts_g = mmesh.partition_scotch(targets, ufactor=10)
-                mmesh.apply_global_partition(parts_g)  # you implement: build eidxs_dest + relocate
-                # mmesh.iterate_to_convergence(targets, )
+                    if any(nrms[i] > 1.0 for i in range(comm['world'].size) if targets[i] > 0):
+                        #mmesh.add_inliers()
+                        mmesh.iterate_to_convergence(targets)
+                    else:
+                        mmesh.iterate_to_convergence(targets)
+                        break
 
             # Build / update 'newcompute' communicator
             #initialise_new_comm('newcompute', list(range(comm['newcompute'].size)))
@@ -237,7 +209,7 @@ class BaseStdController(BaseStdIntegrator):
 
             self.wallt_end = perf_counter_ns()
 
-            _MetaMesh.info(self.meshes['compute'])
+            mmesh.i.info()
 
             # import sys ; sys.exit()
 

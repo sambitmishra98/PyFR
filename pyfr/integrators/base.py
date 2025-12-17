@@ -7,14 +7,14 @@ import time
 import numpy as np
 
 from pyfr.cache import memoize
-from pyfr.inifile import Inifile
 from pyfr.mpiutil import (initialise_new_comm, mpi, scal_coll,
-                          comm, rank, root, rankmap, execute)
+                          comm, rank, root, execute)
 from pyfr.plugins import get_plugin
 
-from pyfr.readers.native import NativeReader, _MeshInterconnector
+from pyfr.readers.native import NativeReader
 
-import os
+from pyfr.partitioners.online.base import _MeshInterconnector
+from pyfr.partitioners.online.diffusion import OnlineDiffusionPartitioner
 
 def _common_plugin_prop(attr, *, edim):
     def wrapfn(fn):
@@ -37,7 +37,7 @@ def _common_plugin_prop(attr, *, edim):
 
 
 class BaseIntegrator:
-    def __init__(self, backend, mesh, initsoln, cfg):
+    def __init__(self, backend, mmesh, initsoln, cfg):
         self.backend = backend
         self.isrestart = initsoln is not None
         self.cfg = cfg
@@ -68,10 +68,10 @@ class BaseIntegrator:
         self.dtmin = cfg.getfloat('solver-time-integrator', 'dt-min', 1e-12)
 
         # Extract the UUID of the mesh (to be saved with solutions)
-        self.mesh_uuid = mesh.uuid
+        self.mesh_uuid = mmesh.mesh.uuid
 
         # Create a dictionary to store all the meshes used throughout the simulation
-        self.meshes = {'compute': mesh, 'computebest': None}
+        self.meshes = {'compute': mmesh.mesh, 'computebest': None}
 
         self._invalidate_caches()
 
@@ -87,23 +87,9 @@ class BaseIntegrator:
         self._abort_reason = ''
 
         self.called_plugin_dt = False
-        self.lb_iters = self.cfg.getint('partition', 'load-balancing-iterations', 1)
-        self.lb_flowmat_relax = self.cfg.getfloat('partition', 'load-balancing-flowmatrix-relax', 0.5)
-
-        self.lb_best_score       = float('inf')
-        self.lb_since_best       = 0
-        self.lb_stop_relocating  = False
-        self.lb_patience         = 10
 
         # Cost scales
-        self.lb_cost_scale_g1r  = self.cfg.getfloat('partition', 'lb-cost-scale-g1r',  1.0)
-        self.lb_cost_scale_g1s  = self.cfg.getfloat('partition', 'lb-cost-scale-g1s',  1.0)
-        self.lb_cost_scale_g1rt = self.cfg.getfloat('partition', 'lb-cost-scale-g1rt', 0.0)
-
-        if rank['compute'] == root['compute']:
-            print(f"Cost = g1a "
-              f"- {self.lb_cost_scale_g1r}*R₁ - {self.lb_cost_scale_g1s}*S₁ "
-              f"+ {self.lb_cost_scale_g1rt}*R₁ᵀ")
+        self.mmesh = OnlineDiffusionPartitioner(mmesh.mesh, cfg)
 
         # Smoothly step to target time in the last near_t steps
         self.aminf = self.cfg.getfloat('solver-time-integrator', 
@@ -151,25 +137,19 @@ class BaseIntegrator:
         else:
             pname = None
 
-        if self.cfg.hasopt('partition', f'online-file'):
-            online_cfg = Inifile.load(self.cfg.get('partition', 'online-file'))
-        else:
-            online_cfg = self.cfg
-
-        if online_cfg.hasopt('partition', f'{goal}-ranklist'):
+        if self.mmesh.online_cfg.hasopt('partition', f'{goal}-ranklist'):
             # If pname is None, share with 'compute'
             if goal == 'plugins' and pname is None:
-                pranks = online_cfg.getliteral('partition', 'compute-ranklist')
+                pranks = self.mmesh.online_cfg.getliteral('partition', 'compute-ranklist')
 
                 # Copy comm from 'compute' to 'plugins' by reference
                 comm['plugins'] = comm['compute']
             else:
-                pranks = online_cfg.getliteral('partition', f'{goal}-ranklist')
+                pranks = self.mmesh.online_cfg.getliteral('partition', f'{goal}-ranklist')
                 initialise_new_comm(goal, pranks)
         else:
             pranks = list(range(comm['world'].size))
             initialise_new_comm(goal, pranks)
-
 
         if goal == 'plugins':
             # If pname is None, share the mesh connectivity with 'compute'
