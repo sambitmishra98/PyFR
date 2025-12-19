@@ -79,16 +79,16 @@ class BaseStdController(BaseStdIntegrator):
                 initialise_new_comm('newcompute', list(range(len(part_ranklist))))
 
             # 🔍 NEW: print communicator state after creating newcompute
-            if rank['world'] == root['world']:
-                print(
-                    f"[comm-debug] init-newcompute: "
-                    f"world_size={comm['world'].size} "
-                    f"compute_size={comm['compute'].size} "
-                    f"rankmap_compute={rankmap['compute']} "
-                    f"newcompute_size={comm['newcompute'].size} "
-                    f"rankmap_newcompute={rankmap['newcompute']}",
-                    flush=True
-                )
+            #if rank['world'] == root['world']:
+            #    print(
+            #        f"[comm-debug] init-newcompute: "
+            #        f"world_size={comm['world'].size} "
+            #        f"compute_size={comm['compute'].size} "
+            #        f"rankmap_compute={rankmap['compute']} "
+            #        f"newcompute_size={comm['newcompute'].size} "
+            #        f"rankmap_newcompute={rankmap['newcompute']}",
+            #        flush=True
+            #    )
 
             wallt_start = perf_counter_ns()
 
@@ -107,9 +107,6 @@ class BaseStdController(BaseStdIntegrator):
 
             # allgather across all world ranks
             ndofs = comm['world'].allgather(ndofs)
-
-            if rank['world'] == root['world']:
-                print(f"Total DOFs = {ndofs}", flush=True)
 
             mmesh.i.info()
             mmesh.i.info_to_csv(tcurr=self.tcurr)
@@ -156,19 +153,20 @@ class BaseStdController(BaseStdIntegrator):
                 # parts_g = mmesh.partition_scotch(targets, ufactor=10)
                 # mmesh.apply_global_partition(parts_g)  # you implement: build eidxs_dest + relocate
 
-                while True:
-                    nrms = mmesh.remove_small_islands_step()
-                    mmesh.remove_outliers()
-                
-                    if any(nrms[i] > 1.0 for i in range(comm['world'].size) if targets[i] > 0):
-                        mmesh.add_inliers()
-                        mmesh.iterate_to_convergence(targets)
-                    else:
-                        mmesh.iterate_to_convergence(targets)
-                        break
+                #while True:
+                #    nrms = mmesh.remove_small_islands_step()
+                #    mmesh.remove_outliers()
+                #
+                #    if any(nrms[i] > 1.0 for i in range(comm['world'].size) if targets[i] > 0):
+                #        mmesh.add_inliers()
+                #        mmesh.iterate_to_convergence(targets)
+                #    else:
+                #        mmesh.iterate_to_convergence(targets)
+                #        break
 
                 #targets = [13893, 17944, 15901, 15138, 13723, 18506, 16010, 19397, 12936, 19821, 19052, 16405]
-                #mmesh.iterate_to_convergence(targets, verbose=True)
+                mmesh.iterate_to_convergence(targets)
+                
                 #import sys ; sys.exit()
 
             # Build / update 'newcompute' communicator

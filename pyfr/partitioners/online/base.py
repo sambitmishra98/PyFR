@@ -1387,13 +1387,13 @@ class WaitsToTargetsModel:
             N_star_new = self._lb_apply_single_rank_weight_bump(N_star_new, pulse_idx, 
                                                         self._cyclic_jitter_fraction)
 
-            if comm['newcompute'] != mpi.COMM_NULL and int(rank['newcompute']) == root['newcompute']:
-                print(f"[lb-jitter] {self._cyclic_jitter_fraction = } {pulse_idx = }", flush=True)
+            # if comm['newcompute'] != mpi.COMM_NULL and int(rank['newcompute']) == root['newcompute']:
+            #     print(f"[lb-jitter] {self._cyclic_jitter_fraction = } {pulse_idx = }", flush=True)
 
             # --- Normalise and round to integer targets in newcompute order ---
             N_int = self.normalise_and_round_targets(N_star_new, Ntot=Ntot, tag="[lb-round]",)
-            if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
-                print(f"[load-balance] N_int={N_int} (sum={int(N_int.sum())})")
+            #if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
+            #    print(f"[load-balance] N_int={N_int} (sum={int(N_int.sum())})")
 
 
             targets = N_int.tolist()

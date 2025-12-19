@@ -467,10 +467,10 @@ class BaseIntegrator:
         recv_mat = np.fromiter((float(ws_recv[i][j]) for i in range(P) for j in range(P)),dtype=float, count=P*P).reshape(P, P)
 
         # Root-only concise logs
-        if rank['compute'] == root['compute']:
-            print(f"all*1e6=\n{ np.array2string(all_med*1e6,  formatter={'float_kind':lambda x: f'{x:05.0f}'})}")
-            print(f"send*1e6=\n{np.array2string(send_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
-            print(f"recv*1e6=\n{np.array2string(recv_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
+        # if rank['compute'] == root['compute']:
+        #     print(f"all*1e6=\n{ np.array2string(all_med*1e6,  formatter={'float_kind':lambda x: f'{x:05.0f}'})}")
+        #     print(f"send*1e6=\n{np.array2string(send_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
+        #     print(f"recv*1e6=\n{np.array2string(recv_mat*1e6, formatter={'float_kind':lambda x: f'{x:03.0f}'})}")
 
         return all_med, send_mat, recv_mat
 
