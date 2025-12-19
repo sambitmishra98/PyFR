@@ -17,9 +17,11 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         # Island stuff
         self.island_remove_fraction   = cfg.getfloat('partition', 'island-remove-fraction'  , 0.5)
         self.outlier_removal_mode     = cfg.get(     'partition', 'outlier-removal-mode'    , 'faces')
-        self.outlier_removal_fraction = cfg.getfloat('partition', 'outlier-removal-fraction', 0.01)
+        self.outlier_removal_fraction = cfg.getfloat('partition', 'outlier-removal-fraction', 0.00)
         self.inlier_addition_mode     = cfg.get(     'partition', 'inlier-addition-mode'    , 'vertices')
-        self.inlier_addition_fraction = cfg.getfloat('partition', 'inlier-addition-fraction', 0.10)
+        self.inlier_addition_fraction = cfg.getfloat('partition', 'inlier-addition-fraction', 0.00)
+
+    # ----------------- Flow planning -----------------------
 
     @property
     def twoway_mask(self) -> np.ndarray:
@@ -350,12 +352,145 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         return M_full
 
+    # ----------------- Delta computations -----------------------
 
+    def __calc_mpi_vertices_affinity(self) -> dict[int, dict[str, np.ndarray]]:
+        # neighbour -> node-ids set (as legacy defines them)
+        mvu = self.collect_mpi_vertex_nodes()
+        if not mvu:
+            return {}
 
-    def _compute_deltas(self, mode):
+        all_sets = [np.asarray(v, dtype=np.int64).ravel() for v in mvu.values() if v is not None]
+        union_all = np.unique(np.concatenate(all_sets)) if all_sets else np.empty(0, dtype=np.int64)
+
+        empty = np.empty((0, 3), dtype=np.int64)
+        out: dict[int, dict[str, np.ndarray]] = {}
+
+        for nrank, verts in mvu.items():
+            nbr_vertices = np.asarray(verts, dtype=np.int64).ravel()
+            per: dict[str, np.ndarray] = {}
+
+            for et in self.etypes:
+                nds = self.i.spts_nodes.get(et)
+                if nds is None or nds.size == 0:
+                    per[et] = empty
+                    continue
+
+                nds = np.asarray(nds, dtype=np.int64)
+
+                v_in_n = np.isin(nds, nbr_vertices)
+                c_n    = v_in_n.sum(axis=1).astype(np.int16, copy=False)
+
+                if union_all.size:
+                    v_is_int = np.isin(nds, union_all, invert=True)
+                    c_int    = v_is_int.sum(axis=1).astype(np.int16, copy=False)
+                else:
+                    c_int = np.full(nds.shape[0], nds.shape[1], dtype=np.int16)
+
+                sel = (c_n > 0)
+                if not np.any(sel):
+                    per[et] = empty
+                    continue
+
+                lids = np.nonzero(sel)[0].astype(np.int64, copy=False)
+                a    = c_int[sel].astype(np.int64, copy=False)
+                b    = c_n[sel].astype(np.int64, copy=False)
+
+                dlt = a - b
+                order = np.lexsort((lids, dlt))
+                per[et] = np.c_[lids[order], a[order], b[order]]
+
+            out[int(nrank)] = per
+
+        return out
+
+    def __compute_deltas(self, mode):
         if   mode == 'faces':    return self._calc_mpi_faces_deltas()
         elif mode == 'vertices': return self._calc_mpi_vertices_deltas()
         else: raise ValueError(f"Unknown {mode = }' ≠ edges/vertices")
+
+    def _compute_affinity(self, mode: str) -> dict[int, dict[str, np.ndarray]]:
+        """
+        Return {nbr: {etype: mat}} where mat is (N, 3) int64:
+            [lid, a, b]
+        a/b meanings:
+        - mode='faces'    : a=c_me,   b=c_n
+        - mode='vertices' : a=c_int,  b=c_n
+        """
+        mode = str(mode).lower()
+        if mode == 'faces':
+            return self._calc_mpi_faces_affinity()
+        elif mode == 'vertices':
+            return self._calc_mpi_vertices_affinity()
+        else:
+            raise ValueError(f"Unknown mode {mode!r}; expected 'faces' or 'vertices'")
+
+    def _calc_mpi_faces_affinity(self) -> dict[int, dict[str, np.ndarray]]:
+        myr = int(rank['world'])
+        empty = np.empty((0, 3), dtype=np.int64)
+
+        per_et_meta: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray] | None] = {}
+        nbrs: set[int] = set()
+
+        for et in self.etypes:
+            owners = self.i.con_mpi[et]
+            eids   = self.i.con_idx[et]
+            if owners.size == 0 or eids.size == 0:
+                per_et_meta[et] = None
+                continue
+
+            # “valid element neighbour” faces
+            valid = (eids >= 0) & (owners >= 0)
+
+            # boundary elements: at least one MPI face (owner != myr)
+            mpi_face_mask = valid & (owners != myr)
+            has_mpi_face  = np.any(mpi_face_mask, axis=1)
+            if not np.any(has_mpi_face):
+                per_et_meta[et] = None
+                continue
+
+            lids_bnd       = np.nonzero(has_mpi_face)[0].astype(np.int64, copy=False)
+            owners_bnd     = owners[has_mpi_face]
+            valid_bnd      = valid[has_mpi_face]
+            owners_eff_bnd = np.where(valid_bnd, owners_bnd, -1)
+
+            uniq = np.unique(owners_eff_bnd)
+            uniq = uniq[(uniq >= 0) & (uniq != myr)]
+            for r in uniq:
+                nbrs.add(int(r))
+
+            c_me_bnd = np.sum(owners_eff_bnd == myr, axis=1).astype(np.int16, copy=False)
+            per_et_meta[et] = (lids_bnd, c_me_bnd, owners_eff_bnd)
+
+        if not nbrs:
+            return {}
+
+        out: dict[int, dict[str, np.ndarray]] = {}
+        for nr in sorted(nbrs):
+            per: dict[str, np.ndarray] = {}
+            for et in self.etypes:
+                meta = per_et_meta.get(et)
+                if meta is None:
+                    per[et] = empty
+                    continue
+
+                lids_bnd, c_me_bnd, owners_eff_bnd = meta
+                c_n_bnd = np.sum(owners_eff_bnd == nr, axis=1).astype(np.int16, copy=False)
+
+                sel = (c_n_bnd > 0)
+                if not np.any(sel):
+                    per[et] = empty
+                    continue
+
+                lids = lids_bnd[sel]
+                a    = c_me_bnd[sel].astype(np.int64, copy=False)
+                b    = c_n_bnd[sel].astype(np.int64, copy=False)
+
+                per[et] = np.c_[lids, a, b]
+
+            out[int(nr)] = per
+
+        return out
 
     def _calc_mpi_faces_deltas(self) -> dict[int, dict[str, np.ndarray]]:
         """
@@ -533,33 +668,18 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             if nds.size == 0:
                 return np.empty((0, 2), dtype=np.int64)
 
-            vcols = vcols_by_et.get(et)
-            if vcols is None or vcols.size == 0:
-                # No vertex columns known for this etype; nothing to do.
-                return np.empty((0, 2), dtype=np.int64)
-
-            # Restrict to vertex columns ONLY
-            nds_v = nds[:, vcols]       # shape (Ne, Nvert_per_el)
-
-            # c_n(e): # vertices of element e that belong to this neighbour's
-            #         MPI vertex set.
-            v_in_n = np.isin(nds_v, nbr_vertices, assume_unique=False)
-            c_n = v_in_n.sum(axis=1).astype(np.int16, copy=False)
-
-            # c_int(e): # vertices of e that are STRICTLY interior
-            #           (do not appear in union_all of all MPI vertices).
+            v_in_n = np.isin(nds, nbr_vertices, assume_unique=False)
+            c_n    = v_in_n.sum(axis=1).astype(np.int16, copy=False)
+            
             if union_all.size:
-                v_is_mpi_any = np.isin(nds_v, union_all, assume_unique=False)
-                v_is_int = ~v_is_mpi_any
+                v_is_int = np.isin(nds, union_all, invert=True, assume_unique=False)
             else:
-                # No MPI vertices at all => everything is interior
-                v_is_int = np.ones_like(nds_v, dtype=bool)
-
+                v_is_int = np.ones_like(nds, dtype=bool)
+            
             c_int = v_is_int.sum(axis=1).astype(np.int16, copy=False)
-
-            # Only elements that actually touch this neighbour by at least one
-            # MPI vertex are interesting.
+            
             sel = (c_n > 0)
+
             if not np.any(sel):
                 return np.empty((0, 2), dtype=np.int64)
 
@@ -585,6 +705,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             for et in self.etypes:
                 nds = self.i.spts_nodes.get(et, None)
                 per[et] = per_et(et, nds, nbr_vertices)
+                
             out[int(nrank)] = per
 
         return out
@@ -768,639 +889,787 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         return per_nbr
 
+    def _metric_from_ab(self, a: np.ndarray, b: np.ndarray, metric: str) -> np.ndarray:
+        # Always float64 for future-proofing and to support ratio cleanly.
+        a = a.astype(np.float64, copy=False)
+        b = b.astype(np.float64, copy=False)
 
+        metric = str(metric).lower()
+        if metric == 'delta':
+            return a - b
+        elif metric == 'ratio':
+            den = a + b
+            # ratio in [0,1] when den>0; smaller => more neighbour-tied
+            out = np.full_like(a, np.inf, dtype=np.float64)
+            np.divide(a, den, out=out, where=(den > 0.0))
+            return out
+        else:
+            raise ValueError(f"Unknown metric {metric!r}; expected 'delta' or 'ratio'")
+
+    def _score_from_metric(
+        self,
+        metric: np.ndarray,
+        *,
+        et: str,
+        nbr: int,
+        etype_scale: dict[str, float] | None,
+        device_bias: dict[str, dict[str, float]] | None,
+        rank_tags: list[str] | None,
+    ) -> np.ndarray:
+        s = metric
+        if etype_scale is not None:
+            s = s * float(etype_scale.get(et, 1.0))
+
+        if device_bias is not None and rank_tags is not None:
+            tag = rank_tags[int(nbr)]
+            s = s + float(device_bias.get(tag, {}).get(et, 0.0))
+
+        return s
+
+
+    def _vertex_cols(self, et: str) -> np.ndarray:
+        # cache once per etype; avoid allocating arrays each call
+        cache = getattr(self, "_vcols_by_et", None)
+        if cache is None:
+            cache = self._vcols_by_et = {}
+        v = cache.get(et)
+        if v is None:
+            fidx = self._face_vertex_indices(et)
+            v = np.unique(np.concatenate(fidx)).astype(np.int64, copy=False) if fidx else np.empty(0, np.int64)
+            cache[et] = v
+        return v
+
+
+    def _calc_mpi_vertices_affinity(self) -> dict[int, dict[str, np.ndarray]]:
+        mvu = self.collect_mpi_vertex_nodes()
+        if not mvu:
+            return {}
+
+        # mvu values are already unique (np.unique), so assume_unique=True is valid
+        all_sets = [np.asarray(v, np.int64).ravel() for v in mvu.values() if v is not None]
+        union_all = np.unique(np.concatenate(all_sets)) if all_sets else np.empty(0, np.int64)
+
+        empty = np.empty((0, 3), dtype=np.int64)
+        out: dict[int, dict[str, np.ndarray]] = {}
+
+        for nrank, verts in mvu.items():
+            nbr_vertices = np.asarray(verts, np.int64).ravel()
+            per: dict[str, np.ndarray] = {}
+
+            for et in self.etypes:
+                nds = self.i.spts_nodes.get(et)
+                if nds is None or nds.size == 0:
+                    per[et] = empty
+                    continue
+
+                vcols = self._vertex_cols(et)
+                if vcols.size == 0:
+                    per[et] = empty
+                    continue
+
+                nds_v = np.asarray(nds, np.int64)[:, vcols]
+
+                c_n = np.isin(nds_v, nbr_vertices, assume_unique=True).sum(axis=1).astype(np.int16, copy=False)
+
+                if union_all.size:
+                    c_int = np.isin(nds_v, union_all, assume_unique=True, invert=True).sum(axis=1).astype(np.int16, copy=False)
+                else:
+                    c_int = np.full(nds_v.shape[0], nds_v.shape[1], dtype=np.int16)
+
+                sel = (c_n > 0)
+                if not np.any(sel):
+                    per[et] = empty
+                    continue
+
+                lids = np.nonzero(sel)[0].astype(np.int64, copy=False)
+                a = c_int[sel].astype(np.int64, copy=False)
+                b = c_n[sel].astype(np.int64, copy=False)
+
+                # optional: sorting here is redundant if diffuse sorts globally; keep only if you rely on it for debugging
+                dlt = a - b
+                order = np.lexsort((lids, dlt))
+                per[et] = np.c_[lids[order], a[order], b[order]]
+
+            out[int(nrank)] = per
+
+        return out
+
+
+    # ----------------- Legacy-style smoothing pass ----------------------------
+
+    def diffuse_smoothing2(
+        self,
+        flow_matrix: np.ndarray,
+        *,
+        threshold: float = 0.0,
+        return_count: bool = False,
+        scale: float = 0.5,
+        score_by: str = "vertex",                  # 'edge' | 'vertex'
+    ) -> Optional[int]:
+        """
+        One flow-guided “nudge” pass.
+
+        score_by='vertex' -> mode='vertices'
+        score_by='edge'   -> mode='faces'
+
+        Calls self.diffuse(...) exactly once with M_eff.
+        """
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
+
+        M = np.asarray(flow_matrix, dtype=np.int64)
+        if M.ndim != 2 or M.shape[0] != M.shape[1]:
+            raise ValueError(f"[itc4] flow_matrix must be square; got {M.shape}")
+        R = int(M.shape[0])
+        if not (0 <= rnk < R):
+            raise ValueError(f"[itc4] rank {rnk} out of range for flow_matrix of size {R}")
+
+        scale = float(scale)
+        if scale <= 0.0:
+            raise ValueError(f"[itc4] scale must be > 0, got {scale!r}")
+
+        # IMPORTANT: preserve legacy-style rounding (rint) for relaxation
+        if abs(scale - 1.0) < 1e-12:
+            M_eff = M.copy()
+        else:
+            M_eff = np.ceil(M.astype(np.float64) * float(scale)).astype(np.int64)
+            M_eff[M_eff < 0] = 0
+
+        sb = str(score_by).lower()
+        if sb in ("edge", "edges", "face", "faces"):
+            mode = "faces"
+        elif sb in ("vertex", "vertices"):
+            mode = "vertices"
+        else:
+            raise ValueError(f"[itc4] score_by must be 'edge' or 'vertex'; got {score_by!r}")
+
+        moved_local, flow_used_local = self.diffuse(
+            mode=mode,
+            threshold=float(threshold),
+            flow_matrix=M_eff,
+            metric="delta",
+            move_spts_nodes=(score_by == "vertex"),
+        )
+
+        moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+
+        return moved_glob if return_count else None
+
+    def smooth(self, metric: str = "delta", 
+                     etype_scale: dict[str, float] | None = None,
+                     device_bias: dict[str, dict[str, float]] | None = None,
+                     rank_tags: list[str] | None = None) -> int:
+        rnk = int(rank["world"])
+
+        metric = str(metric).lower()
+        if metric not in ("delta", "ratio"):
+            raise ValueError(f"smooth: metric must be 'delta' or 'ratio', got {metric!r}")
+
+        if device_bias is not None and rank_tags is None:
+            raise ValueError("smooth: rank_tags must be provided when device_bias is used")
+
+        self._reset_j_with_i()
+        st = self.i
+
+        aff_by_rank = self._compute_affinity("faces")  # {nbr:{et:[lid,a,b]}}
+        etypes_all  = list(self._etype_order())
+
+        def metric_from_ab(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            a = a.astype(np.float64, copy=False)
+            b = b.astype(np.float64, copy=False)
+            if metric == "delta":
+                return a - b
+            den = a + b
+            out = np.full_like(a, np.inf, dtype=np.float64)
+            np.divide(a, den, out=out, where=(den > 0.0))
+            return out
+
+        def score_metric(x: np.ndarray, *, et: str, nbr: int) -> np.ndarray:
+            s = x
+            if etype_scale is not None:
+                s = s * float(etype_scale.get(et, 1.0))
+            if device_bias is not None:
+                tag = rank_tags[int(nbr)]
+                s = s + float(device_bias.get(tag, {}).get(et, 0.0))
+            return s
+
+        flats: list[np.ndarray] = []
+        scores: list[np.ndarray] = []
+        gids: list[np.ndarray] = []
+        nbrs: list[np.ndarray] = []
+
+        for nbr in sorted(int(n) for n in aff_by_rank.keys()):
+            per_et = aff_by_rank[nbr]
+            for et in etypes_all:
+                arr = per_et.get(et, None)
+                if arr is None or arr.size == 0:
+                    continue
+
+                lids = arr[:, 0].astype(np.int64, copy=False)
+                a    = arr[:, 1].astype(np.int64, copy=False)
+                b    = arr[:, 2].astype(np.int64, copy=False)
+
+                mraw = metric_from_ab(a, b)
+                mkeep = (mraw <= -1)
+                if not np.any(mkeep):
+                    continue
+
+                lids_k = lids[mkeep]
+                flat_k = st.lids_to_flat(et, lids_k)
+
+                mraw_k   = mraw[mkeep]
+                score_k  = score_metric(mraw_k, et=et, nbr=nbr)
+                gid_k    = st.eidxs[et][lids_k].astype(np.int64, copy=False)
+
+                flats.append(flat_k)
+                scores.append(score_k)
+                gids.append(gid_k)
+                nbrs.append(np.full(flat_k.shape, nbr, dtype=np.int64))
+
+        if not flats:
+            self._apply_plan_and_commit({}, move_spts_nodes=False)
+            return 0
+
+        flat_all  = np.concatenate(flats)
+        score_all = np.concatenate(scores).astype(np.float64, copy=False)
+        gid_all   = np.concatenate(gids)
+        nbr_all   = np.concatenate(nbrs)
+
+        # Deterministic “best neighbour per element”:
+        # primary: flat id, then best score, then gid, then nbr
+        order = np.lexsort((nbr_all, gid_all, score_all, flat_all))
+
+        flat_s   = flat_all[order]
+        nbr_s    = nbr_all[order]
+        score_s  = score_all[order]
+        gid_s    = gid_all[order]
+
+        _, first = np.unique(flat_s, return_index=True)
+        chosen_flat  = flat_s[first]
+        chosen_nbr   = nbr_s[first]
+        chosen_score = score_s[first]
+        chosen_gid   = gid_s[first]
+
+        eidxs_diff = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbr, st)
+        self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=False)
+
+        return int(chosen_flat.size)
+
+    def smooth_until_stagnates(self, max_iters = 20) -> list[int]:
+        stable = 0
+        last: Optional[int] = None
+
+        for _ in range(int(max_iters)):
+            moved_local = self.smooth(metric="delta")
+            moved_glob = int(comm["world"].allreduce(int(moved_local), op=mpi.SUM))
+
+            if last is not None and abs(moved_glob - last) <= 0:
+                stable += 1
+            else:
+                stable = 0
+            last = moved_glob
+
+            stop = (moved_glob == 0) or (stable >= 1)
+            stop_all = int(comm["world"].allreduce(1 if stop else 0, op=mpi.MAX))
+
+            if stop_all:
+                break
+
+    def iterate_to_convergence(self, target_counts: List[int], *,
+                                     flowmat_relax: float = 0.5,
+    ) -> list[int]:
+        """
+        Debug controller (kept intentionally):
+        - for now executes ONE pass: (thr=6, score_by='vertex')
+        - prints key state for LEGACY parity debugging.
+        """
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
+
+        def _cur_counts_total_list() -> list[int]:
+            return list(self._cur_counts_total)
+
+        # Force the next debug step: one vertex-based iteration with thr=6
+        exec_order =( # [(6.0, "vertex")]
+                       [(2.0, "face")]
+                     + [(0.0, "face")] * comm["world"].size
+                    )
+
+        for thr, score_by in exec_order:
+            M0 = self.element_flow_plan(target_counts)
+            self.diffuse_smoothing2(M0, threshold=thr, scale=flowmat_relax, score_by=score_by)
+            self.smooth_until_stagnates()
+            
+    # ----------------- Diffusion / smoothing -----------------------
 
     def diffuse(
         self,
         *,
         mode: str = "faces",
-        interface_policy: str = "per-element",
-        threshold: int = 0,
-        flow_matrix: np.ndarray | None = None,
-        restrict_etypes = None,
-        skip_last: bool = False,
-        restrict_src_dest: bool = False,
-        target_counts = None,
+        threshold: float = 0.0,
+        flow_matrix: np.ndarray,
+        metric: str = "delta",
+        etype_scale: dict[str, float] | None = None,
+        device_bias: dict[str, dict[str, float]] | None = None,
+        rank_tags: list[str] | None = None,
         move_spts_nodes: bool = False,
-    ) -> tuple[int, np.ndarray | None]:
+    ) -> tuple[int, np.ndarray]:
         """
-        Perform a *single* diffusion / smoothing sweep and apply it.
+        Legacy-style diffusion sweep (the only behaviour you matched):
 
-        This is intended to be the core primitive; outer drivers (iterate(),
-        smooth_until_stagnates(), rank-removal logic, etc.) decide:
-          - how to build / update a flow_matrix between sweeps,
-          - when to stop iterating,
-          - how to handle ping-pong across interfaces.
+        - For each neighbour interface (rnk -> nbr), build candidate elements
+            across all etypes on this rank.
+        - Compute metric from (a,b): delta=a-b (default) or ratio=a/(a+b).
+        - Gate by metric <= threshold.
+        - Score (for future knobs): score = metric*etype_scale + device_bias(dst, et)
+            (defaults preserve legacy: scale=1, bias=0 => score==metric).
+        - Sort by (score, gid) and take top-K where K=flow_matrix[rnk,nbr].
+        - Ensure each element is picked at most once per sweep (picked_mask).
+        - Apply relocation and return moved_local + flow_used row.
 
-        Parameters
-        ----------
-        mode : {'faces', 'vertices'}
-            Which imbalance metric to use. This is passed directly to
-            self._compute_deltas(mode).
-        interface_policy : {'per-element', 'all-or-none'}
-            - 'per-element': classic face-based diffusion. Each element may
-              move to at most one neighbour in this sweep. Arbitration is
-              element-wise using a global min-delta rule across neighbours.
-            - 'all-or-none': interface-based smoothing. For each (rank, nbr)
-              interface we either move *all* candidates that pass the
-              threshold, or none, subject to optional flow_matrix capacities.
-        threshold : int
-            Delta threshold; an element / candidate is eligible iff
-                delta <= threshold
-            (we use <= consistently everywhere).
-        flow_matrix : (P, P) int array or None
-            Residual interface capacities for *this* sweep. flow_matrix[p, q]
-            is how many elements rank p is still allowed to send to rank q.
-            If None, capacities are treated as infinite.
-            NOTE: diffuse() does NOT mutate flow_matrix; instead it returns
-            a "realisation" flow_used of the same shape, with the actual
-            number of elements moved in this sweep. Outer code can then do
-                M_rem -= flow_used
-            or recompute a new flow_matrix as it prefers.
-        restrict_etypes : sequence of etype names, optional
-            If given, only these element types are considered for movement.
-        skip_last : bool
-            Device/protection semantics: if True, and multiple etypes exist,
-            then on interfaces where self._compute_restrict_last(...) says so
-            we drop the last etype from the active set (e.g. keep hex/pyr
-            movable but protect tet, or vice versa).
-        restrict_src_dest : bool
-            If True and target_counts is not None and flow_matrix is None,
-            apply simple donor/receiver gating:
-                diff = cur - target
-                donors are ranks with diff > 0
-                receivers are ranks with diff < 0
-            Donors may only send to receivers; receivers never send.
-            (We purposely ignore this when a flow_matrix is supplied; in that
-             regime, the flow_matrix is the single source of truth.)
-        target_counts : (P,) sequence of ints, optional
-            Desired per-rank element counts for donor/receiver gating.
-        move_spts_nodes : bool
-            Forwarded to _apply_plan_and_commit; if True we also relocate
-            solution / spts nodes together with topology.
-
-        Returns
-        -------
-        moved_local : int
-            Number of elements moved *off this rank* in this sweep.
-        flow_used : (P, P) int64 array or None
-            If flow_matrix was provided, flow_used has the same shape and
-            encodes how many elements were actually sent on each (p, q)
-            interface in this sweep. Only row r = rank['world'] will be
-            non-zero on this process; outer code can MPI-SUM this if it
-            wants the global flow realisation. If flow_matrix is None,
-            flow_used is None.
+        flow_matrix is REQUIRED for this primitive.
         """
-        W    = comm['world']
-        rnk  = int(rank['world'])
-        P    = W.size
-        thr_int = int(threshold)
+        W   = comm["world"]
+        rnk = int(rank["world"])
+
+        M = np.asarray(flow_matrix, dtype=np.int64)
+        if M.ndim != 2 or M.shape[0] != M.shape[1]:
+            raise ValueError(f"diffuse: flow_matrix must be square; got {M.shape}")
+
+        thr = float(threshold)
+        metric = str(metric).lower()
+        if metric not in ("delta", "ratio"):
+            raise ValueError(f"diffuse: metric must be 'delta' or 'ratio', got {metric!r}")
+
+        if device_bias is not None and rank_tags is None:
+            raise ValueError("diffuse: rank_tags must be provided when device_bias is used")
+
+        # Keep spts_nodes consistent in vertex mode unless caller explicitly knows better
+        if str(mode).lower() == "vertices":
+            move_spts_nodes = True
 
         # Start candidate state for this sweep from current i -> j
         self._reset_j_with_i()
-        state_i = self.i
+        st = self.i
 
-        # ---- 1) Donor/receiver gating (optional) ------------------------
-        allowed_nbrs: Optional[set[int]]
-        I_am_donor = True
+        # {nbr: {et: (N,3) [lid,a,b]}}
+        aff_by_rank = self._compute_affinity(mode)
 
-        if restrict_src_dest and target_counts is not None and flow_matrix is None:
-            my_count = state_i.nelems_total
-            cur = np.asarray(W.allgather(my_count), dtype=np.int64)
-            tgt = np.asarray(target_counts, dtype=np.int64)
-            diff = cur - tgt  # +surplus / -deficit
+        # Canonical local etype order (PyFR-style deterministic)
+        etypes_all = list(self._etype_order())
 
-            I_am_donor = diff[rnk] > 0
-            if I_am_donor:
-                allowed_nbrs = {int(n) for n in range(P) if diff[int(n)] < 0}
-            else:
-                allowed_nbrs = set()
-        else:
-            allowed_nbrs = None
-
-        # ---- 2) Compute deltas for requested mode -----------------------
-        deltas_by_rank = self._compute_deltas(mode)  # {nbr:{et:[[lid,delta],...]}}
-        # deltas_by_rank = self._filter_deltas_by_src_mask(deltas_by_rank, src_mask_flat)
-
-        # ---- 3) Determine active etypes per interface -------------------
-        etypes_all = list(self._etype_order())  # canonical order on THIS rank
-
-        if restrict_etypes is not None:
-            allowed_set = set(restrict_etypes)
-            etypes_all = [et for et in etypes_all if et in allowed_set]
-
-        # Pre-compute "restricted last" flags as in your existing logic
-        restrict_last = self._compute_restrict_last(skip_last, etypes_all)
-
-        # ---- 4) Helper: pick candidates according to interface_policy ---
+        picked_mask = np.zeros_like(st.eidxs_flat, dtype=bool)
         chosen_flat_chunks: list[np.ndarray] = []
-        chosen_nbr_chunks:  list[np.ndarray] = []
+        chosen_nbr_chunks: list[np.ndarray] = []
 
-        # For all-or-none we must ensure an element is not picked twice.
-        picked_mask: Optional[np.ndarray] = None
-        if interface_policy == "all-or-none":
-            picked_mask = np.zeros_like(state_i.eidxs_flat, dtype=bool)
+        flow_used = np.zeros_like(M, dtype=np.int64)
 
-        if interface_policy == "per-element":
-            # Classic per-element arbitration (old diffuse_smoothing):
-            all_flat: list[np.ndarray] = []
-            all_dlt:  list[np.ndarray] = []
-            all_nbrs: list[np.ndarray] = []
+        # Helper: metric from (a,b) as float64
+        def metric_from_ab(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            a = a.astype(np.float64, copy=False)
+            b = b.astype(np.float64, copy=False)
+            if metric == "delta":
+                return a - b
+            else:
+                den = a + b
+                out = np.full_like(a, np.inf, dtype=np.float64)
+                np.divide(a, den, out=out, where=(den > 0.0))
+                return out
 
-            for nbr, per_et in deltas_by_rank.items():
-                nbr = int(nbr)
-                if allowed_nbrs is not None and nbr not in allowed_nbrs:
+        # Helper: apply optional score knobs; defaults preserve legacy
+        def score_metric(x: np.ndarray, *, et: str, nbr: int) -> np.ndarray:
+            s = x
+            if etype_scale is not None:
+                s = s * float(etype_scale.get(et, 1.0))
+            if device_bias is not None:
+                tag = rank_tags[int(nbr)]
+                s = s + float(device_bias.get(tag, {}).get(et, 0.0))
+            return s
+
+        # Iterate neighbours in deterministic order (important for picked_mask determinism)
+        for nbr in sorted(int(n) for n in aff_by_rank.keys()):
+            cap = int(M[rnk, nbr])
+            if cap <= 0:
+                continue
+
+            per_et = aff_by_rank[nbr]
+
+            cand_flat: list[np.ndarray] = []
+            cand_score: list[np.ndarray] = []
+            cand_gid: list[np.ndarray] = []
+
+            for et in etypes_all:
+                arr = per_et.get(et, None)
+                if arr is None or arr.size == 0:
                     continue
 
-                for et, arr in per_et.items():
-                    if arr is None or arr.size == 0:
-                        continue
+                # arr: [lid, a, b]
+                lids = arr[:, 0].astype(np.int64, copy=False)
+                a    = arr[:, 1].astype(np.int64, copy=False)
+                b    = arr[:, 2].astype(np.int64, copy=False)
 
-                    lids = arr[:, 0].astype(np.int64, copy=False)
-                    dlt  = arr[:, 1].astype(np.int64, copy=False)
-                    if lids.size == 0:
-                        continue
-
-                    # Threshold is applied as delta <= thr_int
-                    mkeep = (dlt <= thr_int)
-                    if not np.any(mkeep):
-                        continue
-
-                    lids_k = lids[mkeep]
-                    dlt_k  = dlt[mkeep]
-                    flat_k = state_i.lids_to_flat(et, lids_k)
-
-                    all_flat.append(flat_k)
-                    all_dlt.append(dlt_k)
-                    all_nbrs.append(np.full(flat_k.shape, nbr, dtype=np.int64))
-
-            if all_flat:
-                lids_flat = np.concatenate(all_flat)
-                dlt_all   = np.concatenate(all_dlt)
-                nbrs_all  = np.concatenate(all_nbrs)
-
-                # Element-wise arbitration: for each flat id pick best neighbour
-                order = np.lexsort((dlt_all, lids_flat))
-                lids_s = lids_flat[order]
-                dlt_s  = dlt_all[order]
-                nbrs_s = nbrs_all[order]
-
-                _, first_idx = np.unique(lids_s, return_index=True)
-                best_flat = lids_s[first_idx]
-                best_dlt  = dlt_s[first_idx]
-                best_nbrs = nbrs_s[first_idx]
-
-                mkeep = (best_dlt <= thr_int)
-                if np.any(mkeep):
-                    chosen_flat = best_flat[mkeep]
-                    chosen_nbrs = best_nbrs[mkeep]
-
-                    chosen_flat_chunks.append(chosen_flat)
-                    chosen_nbr_chunks.append(chosen_nbrs)
-
-        elif interface_policy == "all-or-none":
-            # Interface-based all-or-none smoothing (old edge/vertex logic):
-            gids_flat = state_i.eidxs_flat  # for deterministic ordering only
-
-            for nbr, per_et in deltas_by_rank.items():
-                nbr = int(nbr)
-
-                if allowed_nbrs is not None and nbr not in allowed_nbrs:
+                mraw = metric_from_ab(a, b)  # float64
+                mkeep = (mraw <= thr)
+                if not np.any(mkeep):
                     continue
 
-                # Capacity for this interface, if flow_matrix is supplied.
-                cap = None
-                if flow_matrix is not None:
-                    cap = int(flow_matrix[rnk, nbr])
-                    if cap <= 0:
-                        continue
+                lids_k = lids[mkeep]
+                flat_k = st.lids_to_flat(et, lids_k)
 
-                # Decide active etypes on THIS interface
-                if skip_last and restrict_last.get(nbr, False) and len(etypes_all) > 0:
-                    etypes_active = etypes_all[:-1]
-                else:
-                    etypes_active = etypes_all
-
-                cand_flat: list[np.ndarray] = []
-                cand_dlt:  list[np.ndarray] = []
-
-                for et in etypes_active:
-                    arr = per_et.get(et, None)
-                    if arr is None or arr.size == 0:
-                        continue
-
-                    lids = arr[:, 0].astype(np.int64, copy=False)
-                    dlt  = arr[:, 1].astype(np.int64, copy=False)
-
-                    # Candidate must satisfy delta <= thr_int
-                    mkeep = (dlt <= thr_int)
-                    if not np.any(mkeep):
-                        continue
-
-                    lids_k = lids[mkeep]
-                    dlt_k  = dlt[mkeep]
-                    flat_k = state_i.lids_to_flat(et, lids_k)
-
-                    # Drop elements already chosen for some other neighbour
-                    if picked_mask is not None:
-                        m_new = ~picked_mask[flat_k]
-                        if not np.any(m_new):
-                            continue
-                        flat_k = flat_k[m_new]
-                        dlt_k  = dlt_k[m_new]
-
-                    if flat_k.size == 0:
-                        continue
-
-                    cand_flat.append(flat_k)
-                    cand_dlt.append(dlt_k)
-
-                if not cand_flat:
+                # Enforce "pick once per sweep"
+                m_new = ~picked_mask[flat_k]
+                if not np.any(m_new):
                     continue
 
-                flat_all = np.concatenate(cand_flat)
-                dlt_all  = np.concatenate(cand_dlt)
-                n_cand   = int(flat_all.size)
+                flat_k = flat_k[m_new]
 
-                # All-or-none capacity check
-                if cap is not None and n_cand > cap:
-                    # Not enough budget on this interface: skip entirely.
-                    continue
+                # Metric and score aligned with remaining candidates
+                mraw_k = mraw[mkeep][m_new]
+                score_k = score_metric(mraw_k, et=et, nbr=nbr)
 
-                # Optional deterministic ordering: sort by (delta, gid)
-                order = np.lexsort((gids_flat[flat_all], dlt_all))
-                flat_all = flat_all[order]
+                # Tie-breaker gid (stable global id for this etype)
+                gid_k = st.eidxs[et][lids_k].astype(np.int64, copy=False)[m_new]
 
-                # Mark these as chosen for this neighbour
-                if picked_mask is not None:
-                    picked_mask[flat_all] = True
+                cand_flat.append(flat_k)
+                cand_score.append(score_k)
+                cand_gid.append(gid_k)
 
-                chosen_flat_chunks.append(flat_all)
-                chosen_nbr_chunks.append(
-                    np.full(flat_all.shape, nbr, dtype=np.int64)
-                )
-        else:
-            raise ValueError(
-                "diffuse: interface_policy must be 'per-element' or 'all-or-none', "
-                f"got {interface_policy!r}"
-            )
+            if not cand_flat:
+                continue
 
-        # ---- 5) Build move plan and apply --------------------------------
+            flat_all  = np.concatenate(cand_flat)
+            score_all = np.concatenate(cand_score).astype(np.float64, copy=False)
+            gid_all   = np.concatenate(cand_gid)
+
+            #if rnk == 11 and nbr == 10:
+            #    # dump a small sample of (score, gid, flat) before ordering
+            #    tmp = list(zip(score_all[:50], gid_all[:50], flat_all[:50]))
+            #    print("[dbg.cand.new] r11->10 sample(score,gid,flat)=", tmp[:20], flush=True)
+
+
+
+            # Order by (score, gid) — legacy equivalent when score==metric
+            order = np.lexsort((gid_all, score_all))
+            flat_all = flat_all[order]
+
+            if flat_all.size > cap:
+                flat_all = flat_all[:cap]
+
+            if flat_all.size == 0:
+                continue
+
+            picked_mask[flat_all] = True
+            chosen_flat_chunks.append(flat_all)
+            chosen_nbr_chunks.append(np.full(flat_all.shape, nbr, dtype=np.int64))
+            flow_used[rnk, nbr] = int(flat_all.size)
+
         if not chosen_flat_chunks:
-            # No movement this sweep
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            flow_used = (
-                np.zeros_like(flow_matrix, dtype=np.int64)
-                if flow_matrix is not None else None
-            )
             return 0, flow_used
 
         chosen_flat = np.concatenate(chosen_flat_chunks)
         chosen_nbrs = np.concatenate(chosen_nbr_chunks)
 
-        eidxs_diff = self._build_eidxs_diff_from_flat(
-            chosen_flat, chosen_nbrs, state_i
-        )
+        eidxs_diff = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbrs, st)
 
-        moved_local = 0
-        flow_used: np.ndarray | None
-        if flow_matrix is not None:
-            flow_used = np.zeros_like(flow_matrix, dtype=np.int64)
-        else:
-            flow_used = None
+        #if rank['world'] == 11:
+        #    print(eidxs_diff)
 
-        for nbr, per_et in eidxs_diff.items():
-            n_moved = sum(len(g) for g in per_et.values())
-            moved_local += n_moved
-            if flow_used is not None and n_moved:
-                flow_used[rnk, int(nbr)] += int(n_moved)
+        # moved_local == number of unique flat ids chosen on this rank
+        moved_local = int(chosen_flat.size)
 
-        # Apply the relocation (even if eidxs_diff is empty, for symmetry)
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
 
-        return int(moved_local), flow_used
+        return moved_local, flow_used
 
     def _canonical_step(self, step: dict) -> dict:
         """
         Normalise one exec_order entry into a fully-populated config dict.
 
-        We now *only* accept dict-style steps. The old tuple/list formats like
-            ('faces', 2, 4)
-        are no longer supported.
+        Semantics:
+        - use_flow=True  -> calls self.diffuse(...) with a flow_matrix (required).
+        - use_flow=False -> calls self.smooth(...) (no flow matrix).
         """
-
         if not isinstance(step, dict):
-            raise TypeError(
-                f"exec_order entries must be dicts; got {type(step).__name__}: {step!r}"
-            )
+            raise TypeError(f"exec_order entries must be dicts; got {type(step).__name__}: {step!r}")
 
-        # Base defaults – everything explicit so iterate/_run_step can rely on them.
         cfg = dict(
-            kind=None,           # 'vertices-flow', 'faces-flow', 'faces-smooth', ...
-            name=None,           # pretty-print name
-            mode=None,           # 'faces' or 'vertices'
-            iface="per-element", # 'per-element' or 'all-or-none'
-            threshold=0,         # delta <= threshold is eligible
-            use_flow=False,      # whether to call element_flow_plan()
-            overshoot=0.0,       # only meaningful if use_flow=True
-            max_sweeps=1,        # <=0 means "until no moves" for smoothing steps
-            patience=0,          # for smoothing steps
-            min_change=0,        # for smoothing steps
-            restrict_src_dest=False,
-            move_spts_nodes=False,
-            restrict_etypes=None,
+            kind=None,               # e.g. 'vertices-flow', 'faces-flow', 'faces-smooth'
+            name=None,               # pretty-print label
+            mode=None,               # 'faces' or 'vertices' (inferred from kind if None)
+            use_flow=False,          # True => diffuse; False => smooth
+            metric="delta",          # 'delta' or 'ratio'
+            threshold=0.0,           # float; metric <= threshold
+            overshoot=0.0,           # only when use_flow=True
+            max_sweeps=1,            # only when use_flow=True (<=0 => safe default upper bound)
+            max_iters=50,            # only when use_flow=False
+            patience=1,              # only when use_flow=False
+            min_change=0,            # only when use_flow=False
+            move_spts_nodes=False,   # forced True for vertices
+            # future knobs; defaults replicate legacy when None
+            etype_scale=None,        # dict[str,float] or None
+            device_bias=None,        # dict[tag][etype] or None
+            rank_tags=None,          # list[str] or None
         )
-
-        # User-specified values override defaults
         cfg.update(step)
 
         kind = cfg["kind"]
         if kind is None:
             raise ValueError(f"exec_order step has no 'kind': {step!r}")
 
-        # Infer mode if missing from kind prefix
+        # Infer mode if missing
         if cfg["mode"] is None:
-            if str(kind).startswith("faces-"):
+            k = str(kind)
+            if k.startswith("faces-"):
                 cfg["mode"] = "faces"
-            elif str(kind).startswith("vertices-"):
+            elif k.startswith("vertices-"):
                 cfg["mode"] = "vertices"
             else:
-                raise ValueError(
-                    f"Cannot infer mode from kind={kind!r}; please set mode explicitly."
-                )
+                raise ValueError(f"Cannot infer mode from kind={kind!r}; set mode explicitly.")
 
         mode = cfg["mode"]
         if mode not in ("faces", "vertices"):
             raise ValueError(f"mode must be 'faces' or 'vertices', got {mode!r}")
 
-        iface = cfg["iface"]
-        if iface not in ("per-element", "all-or-none"):
-            raise ValueError(
-                f"iface must be 'per-element' or 'all-or-none', got {iface!r}"
-            )
+        # Infer use_flow if not explicitly set
+        # (keeps exec_order compact and legacy-readable)
+        if "use_flow" not in step:
+            cfg["use_flow"] = str(kind).endswith("-flow")
 
-        # Flow vs non-flow constraints
-        if cfg["use_flow"]:
-            # Flow steps are *interface-based*; we only support all-or-none there.
-            #if iface != "all-or-none":
-            #    raise ValueError(
-            #        f"use_flow=True requires iface='all-or-none', got iface={iface!r}"
-            #    )
-            if cfg["overshoot"] < 0.0:
-                raise ValueError(f"overshoot must be >= 0, got {cfg['overshoot']}")
-        else:
-            # If we are *not* using a flow matrix, overshoot must be zero.
-            if abs(cfg["overshoot"]) > 1e-14:
-                raise ValueError(
-                    f"overshoot={cfg['overshoot']} is only valid with use_flow=True"
-                )
+        metric = str(cfg["metric"]).lower()
+        if metric not in ("delta", "ratio"):
+            raise ValueError(f"metric must be 'delta' or 'ratio', got {cfg['metric']!r}")
+        cfg["metric"] = metric
 
-        # Vertex-based steps *must* keep spts_nodes in sync, otherwise later calls
-        # to vertex modes will trip the "spts_nodes are stale" RuntimeError.
-        if mode == "vertices" and not cfg["move_spts_nodes"]:
+        # Vertex steps must keep spts_nodes consistent
+        if mode == "vertices":
             cfg["move_spts_nodes"] = True
 
         # Normalise numerics
-        cfg["threshold"]   = int(cfg["threshold"])
-        cfg["max_sweeps"]  = int(cfg["max_sweeps"])
-        cfg["patience"]    = int(cfg["patience"])
-        cfg["min_change"]  = int(cfg["min_change"])
-        cfg["overshoot"]   = float(cfg["overshoot"])
+        cfg["threshold"] = float(cfg["threshold"])
+        cfg["overshoot"] = float(cfg["overshoot"])
+        cfg["max_sweeps"] = int(cfg["max_sweeps"])
+        cfg["max_iters"] = int(cfg["max_iters"])
+        cfg["patience"] = int(cfg["patience"])
+        cfg["min_change"] = int(cfg["min_change"])
+
+        # Flow vs non-flow constraints
+        if cfg["use_flow"]:
+            if cfg["overshoot"] < 0.0:
+                raise ValueError(f"overshoot must be >= 0, got {cfg['overshoot']}")
+            if cfg["max_sweeps"] == 0:
+                raise ValueError("max_sweeps=0 is meaningless; use 1 or <=0 for default bound")
+        else:
+            if abs(cfg["overshoot"]) > 1e-14:
+                raise ValueError(f"overshoot={cfg['overshoot']} is only valid when use_flow=True")
+            if cfg["max_iters"] <= 0:
+                raise ValueError(f"max_iters must be > 0 for smoothing steps, got {cfg['max_iters']}")
+
+        # If device_bias is provided, rank_tags must exist
+        if cfg["device_bias"] is not None and cfg["rank_tags"] is None:
+            raise ValueError("rank_tags must be provided when device_bias is used")
 
         return cfg
 
+
     def iterate(self, objective, target_counts):
         if objective == "to-target":
-            # Canonicalise once per call; you can also cache this on self if desired.
             steps = [self._canonical_step(s) for s in self.exec_order]
-
             for step in steps:
                 self._run_step(step, target_counts)
 
         elif objective == "to-remove-rank":
-            # Keep your existing to-remove-rank logic for now;
-            # we can later rewrite it on top of diffuse()/smooth_until_stagnates.
+            # Keep this as a controller; internally it uses the same primitives.
             kill_rank = [r for r, c in enumerate(target_counts) if c == 0][0]
-            if rank['world'] == root['world']:
-                print(f"{kill_rank = } ", flush=True)
+            if rank["world"] == root["world"]:
+                print(f"{kill_rank = }", flush=True)
 
+            # Simple loop; your stopping logic remains
             while True:
-                cur0 = self._cur_counts_total
-                M0 = self.element_flow_plan(target_counts)
+                cur0 = list(self._cur_counts_total)
 
-                # Evacuate via vertex-based diffusion + smoothing
-                # (this can also be moved to exec_order if you want)
-                # vertices-flow
+                # 1) Flow-guided evacuation (vertices)
                 self._run_step(
-                    dict(
+                    self._canonical_step(dict(
                         kind="vertices-flow",
                         name="to-remove-vertices",
-                        mode="vertices",
-                        iface="all-or-none",
-                        threshold=0,
-                        use_flow=True,
+                        threshold=0.0,
+                        metric="delta",
                         overshoot=0.0,
                         max_sweeps=1,
-                        patience=0,
-                        min_change=0,
-                    ),
+                    )),
                     target_counts,
                 )
-                # faces-smooth
+
+                # 2) Local smoothing polish (faces)
                 self._run_step(
-                    dict(
+                    self._canonical_step(dict(
                         kind="faces-smooth",
                         name="to-remove-smooth",
-                        mode="faces",
-                        iface="per-element",
-                        threshold=-1,
-                        use_flow=False,
-                        max_sweeps=50,
+                        threshold=-1.0,
+                        metric="delta",
+                        max_iters=50,
                         patience=1,
                         min_change=0,
-                        restrict_src_dest=True,
-                    ),
+                    )),
                     target_counts,
                 )
 
-                cur1 = self._cur_counts_total
+                cur1 = list(self._cur_counts_total)
                 diff = [cur1[i] - cur0[i] for i in range(len(cur0))]
 
-                if rank['world'] == root['world']:
-                    print(f"[itc4.iter] to-remove-rank CURRENT={cur1} \t DIFF = {diff}", flush=True)
+                if rank["world"] == root["world"]:
+                    print(f"[itc4.iter] to-remove-rank CURRENT={cur1}\tDIFF={diff}", flush=True)
 
                 if cur1[kill_rank] == 0:
-                    if rank['world'] == root['world']:
+                    if rank["world"] == root["world"]:
                         print(f"to-remove-rank done; kill_rank={kill_rank} cur={cur1}", flush=True)
                     break
 
                 if all(d == 0 for d in diff):
-                    if rank['world'] == root['world']:
+                    if rank["world"] == root["world"]:
                         print(f"to-remove-rank stuck; kill_rank={kill_rank} cur={cur1}", flush=True)
                     break
 
         else:
-            raise ValueError(f"Unknown objective '{objective}'")
+            raise ValueError(f"Unknown objective {objective!r}")
+
 
     def _run_step(self, step: dict, target_counts: Optional[List[int]]) -> None:
         """
-        Execute one canonical diffusion step described by 'step'.
+        Execute one canonical step.
 
-        Distinguishes between:
-        - flow-guided all-or-none steps (vertices/edges)
-        - per-element smoothing-to-stagnation steps
-        and logs flow, counts, and interface stats at the end.
+        - use_flow=True  -> repeated diffuse() sweeps with residual M_rem.
+        - use_flow=False -> repeated smooth() until stagnation criteria.
         """
-        W      = comm['world']
-        rnk    = int(rank['world'])
-        root_w = int(root['world'])
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
         P      = W.size
 
-        kind      = step.get("kind")             # e.g. 'vertices-flow', 'faces-flow', 'faces-smooth'
-        label     = step.get("name", kind)
-        mode      = step.get("mode", "faces")    # 'faces' or 'vertices'
-        iface     = step.get("iface", "all-or-none")
-        thr       = int(step.get("threshold", 0))
-        use_flow  = bool(step.get("use_flow", False))
-        overshoot = float(step.get("overshoot", 0.0))
-        max_sweeps = int(step.get("max_sweeps", 1))
-        patience   = int(step.get("patience", 0))
-        min_change = int(step.get("min_change", 0))
-        skip_last  = bool(step.get("skip_last", False))
-        restrict_src_dest = bool(step.get("restrict_src_dest", False))
-        move_spts_nodes   = bool(step.get("move_spts_nodes", False))
-        restrict_etypes   = step.get("restrict_etypes", None)
+        kind   = step["kind"]
+        label  = step.get("name") or kind
+        mode   = step["mode"]
+        use_flow = bool(step["use_flow"])
+        thr    = float(step["threshold"])
+        metric = step["metric"]
+
+        etype_scale = step.get("etype_scale", None)
+        device_bias = step.get("device_bias", None)
+        rank_tags   = step.get("rank_tags", None)
+        move_spts_nodes = bool(step.get("move_spts_nodes", False))
 
         if rnk == root_w:
-            print(
-                f"[iterate] step={label} mode={mode} iface={iface} "
-                f"thr={thr} use_flow={use_flow} overshoot={overshoot} "
-                f"max_sweeps={max_sweeps} patience={patience} min_change={min_change}",
-                flush=True,
-            )
+            if use_flow:
+                print(
+                    f"[iterate] step={label} mode={mode} kind={kind} "
+                    f"use_flow=True metric={metric} thr={thr:g} "
+                    f"overshoot={step['overshoot']:.3f} max_sweeps={step['max_sweeps']}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[iterate] step={label} mode={mode} kind={kind} "
+                    f"use_flow=False metric={metric} thr={thr:g} "
+                    f"max_iters={step['max_iters']} patience={step['patience']} min_change={step['min_change']}",
+                    flush=True,
+                )
 
-        # ----------------- FLOW-GUIDED all-or-none steps -----------------
-        flow_plan = None
-        flow_used_accum = None
-        sweeps = 0
-        history: list[int] = []
-
+        # ----------------- FLOW-GUIDED sweeps -----------------
         if use_flow:
-            # Build initial flow plan
             if target_counts is None:
                 raise ValueError(f"step {label}: use_flow=True but target_counts is None")
 
+            overshoot = float(step["overshoot"])
+            max_sweeps = int(step["max_sweeps"])
+
             M0 = self.element_flow_plan(target_counts)
+
             if overshoot != 0.0:
-                factor = 1.0 + float(overshoot)
-                if factor <= 0.0:
-                    raise ValueError(f"{overshoot = } must be > -1")
+                factor = 1.0 + overshoot
                 M_eff = np.rint(M0.astype(np.float64) * factor).astype(np.int64)
             else:
                 M_eff = M0.copy()
 
-            flow_plan = M_eff
             M_rem = M_eff.astype(np.int64, copy=True)
             flow_used_accum = np.zeros_like(M_rem, dtype=np.int64)
 
-            # Number of sweeps for flow step
-            if max_sweeps < 0:
-                max_sweeps_eff = P  # a safe default upper bound
-            else:
-                max_sweeps_eff = max_sweeps
+            # Safe default bound if max_sweeps <= 0
+            max_sweeps_eff = P if max_sweeps <= 0 else max_sweeps
 
-            for _ in range(max_sweeps_eff):
-                sweeps += 1
-
+            for sweep in range(1, max_sweeps_eff + 1):
                 moved_local, flow_used_local = self.diffuse(
                     mode=mode,
-                    interface_policy=iface,
                     threshold=thr,
                     flow_matrix=M_rem,
-                    restrict_etypes=restrict_etypes,
-                    skip_last=skip_last,
-                    restrict_src_dest=False,      # gating enforced via flow
-                    target_counts=None,
-                    move_spts_nodes=True,
+                    metric=metric,
+                    etype_scale=etype_scale,
+                    device_bias=device_bias,
+                    rank_tags=rank_tags,
+                    move_spts_nodes=move_spts_nodes,
                 )
 
-                moved = W.allreduce(int(moved_local), op=mpi.SUM)
-                history.append(moved)
+                moved = int(W.allreduce(int(moved_local), op=mpi.SUM))
 
                 # Aggregate actual flow usage across all ranks
-                if flow_used_local is not None:
-                    flow_used_global = np.zeros_like(flow_used_local, dtype=np.int64)
-                    W.Allreduce(flow_used_local, flow_used_global, op=mpi.SUM)
+                flow_used_global = np.zeros_like(flow_used_local, dtype=np.int64)
+                W.Allreduce(flow_used_local, flow_used_global, op=mpi.SUM)
 
-                    M_rem           -= flow_used_global
-                    flow_used_accum += flow_used_global
+                M_rem           -= flow_used_global
+                flow_used_accum += flow_used_global
 
                 if rnk == root_w:
-                    print(f"[iterate]   sweep={sweeps} moved_glob={moved}", flush=True)
+                    print(f"[iterate]   sweep={sweep} moved_glob={moved}", flush=True)
 
                 if moved == 0:
                     break
 
-        # ----------------- per-element smoothing steps -------------------
-        else:
-            # Only meaningful for iface='per-element' (we can assert to be safe)
-            if iface != "per-element":
-                raise ValueError(
-                    f"step {label}: use_flow=False but iface={iface!r} "
-                    "expected 'per-element' for smoothing-to-stagnation"
+            return
+
+        # ----------------- SMOOTHING-to-stagnation sweeps -----------------
+        max_iters  = int(step["max_iters"])
+        patience   = int(step["patience"])
+        min_change = int(step["min_change"])
+
+        stable = 0
+        last: Optional[int] = None
+
+        for it in range(1, max_iters + 1):
+            moved_local = self.smooth(
+                mode=mode,
+                threshold=thr,
+                metric=metric,
+                etype_scale=etype_scale,
+                device_bias=device_bias,
+                rank_tags=rank_tags,
+                move_spts_nodes=move_spts_nodes,
+            )
+
+            moved = int(W.allreduce(int(moved_local), op=mpi.SUM))
+
+            if last is not None and abs(moved - last) <= min_change:
+                stable += 1
+            else:
+                stable = 0
+            last = moved
+
+            stop = (moved == 0) or (stable >= patience)
+            stop_all = int(W.allreduce(1 if stop else 0, op=mpi.MAX))
+
+            if rnk == root_w:
+                print(
+                    f"[iterate]   sweep={it} moved_glob={moved} stable={stable} stop_all={bool(stop_all)}",
+                    flush=True,
                 )
 
-            # Smoothing-to-stagnation using per-element diffuse().
-            # This is the inlined version of smooth_until_stagnates().
-            max_iters = max_sweeps if max_sweeps > 0 else 50
+            if stop_all:
+                break
 
-            history = []
-            stable = 0
-            last: Optional[int] = None
 
-            for _ in range(int(max_iters)):
-                moved_local, _ = self.diffuse(
-                    mode=mode,
-                    interface_policy="per-element",
-                    threshold=thr,
-                    flow_matrix=None,
-                    restrict_etypes=None,  # keep semantics identical to previous helper
-                    skip_last=False,
-                    restrict_src_dest=restrict_src_dest,
-                    target_counts=target_counts if restrict_src_dest else None,
-                    move_spts_nodes=move_spts_nodes,
-                )
 
-                moved = W.allreduce(int(moved_local), op=mpi.SUM)
-                history.append(moved)
-
-                # Track stagnation (same logic as smooth_until_stagnates)
-                if last is not None and abs(moved - last) <= int(min_change):
-                    stable += 1
-                else:
-                    stable = 0
-                last = moved
-
-                # Local stop condition
-                stop = (moved == 0) or (stable >= int(patience))
-                # Global agreement on stopping
-                stop_all = W.allreduce(1 if stop else 0, op=mpi.MAX)
-
-                if rnk == root_w:
-                    sweep_id = len(history)
-                    print(
-                        f"[iterate]   sweep={sweep_id} moved_glob={moved} "
-                        f"stable={stable} stop_all={bool(stop_all)}",
-                        flush=True,
-                    )
-
-                if stop_all:
-                    break
-
-            sweeps = len(history)
-
-        # ----------------- End-of-step logging ---------------------------
-
+    # ----------------- Rank addition -----------------------
 
     def _pick_rank_b_min_mpi_faces_local(self, rank_a: int, etype: str | None = None, ) -> Optional[int]:
         """
@@ -1798,211 +2067,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         return cluster_by_et
 
-    def diffuse_smoothing2(
-        self,
-        flow_matrix: np.ndarray,
-        *,
-        threshold: int = 0,
-        etype_order: Optional[List[str]] = None,   # kept for future if you want per-etype bias
-        return_count: bool = False,
-        verbose: bool = False,
-        scale: float = 0.5,
-        score_by: str = "vertex",                  # 'edge' | 'vertex'
-    ) -> Optional[int]:
-        """
-        One flow-guided “nudge” pass, matching the old idea of diffuse_smoothing2:
-
-            - score_by='vertex' → vertex-based interface scoring
-            - score_by='edge'   → face-based interface scoring
-
-        Internally this just calls self.diffuse(...) with:
-            iface='all-or-none', flow_matrix=M_eff, mode='vertices' or 'faces'.
-        """
-        W      = comm['world']
-        rnk    = int(rank['world'])
-        root_w = int(root['world'])
-
-        M = np.asarray(flow_matrix, dtype=np.int64)
-        if M.ndim != 2 or M.shape[0] != M.shape[1]:
-            raise ValueError(f"[itc4] flow_matrix must be square; got shape {M.shape}")
-        R = int(M.shape[0])
-        if not (0 <= rnk < R):
-            raise ValueError(f"[itc4] rank {rnk} out of range for flow_matrix of size {R}")
-
-        # Scale the flow plan (relaxation in flow space, not element space)
-        if float(scale) <= 0.0:
-            raise ValueError(f"[itc4] scale must be > 0, got {scale!r}")
-        if abs(float(scale) - 1.0) < 1e-12:
-            M_eff = M.astype(np.int64, copy=True)
-        else:
-            M_eff = np.rint(M.astype(np.float64) * float(scale)).astype(np.int64)
-            M_eff[M_eff < 0] = 0
-
-        sb = str(score_by).lower()
-        if sb in ("edge", "edges", "face", "faces"):
-            mode = "faces"
-        elif sb in ("vertex", "vertices", "vtx", "vtxs"):
-            mode = "vertices"
-        else:
-            raise ValueError(f"[itc4] score_by must be 'edge' or 'vertex'; got {score_by!r}")
-
-        moved_local, _flow_used = self.diffuse(
-            mode=mode,
-            interface_policy="all-or-none",
-            threshold=int(threshold),
-            flow_matrix=M_eff,
-            restrict_etypes=None,         # we can wire etype_order→restrict_etypes later if needed
-            skip_last=False,
-            restrict_src_dest=False,      # flow_matrix is the single source of truth here
-            target_counts=None,
-            move_spts_nodes=True, # (mode == "vertices"),
-        )
-
-        moved = int(W.allreduce(int(moved_local), op=mpi.SUM))
-
-        if verbose and rnk == root_w:
-            print(
-                f"[itc4.pass] score_by={sb} mode={mode} thr={int(threshold)} "
-                f"scale={float(scale):.3f} moved_glob={moved}",
-                flush=True,
-            )
-
-        return moved if return_count else None
-
-    def smooth_until_stagnates(
-        self,
-        *,
-        max_iters: int = 20,
-        patience: int = 1,
-        min_change: int = 0,
-        threshold: int = 0,
-        target_counts: Optional[List[int]] = None,
-        restrict_src_dest: bool = False,
-    ) -> list[int]:
-        """
-        Run face-based smoothing repeatedly until global move-count stagnates.
-
-        This matches the old smooth_until_stagnates():
-            - scoring: faces (edge-based),
-            - interface_policy: per-element,
-            - no flow_matrix,
-            - optional donor/receiver gating via target_counts.
-        """
-        W      = comm['world']
-        rnk    = int(rank['world'])
-        root_w = int(root['world'])
-
-        history: list[int] = []
-        stable = 0
-        last: Optional[int] = None
-
-        for _ in range(int(max_iters)):
-            moved_local, _ = self.diffuse(
-                mode="faces",
-                interface_policy="per-element",
-                threshold=int(threshold),
-                flow_matrix=None,
-                restrict_etypes=None,
-                skip_last=False,
-                restrict_src_dest=restrict_src_dest,
-                target_counts=target_counts if restrict_src_dest else None,
-                move_spts_nodes=True,
-            )
-
-            moved = int(W.allreduce(int(moved_local), op=mpi.SUM))
-            history.append(moved)
-
-            if last is not None and abs(moved - last) <= int(min_change):
-                stable += 1
-            else:
-                stable = 0
-            last = moved
-
-            stop = (moved == 0) or (stable >= int(patience))
-            stop_all = W.allreduce(1 if stop else 0, op=mpi.MAX)
-
-            if rnk == root_w:
-                sweep_id = len(history)
-                print(
-                    f"[smooth] sweep={sweep_id} moved_glob={moved} "
-                    f"stable={stable} stop_all={bool(stop_all)}",
-                    flush=True,
-                )
-
-            if stop_all:
-                break
-
-        return history
-
-    def iterate_to_convergence(
-        self,
-        target_counts: List[int],
-        *,
-        etype_order: Optional[List[str]] = None,
-        verbose: bool = False,
-        flowmat_relax: float = 0.5,
-    ) -> list[int]:
-        """
-        High-level controller with the old three-pathway structure:
-
-            1) Vertex-based flow diffusion   (score_by='vertex')
-            2) Face-based   flow diffusion   (score_by='edge')
-            3) Face-based   smoothing        (no flow, to stagnation)
-
-        All the low-level pieces are the ones you already trust:
-            - element_flow_plan(...) for M
-            - diffuse(...) for a single sweep
-            - smooth_until_stagnates(...) for final polish
-        """
-        W      = comm['world']
-        rnk    = int(rank['world'])
-        root_w = int(root['world'])
-
-        def _cur_counts_total_list() -> list[int]:
-            # self._cur_counts_total is already used in element_flow_plan
-            return list(self._cur_counts_total)
-
-        if rnk == root_w and verbose:
-            print(f"[itc4.iter] TARGET={list(target_counts)}", flush=True)
-
-        # (threshold, score_by) pairs; matches your old exec_order idea
-        exec_order = ([(6, "vertex")]+
-                                             [(2, "edge")]+
-                                             [(0, "edge")]*comm['world'].size
-        )
-
-        for thr, score_by in exec_order:
-            cur0 = _cur_counts_total_list()
-            if rnk == root_w and verbose:
-                print(f"[itc4.iter] CURRENT={cur0}", flush=True)
-
-            # New element_flow_plan(v2) already uses twoway_mask internally
-            M0 = self.element_flow_plan(target_counts)
-
-            if rnk == root_w and verbose:
-                print(f"[itc4.iter] flow_plan score_by={score_by} thr={thr} =", flush=True)
-                print(M0, flush=True)
-
-            # One relaxed flow-guided pass
-            self.diffuse_smoothing2(
-                M0,
-                threshold=thr,
-                etype_order=etype_order,
-                return_count=False,
-                verbose=verbose,
-                scale=float(flowmat_relax),
-                score_by=score_by,
-            )
-
-        # Final edge-based smoothing around the converged flow result
-        history = self.smooth_until_stagnates(max_iters=50, patience=1, min_change=0,
-                                             threshold=0, target_counts=target_counts,
-                                             restrict_src_dest=True,)
-        if rnk == root_w and verbose:
-            print(f"[itc4.iter] smoothing history={history}", flush=True)
-        return history
-
-
+    # ----------------- Part/Island removal ------------------------------------
 
     def label_islands_faces(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -2397,13 +2462,8 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
             moved_local, _ = self.diffuse(
                 mode="vertices",
-                interface_policy="per-element",
                 threshold=0,
                 flow_matrix=None,
-                restrict_etypes=None,
-                skip_last=False,
-                restrict_src_dest=False,
-                target_counts=None,
                 move_spts_nodes=True,
 
                 # internal-only:
@@ -2421,27 +2481,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                 if rnk == root_w:
                     print("[rmcluster] STALL: moved_glob=0 while remaining_glob>0", flush=True)
                 break
-
-    def _filter_deltas_by_src_mask(self, deltas, src_mask_flat):
-        if src_mask_flat is None:
-            return deltas
-
-        out = {}
-        for nbr, per in deltas.items():
-            per2 = {}
-            for et, mat in per.items():
-                if mat.size == 0:
-                    per2[et] = mat
-                    continue
-
-                sl = self.i.etype_slices[et]
-                mask_et = src_mask_flat[sl.start:sl.stop]
-                lids = mat[:, 0]
-                sel = mask_et[lids]
-                per2[et] = mat[sel]
-
-            out[int(nbr)] = per2
-        return out
 
     def remove_outliers(self, *,
         attach_bias: float = 0.0,   # >0 biases toward more neighbour-tied elems (smaller delta)
@@ -2462,7 +2501,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
             return 0
 
-        self._compute_cores_from_centroids()
+        self._cores = self._compute_cores_from_centroids()
         core = np.asarray(self._cores[rnk], dtype=np.float64)
         if not np.all(np.isfinite(core)):
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
@@ -2535,7 +2574,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
             return 0
 
-        self._compute_cores_from_centroids()
+        self._cores = self._compute_cores_from_centroids()
         cores = np.asarray(self._cores, dtype=np.float64)
         if cores.ndim != 2 or cores.shape != (P, 3):
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)

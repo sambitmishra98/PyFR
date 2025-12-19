@@ -19,18 +19,12 @@ from pyfr.util import subclass_where
 
 @dataclass
 class PartitionState:
-    """
-    
-    
-    
-    """
-    
-    
-    eidxs:      Dict[str, np.ndarray]
-    con_idx:    Dict[str, np.ndarray]
-    con_mpi:    Dict[str, np.ndarray]
+    eidxs:   Dict[str, np.ndarray]
+    con_idx: Dict[str, np.ndarray]
+    con_mpi: Dict[str, np.ndarray]
+
     spts_nodes: Dict[str, np.ndarray]
-    centroids:  Dict[str, np.ndarray] = field(default_factory=dict)  # etype -> (Ne, 3) float64
+    centroids:  Dict[str, np.ndarray] = field(default_factory=dict)
 
     eidxs_flat:   np.ndarray       = field(init=False)
     etype_slices: Dict[str, slice] = field(init=False)
@@ -50,14 +44,11 @@ class PartitionState:
         self.spts_nodes = self._preproc_attr_dict(self.spts_nodes, lead_dim=0   , dtype=None    , gather_shape= True , force_1d=False)
         self.centroids  = self._preproc_attr_dict(self.centroids,  lead_dim=0   , dtype=np.float64, gather_shape= True , force_1d=False)
 
-        #self.edisps = PartitionState._compute_edisps(self.etypes, self.eidxs)
-        # Global element counts per etype (PyFR-style)
         counts_loc = np.array([self.eidxs[et].size for et in self.etypes], dtype=np.int64)
         counts_g   = comm['world'].allreduce(counts_loc, op=mpi.SUM)
 
         self.ecnts_g = {et: int(n) for et, n in zip(self.etypes, counts_g.tolist())}
 
-        # PyFR-style displacements (etype blocks in vparts)
         disp = 0
         self.edisps = {}
         for et in self.etypes:
@@ -66,6 +57,10 @@ class PartitionState:
 
         self.nelems_g = int(disp)
         self.eidxs_flat, self.etype_slices = PartitionState._eidxs_to_flat(self.etypes, self.eidxs, self.edisps)
+
+    def reprocess_spts_nodes(self, spts_nodes):
+        self.spts_nodes = self._preproc_attr_dict(spts_nodes, lead_dim=0, dtype=None, gather_shape=True, force_1d=False)
+
 
     def _preproc_attr_dict(
         self,
@@ -261,7 +256,6 @@ class PartitionState:
         disp = np.concatenate(([0], np.cumsum(glb_cnt[:-1])))
         return {et: int(disp[i]) for i, et in enumerate(etypes)}
 
-
     @staticmethod
     def _eidxs_to_flat(etypes, eidxs, edisps):
         pieces: list[np.ndarray] = []
@@ -312,8 +306,7 @@ class PartitionState:
 
         return nout, sorted(nbrs)
 
-    def partition_stats(self, *, wranks: list[int] | None = None, world=None,
-                                 root_wr: int | None = None, my_wr: int | None = None,):
+    def partition_stats(self):
         """
         Root-only return:
             (wranks, etypes, cnt, iface_out, nfaces_total, npairs)
@@ -325,14 +318,13 @@ class PartitionState:
         nfaces_total:  int undirected total MPI faces within wranks
         npairs:        int # undirected rank-pairs with at least one MPI face
         """
-        W = comm['world'] if world is None else world
-        root_wr = int(root['world']) if root_wr is None else int(root_wr)
-        my_wr   = int(rank['world']) if my_wr   is None else int(my_wr)
+        W       = comm['world']
+        root_wr = root['world']
+        my_wr   = rank['world']
 
         etypes = tuple(self.etypes)
 
-        if wranks is None:
-            wranks = list(range(W.size))
+        wranks = list(range(W.size))
         wranks = [int(w) for w in wranks]
         wset   = set(wranks)
 
@@ -375,7 +367,8 @@ class PartitionState:
         `which` is ignored here (kept only if you want a symmetric call site).
         """
 
-        ps = self.partition_stats(wranks=wranks)
+        ps = self.partition_stats()
+
         if ps is None:
             return
 
@@ -399,65 +392,64 @@ class PartitionState:
         print(tabulate(rows, headers=headers, tablefmt="github",
                        colalign=("left", *("right",) * (len(headers) - 1))))
 
-    def info_to_csv(self, *, tcurr: float, csv_path: str = "lb_stats.csv",
-                       wranks: list[int] | None = None,
-                       tag: str | None = None,
-                   ) -> None:
+    def info_to_csv(
+        self,
+        *,
+        tcurr: float,
+        comm_name: str = "compute",
+        csv_path: str = "lb_elem_dist.csv",
+    ) -> None:
         """
-        Root-only CSV logger (but must be called on all ranks due to gathers).
-
-        Columns (compact):
-          - tcurr, tag
-          - per-world-rank (restricted to wranks): {wr}-{etype}, {wr}-total, {wr}-mpi_faces_out
-          - global: mpi_faces_total, mpi_pairs, elems_total
+        Append one row with:
+        - per-rank per-etype counts (restricted to rankmap[comm_name])
+        - per-rank total_elems
+        - per-rank mpi_faces_out (directed)
+        - mpi_faces_total (undirected)
+        - mpi_pairs (undirected nonzero interfaces)
         """
-        ps = self.partition_stats(wranks=wranks)
+        ps = self.partition_stats()
         if ps is None:
-            return  # non-root
+            return
 
         wranks, etypes, cnt, iface_out, nfaces_total, npairs = ps
-        wranks = [int(w) for w in wranks]
-        etypes = list(etypes)
 
-        R, E = cnt.shape
-        assert R == len(wranks) and E == len(etypes)
+        # Only world-root writes
+        if int(rank["world"]) != int(root["world"]):
+            return
 
-        # -----------------------
-        # Header (create if needed)
-        # -----------------------
-        cols = ["tcurr", "tag"]
-        for wr_i in wranks:
-            cols += [f"{wr_i}-{et}" for et in etypes]
-            cols += [f"{wr_i}-total", f"{wr_i}-mpi_faces_out"]
-        cols += ["mpi_faces_total", "mpi_pairs", "elems_total"]
+        # ---- header (stable ordering) ----
+        cols = ["tcurr"]
 
-        if not os.path.exists(csv_path):
+        # per-rank per-etype counts
+        cols += [f"w{wr}-{et}" for wr in wranks for et in etypes]
+
+        # per-rank totals
+        cols += [f"w{wr}-total_elems" for wr in wranks]
+
+        # per-rank directed interface incidence
+        cols += [f"w{wr}-mpi_faces_out" for wr in wranks]
+
+        # globals
+        cols += ["mpi_faces_total", "mpi_pairs"]
+
+        # ---- row ----
+        row = [f"{tcurr:.6f}"]
+
+        # counts: cnt is (len(wranks), len(etypes)) in wranks-order
+        for i in range(len(wranks)):
+            row += [str(int(x)) for x in cnt[i, :]]
+
+        tot = cnt.sum(axis=1).astype(np.int64)
+        row += [str(int(x)) for x in tot]
+
+        row += [str(int(x)) for x in np.asarray(iface_out, dtype=np.int64)]
+        row += [str(int(nfaces_total)), str(int(npairs))]
+
+        # ---- write ----
+        need_header = not os.path.exists(csv_path)
+        if need_header:
             with open(csv_path, "w") as f:
                 f.write(",".join(cols) + "\n")
-        else:
-            # Basic safety: if header mismatches, don't silently corrupt the file.
-            with open(csv_path, "r") as f:
-                first = f.readline().strip()
-            if first and first != ",".join(cols):
-                raise RuntimeError(
-                    f"CSV header mismatch for {csv_path}. "
-                    f"Either delete it or log to a new path."
-                )
-
-        # -----------------------
-        # Row
-        # -----------------------
-        row: list[str] = [f"{tcurr:.6f}", "" if tag is None else str(tag)]
-
-        cnt = np.asarray(cnt, dtype=np.int64)
-        iface_out = np.asarray(iface_out, dtype=np.int64)
-
-        for r in range(R):
-            v = cnt[r, :].astype(int).tolist()
-            row += list(map(str, v))
-            row += [str(int(sum(v))), str(int(iface_out[r]))]
-
-        row += [str(int(nfaces_total)), str(int(npairs)), str(int(cnt.sum()))]
 
         with open(csv_path, "a") as f:
             f.write(",".join(row) + "\n")
@@ -470,43 +462,33 @@ class _MetaMesh:
 
         self.init_from_cfg(cfg)
 
-        # Set up WaitsToTargetsModel
-        # self.waits_model = WaitsToTargetsModel(cfg)
-
         self.etypes = etypes = PartitionState._mpi_sorted_union(set(mesh.etypes or ()))
         bc_names = PartitionState._mpi_sorted_union(set((mesh.bcon or {}).keys()))
         self.e2i      = {et: i for i, et in enumerate(etypes)}
         self.bc2id    = {n: i for i, n in enumerate(bc_names)}
 
-        eidxs = {et: np.asarray(mesh.eidxs.get(et, ()), dtype=np.int64)
-                for et in etypes}
+        eidxs   = {et: np.asarray(mesh.eidxs.get(et, ()),        dtype=np.int64) for et in etypes}
         con_mpi = {et: np.full((eidxs[et].size, self._nfaces(et)), -1, np.int64) for et in etypes}
         con_idx = {et: np.full((eidxs[et].size, self._nfaces(et)), -1, np.int64) for et in etypes}
 
         spts_nodes = deepcopy(mesh.spts_nodes)
-        # After self.i is fully built:
+        self._spts_nodes_valid = True
 
-        # Calculate centroids for each element and store in centroids
+        centroids = self._init_centroids_from_mesh(mesh)
 
-        self.i = PartitionState(eidxs=deepcopy(eidxs),     con_mpi=deepcopy(con_mpi), 
+        self.i = PartitionState(eidxs=deepcopy(eidxs), con_mpi=deepcopy(con_mpi), 
                        con_idx=deepcopy(con_idx), spts_nodes=deepcopy(spts_nodes),
-                        )
-
+                       centroids=deepcopy(centroids))
         self.j = self.i.clone()
 
         self._encode_con(mesh)
         self._fill_con_mpi(mesh)
-        self._init_centroids_from_mesh(mesh)
-        self._compute_cores_from_centroids()
         self._ne_i = self._local_count
 
-        self.etypes    = list(etypes)
+        self._cores = self._compute_cores_from_centroids()
 
         self._cache = {}
         self._ver = {'topology': 0}
-        self._spts_valid = True
-        self._cores = None
-        self.exec_order = None
 
     def _invalidate_topology(self) -> None:
         """Bump topology epoch and drop caches that depend on eidx ownership."""
@@ -879,11 +861,12 @@ class _MetaMesh:
             self.mesh_src = self.mesh_dest
             self.mesh_dest = None
 
+        # Re-initialise spts_nodes
+        self.i.reprocess_spts_nodes(self.mesh_src.spts_nodes)
         self._cache = {}
         self._ver = {'topology': 0}
-        self._spts_valid = True
+        self._spts_nodes_valid = True
         self._cores = None
-        self.exec_order = None
 
     @property
     def _local_count(self):
@@ -962,9 +945,7 @@ class _MetaMesh:
 
             centroids[et] = c
 
-        # Same centroids for i and j; edim=0 relocation is correct with shape (Ne, 3)
-        self.i.centroids = {et: arr.copy() for et, arr in centroids.items()}
-        self.j.centroids = {et: arr.copy() for et, arr in centroids.items()}
+        return centroids
 
     def _compute_cores_from_centroids(self) -> None:
         """
@@ -1012,7 +993,7 @@ class _MetaMesh:
             else:
                 cores[r, :] = np.nan
 
-        self._cores = cores
+        return cores
 
     # --------------------------------------------------------------------------
 
@@ -1087,7 +1068,7 @@ class _MetaMesh:
         self._accept_j_into_i()
         self._ne_i = self._local_count
         if not move_spts_nodes:
-            self._spts_valid = False
+            self._spts_nodes_valid = False
 
     # ---------------------
     # Relocation iterations 
@@ -1338,7 +1319,7 @@ class WaitsToTargetsModel:
         self.lb_cost_scale_g1rt = cfg.getfloat('partition', 'lb-cost-scale-g1rt', 1.0)
 
         # Setup jitter
-        self._cyclic_jitter_fraction = cfg.getfloat('partition', 'cyclic-jitter-fraction', 0.01)
+        self._cyclic_jitter_fraction = cfg.getfloat('partition', 'cyclic-jitter-fraction')
 
     def calc_target_ecounts(self, ecurrs, g1a, g1s, g1r):
         """
@@ -1429,9 +1410,9 @@ class WaitsToTargetsModel:
             for i in range(comm['world'].size)
         ]
 
-        if rank['world'] == root['world']:
-            print(f"{ecurrs  = }")
-            print(f"{targets = }")
+        #if rank['world'] == root['world']:
+        #    print(f"{ecurrs  = }")
+        #    print(f"{targets = }")
         # 
 
         return targets
@@ -1595,11 +1576,9 @@ class WaitsToTargetsModel:
             if k > 0:
                 idxs = order[-k:]   # bump largest fractions
                 N_floor[idxs] += 1
-                print(f"{tag} +1 to indices={idxs}")
             else:
                 idxs = order[:-k]   # k < 0 → drop smallest fractions
                 N_floor[idxs] -= 1
-                print(f"{tag} -1 from indices={idxs}")
 
         return N_floor
 
@@ -2418,7 +2397,7 @@ class OnlinePartitioner(WaitsToTargetsModel, _MetaMesh):
         self._retag_con_owners_from_vparts(vparts)  # O(local faces), SCOTCH path
 
         if not move_spts_nodes:
-            self._spts_valid = False
+            self._spts_nodes_valid = False
 
         # Counts AFTER
         nloc1 = int(self.i.nelems_total)
