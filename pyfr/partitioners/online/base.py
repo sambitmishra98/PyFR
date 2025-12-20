@@ -460,7 +460,7 @@ class _MetaMesh:
         self.mesh_src  = mesh
         self.mesh_dest = None
 
-        self.init_from_cfg(cfg)
+        self.lb_flowmat_relax = cfg.getfloat('partition', 'lb-flowmatrix-relax', 0.5)
 
         self.etypes = etypes = PartitionState._mpi_sorted_union(set(mesh.etypes or ()))
         bc_names = PartitionState._mpi_sorted_union(set((mesh.bcon or {}).keys()))
@@ -505,52 +505,13 @@ class _MetaMesh:
     def mesh(self):
         return self.mesh_dest if self.mesh_dest is not None else self.mesh_src
 
-    def init_from_cfg(self, cfg):
-        # Online partitioning file
-        if cfg.hasopt('partition', f'online-file'):
-            self.online_cfg = Inifile.load(cfg.get('partition', 'online-file'))
-        else:
-            self.online_cfg = cfg
-
-        # device details
-        self.devices = cfg.getliteral('backend', 'devices')
-
-        self.lb_iters         = cfg.getint(  'partition', 'lb-outeriterations')
-        self.lb_flowmat_relax = cfg.getfloat('partition', 'lb-flowmatrix-relax', 0.5)
-
     @classmethod
     def from_mesh(cls, mesh) -> "_MetaMesh":
+        # Create a cofig from a custom text file
+        cfg = Inifile("""
+                      """)
 
-        etypes   = PartitionState._mpi_sorted_union(set(mesh.etypes or ()))
-        bc_names = PartitionState._mpi_sorted_union(set((mesh.bcon or {}).keys()))
-        e2i      = {et: i for i, et in enumerate(etypes)}
-        bc2id    = {n: i for i, n in enumerate(bc_names)}
-
-        eidxs = {et: np.asarray(mesh.eidxs.get(et, ()), dtype=np.int64)
-                for et in etypes}
-        con_mpi = {et: np.full((eidxs[et].size, cls._nfaces(et)), -1, np.int64) for et in etypes}
-        con_idx = {et: np.full((eidxs[et].size, cls._nfaces(et)), -1, np.int64) for et in etypes}
-
-        spts_nodes = deepcopy(mesh.spts_nodes)
-        # After self.i is fully built:
-
-        # Calculate centroids for each element and store in centroids
-
-        state_i = PartitionState(eidxs=deepcopy(eidxs), con_mpi=deepcopy(con_mpi), 
-                        con_idx=deepcopy(con_idx), spts_nodes=deepcopy(spts_nodes),
-                        )
-
-        mm = cls(mesh=mesh, etypes=etypes, e2i=e2i, bc2id=bc2id,
-            i=state_i, j=state_i.clone(),)
-
-        mm._encode_con(mesh)
-        mm._fill_con_mpi(mesh)
-
-        mm._init_centroids_from_mesh(mesh)
-        mm._compute_cores_from_centroids()
-        mm._ne_i = mm._local_count
-
-        return mm
+        return cls(mesh=mesh, cfg=cfg)
 
     def _encode_con(self, mesh):
         """
@@ -785,73 +746,6 @@ class _MetaMesh:
         self.mesh_dest = mesh_dest
 
         return mesh_dest
-
-    def swap_partitions(self, r0: int, r1: int) -> None:
-        """
-        Swap the per-rank mesh partition (State `i`) between two *world* ranks.
-
-        Intended usage:
-          - After a 'to-remove-rank' iterate, when some rank r0 is empty and
-            you want to bubble that empty partition to the end (r1 = size - 1).
-          - Once swapped, your existing "remove last rank" logic can safely
-            drop the final rank without touching the MetaMesh internals.
-
-        This:
-          * exchanges `self.i` between ranks r0 and r1 via sendrecv,
-          * recomputes the gid->owner maps,
-          * retags con_i[..., 0] = owner_rank consistently,
-          * invalidates topology-dependent caches.
-        """
-
-        commw = comm['world']
-        myr   = int(rank['world'])
-        nr    = commw.size
-
-        # Normalise & validate inputs
-        r0 = int(r0)
-        r1 = int(r1)
-
-        if r0 == r1:
-            if myr == root['world']:
-                print(f"[mm.swap] noop swap_partitions r0=r1={r0}", flush=True)
-            return
-
-        if not (0 <= r0 < nr and 0 <= r1 < nr):
-            raise ValueError(
-                f"swap_partitions: ranks out of range: r0={r0} r1={r1} size={nr}"
-            )
-
-        # Local bookkeeping: element count before swap
-        before_local = self._local_count
-
-        # Only the two ranks participate in the sendrecv; others are spectators
-        if myr == r0 or myr == r1:
-            partner    = r1 if myr == r0 else r0
-            send_state = self.i
-            # Send our State, receive partner's State (pickled Python object)
-            recv_state = commw.sendrecv(send_state, dest=partner, source=partner)
-            # Overwrite local State
-            self.i = recv_state
-
-        after_local = self._local_count
-
-        # Collect before/after counts for a sanity log (all ranks participate)
-        before_all = commw.allgather(before_local)
-        after_all  = commw.allgather(after_local)
-
-        if myr == root['world']:
-            print(
-                f"[mm.swap] swap_partitions r0={r0} r1={r1} "
-                f"before={before_all} after={after_all}",
-                flush=True,
-            )
-
-        # Ownership tags in con_i have to be updated to reflect the new
-        # gid->owner distribution. Do this once per rank.
-        self._retag_con_owners()
-
-        # Invalidate topology-dependent caches (owners_map, nei_gid_sets, ...)
-        self._invalidate_topology()
 
     # --------------------------------------------------------------------------
 
@@ -1307,7 +1201,7 @@ class _MetaMesh:
 
         return new_eidxs
 
-class WaitsToTargetsModel:
+class WaitsToTargetsModelMixin:
 
     _LB_CYCLIC_JITTER_CTR = 0
 
@@ -1321,107 +1215,16 @@ class WaitsToTargetsModel:
         # Setup jitter
         self._cyclic_jitter_fraction = cfg.getfloat('partition', 'cyclic-jitter-fraction')
 
-    def calc_target_ecounts(self, ecurrs, g1a, g1s, g1r):
-        """
-        Builds target element counts using MPI wait-split data.
-        Returns integer per-rank targets in *newcompute* comm
-            (world-rank list from rankmap_new).
-        """
-        # --- Rankmaps for old and new compute comms ---
-        # New compute: communicator built from online.ini compute-ranklist
-        if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
-
-            if g1a is None or g1s is None or g1r is None:
-                raise RuntimeError(
-                    f"[get_target] called with None g1-data on this rank; "
-                    "this should only be called on ranks in the old compute comm."
-                )
-
-            if comm['newcompute'] == mpi.COMM_NULL:
-                raise RuntimeError(
-                    "[get_target] rank is not in newcompute but still reached get_target"
-                )
-
-            def compute_cost(g1a, g1s, g1r):
-                g1a_old = np.asarray(g1a, dtype=float)
-                g1s_old = np.asarray(g1s, dtype=float)
-                g1r_old = np.asarray(g1r, dtype=float)
-
-                s_out = g1s_old.sum(axis=1)
-                r_in  = g1r_old.sum(axis=1)
-                r_out = g1r_old.sum(axis=0)
-
-                return (g1a_old - r_in  * self.lb_cost_scale_g1r
-                                - s_out * self.lb_cost_scale_g1s
-                                + r_out * self.lb_cost_scale_g1rt)
-
-            cost_old = compute_cost(g1a, g1s, g1r)
-
-            # --- Restrict world-indexed element counts to old compute ranks ---
-
-            # rankmap_old is a list of world ranks in old compute order
-            ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
-            Ntot = int(ecurrs_old.sum())
-
-            # Snapshot medians to CSV (uses whatever index space g1* live in)
-            self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
-
-            # Per-element inverse cost on old ranks
-            inv_cost = ecurrs_old / cost_old
-            N_star_old = Ntot * (inv_cost / inv_cost.sum())
-
-            # --- Remap N_star_old from old->new using device groups (world space) ---
-
-            # Devices from config: e.g. ['gpu', 'cpu', 'cpu', 'cpu', 'cpu']
-
-            # rankmap_* are world-rank lists, matching ecurrs/devices indexing
-            if list(rankmap['compute']) != list(rankmap['newcompute']):
-                N_star_new = self.remap_targets_by_ranklist(N_star_old,
-                    old_ranks=rankmap['compute'], new_ranks=rankmap['newcompute'],
-                    devices=self.devices, tag="[lb-group]")
-            else:
-                # No rank change: old and new are the same
-                N_star_new = N_star_old.copy()
-
-            pulse_idx = self._lb_next_cyclic_pulse_index(comm['newcompute'], root['newcompute'])
-            N_star_new = self._lb_apply_single_rank_weight_bump(N_star_new, pulse_idx, 
-                                                        self._cyclic_jitter_fraction)
-
-            # if comm['newcompute'] != mpi.COMM_NULL and int(rank['newcompute']) == root['newcompute']:
-            #     print(f"[lb-jitter] {self._cyclic_jitter_fraction = } {pulse_idx = }", flush=True)
-
-            # --- Normalise and round to integer targets in newcompute order ---
-            N_int = self.normalise_and_round_targets(N_star_new, Ntot=Ntot, tag="[lb-round]",)
-            #if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
-            #    print(f"[load-balance] N_int={N_int} (sum={int(N_int.sum())})")
-
-
-            targets = N_int.tolist()
-
-        else:
-            targets = None
-
-        # Broadcast to all world ranks so everyone agrees
-        targets     = comm['world'].bcast(targets)
-
-        # Extend targets to world size using rankmap['newcompute']
-        targets = [
-            targets[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
-            for i in range(comm['world'].size)
-        ]
-
-        #if rank['world'] == root['world']:
-        #    print(f"{ecurrs  = }")
-        #    print(f"{targets = }")
-        # 
-
-        return targets
+        self.lb_iters = cfg.getint('partition', 'lb-outeriterations')
 
     def write_g1_median_csvs(self, g1a, g1s, g1r, g1idx: int = 1):
         """
         Snapshot g1 medians to CSV in integer microseconds.
         Now always use world-size vectors/matrices and embed compute ranks.
         """
+        if g1a is None or g1s is None or g1r is None:
+            return
+
         # Scale to microseconds and cast to int (compute index space)
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
         send_us = np.rint(g1s * 1e6).astype(np.int64)
@@ -1538,49 +1341,6 @@ class WaitsToTargetsModel:
                 N_star_new[k] = val
 
         return N_star_new
-
-    def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):
-        """
-        Rescale continuous targets N_star to sum to Ntot and round to integers.
-
-        Parameters
-        ----------
-        N_star : array-like of float
-            Continuous targets (new compute order).
-        Ntot : int
-            Total element count to preserve.
-        tag : str
-            Log prefix.
-
-        Returns
-        -------
-        np.ndarray of int
-            Integer targets summing to Ntot.
-        """
-        N_star = np.asarray(N_star, dtype=float)
-        sum_star = float(N_star.sum())
-
-        if sum_star <= 0.0:
-            raise ValueError(f"{tag} sum(N_star) <= 0 (got {sum_star})")
-
-        scale = float(Ntot) / sum_star
-        N_scaled = N_star * scale
-        N_floor = np.floor(N_scaled).astype(np.int64)
-
-        k = int(Ntot - N_floor.sum())
-
-        if k != 0:
-            frac = N_scaled - N_floor
-            order = np.argsort(frac)  # ascending
-
-            if k > 0:
-                idxs = order[-k:]   # bump largest fractions
-                N_floor[idxs] += 1
-            else:
-                idxs = order[:-k]   # k < 0 → drop smallest fractions
-                N_floor[idxs] -= 1
-
-        return N_floor
 
     def _lb_next_cyclic_pulse_index(self, comm_nc, root_nc: int) -> int:
         """
@@ -2309,15 +2069,1345 @@ class _MeshInterconnector(AlltoallMixin):
             out[et] = np.moveaxis(a0, 0, edim) if edim else a0
         return out
 
-class OnlinePartitioner(WaitsToTargetsModel, _MetaMesh):
+
+class RankReallocatorMixin:
     """
-    Wrapper around existing offline partitioners available in PyFR.
+        Mixin class to diffusion repartitioner and METIS/SCOTCH/KAHIP partitioners
+        for working with addition and removal of ranks. 
+        The actual element movements must be placed appropriately in their class.
+    """    
+    
+    def __init__(self, cfg):
+
+        # Online partitioning file
+        if cfg.hasopt('partition', f'online-file'):
+            self.online_cfg = Inifile.load(cfg.get('partition', 'online-file'))
+        else:
+            self.online_cfg = cfg
+
+        # device details
+        self.devices = cfg.getliteral('backend', 'devices')
+    
+    def _pick_rank_b_min_mpi_faces_local(self, rank_a: int, etype: str | None = None, ):
+        """
+        Given world-rank `rank_a`, pick neighbour `rank_b` based on rank_a's
+        local MPI-face connectivity.
+
+        If `etype` is None (default):
+            - Choose neighbour with the smallest MPI-face interface.
+
+        If `etype` is not None:
+            - Prefer neighbour with the largest number of elements of this
+              etype on the interface; tie-break by smallest rank index.
+            - If that etype is absent on all interfaces, fall back to
+              "fewest faces".
+        """
+        commw = comm['world']
+        rank_a = int(rank_a)
+        myr = int(rank['world'])
+
+        if myr == rank_a:
+            per_nbr = self._mpi_faces_by_neighbor()   # {nbr: [(et, lid, fidx), ...]}
+
+            if not per_nbr:
+                rb = None
+            else:
+                iface_sizes = {nbr: len(faces) for nbr, faces in per_nbr.items()}
+
+                if etype is not None:
+                    et_counts: dict[int, int] = {}
+                    for nbr, faces in per_nbr.items():
+                        lids = [lid for (et, lid, fidx) in faces if et == etype]
+                        et_counts[nbr] = len(set(lids))
+
+                    max_count = max(et_counts.values()) if et_counts else 0
+
+                    if max_count > 0:
+                        candidates = [n for n, c in et_counts.items() if c == max_count]
+                        rb = int(min(candidates))
+                        # Condensed log: only chosen neighbour, no huge dicts
+                        if rank_a == root['world']:
+                            print(
+                                f"[itc4.pickb] R{rank_a} etype={etype} "
+                                f"max_iface_count={max_count} -> rb={rb}",
+                                flush=True,
+                            )
+                    else:
+                        rb = min(
+                            iface_sizes.keys(),
+                            key=lambda n: (iface_sizes[n], int(n)),
+                        )
+                        if rank_a == root['world']:
+                            print(
+                                f"[itc4.pickb] R{rank_a} etype={etype} "
+                                "no faces of this etype; "
+                                f"fallback -> rb={rb}",
+                                flush=True,
+                            )
+                else:
+                    rb = min(
+                        iface_sizes.keys(),
+                        key=lambda n: (iface_sizes[n], int(n)),
+                    )
+                    if rank_a == root['world']:
+                        print(
+                            f"[itc4.pickb] R{rank_a} etype=None -> rb={rb}",
+                            flush=True,
+                        )
+        else:
+            rb = None
+
+        rb = commw.bcast(rb, root=rank_a)
+        return rb
+
+    def _pick_seed_rank_for_new_rank(self, new_rank: int) -> tuple[int, str]:
+        """
+        Decide which existing rank should act as rank_a for seeding `new_rank`,
+        and which etype is used for seeding.
+
+        Current policy
+        --------------
+        - Take the first etype in `self._etype_order()` as the top-priority
+          etype for `new_rank` (e.g. 'hex' on CPU ranks).
+        - Each rank counts how many local elements it has of this etype.
+        - The global donor rank_a is the rank with the largest count; ties are
+          broken in favour of the smallest rank index.
+
+        Returns
+        -------
+        rank_a : int
+            Donor rank index in world communicator.
+        seed_etype : str
+            The top-priority etype used for seeding.
+        """
+        this_rank = int(rank['world'])
+
+        et_order = list(self._etype_order())
+        if not et_order:
+            if this_rank == root['world']:
+                print(
+                    f"[itc4.seed-info] new_rank={new_rank} has no etypes; "
+                    "unable to pick rank_a",
+                    flush=True,
+                )
+            # Fallback: no etypes -> no sensible seed_etype, caller should bail.
+            return 0, ""
+
+        seed_etype = et_order[0]
+
+        # Local count of top-priority etype
+        local_count_seed = int(len(self.i.eidxs.get(seed_etype, ())))
+        counts_seed = comm['world'].allgather(local_count_seed)
+
+        # Argmax over counts; deterministic tie-break via lowest rank
+        max_count = max(counts_seed)
+        rank_a_candidates = [
+            r for r, c in enumerate(counts_seed) if c == max_count
+        ]
+        rank_a = int(min(rank_a_candidates))
+
+        if this_rank == root['world']:
+            print(
+                f"[itc4.seed-info] new_rank={new_rank} "
+                f"seed_etype={seed_etype} counts={counts_seed} -> rank_a={rank_a}",
+                flush=True,
+            )
+
+        return rank_a, seed_etype
+
+    def seed_rank(self, new_rank: int, targets,
+        rank_a: int | None = None, n_seed_per_etype: int = 1, ) -> None:
+        """
+        Seed `new_rank` with a small patch of elements from a single preferred
+        etype, then run a short vertex-based diffusion to grow that patch.
+
+        Semantics
+        ---------
+        - Let `seed_etype` be the first etype in `self._etype_order()`
+          (top of the preference list for seeding).
+        - If rank_a is None, we choose rank_a globally as the rank with the
+          largest number of `seed_etype` elements via `_pick_seed_rank_for_new_rank`.
+        - We choose rank_b as the neighbour of rank_a with minimal MPI faces
+          (via `_pick_rank_b_min_mpi_faces_local`), then broadcast rank_b.
+        - On all ranks we call `collect_mpi_vertex_cluster(rank_a, rank_b)`,
+          but ONLY `rank_a` actually donates up to `n_seed_per_etype` elements
+          of `seed_etype` to `new_rank`.
+        - Then we recompute element counts and do a short vertex-based
+          diffusion with `skip_last=True` so that only the first N-1 etypes
+          grow via vertex-based smoothing.
+        """
+        this_rank = int(rank['world'])
+
+        # 1) Determine rank_a and seed_etype from global top-priority policy
+        auto_rank_a, seed_etype = self._pick_seed_rank_for_new_rank(new_rank)
+
+        if not seed_etype:
+            # No etypes at all; nothing sensible to do
+            if this_rank == root['world']:
+                print(
+                    f"[itc4.seed] new_rank={new_rank} no seed_etype; "
+                    "skipping seeding",
+                    flush=True,
+                )
+            return
+
+        if rank_a is None:
+            rank_a = auto_rank_a
+        else:
+            rank_a = int(rank_a)
+            if this_rank == root['world']:
+                print(
+                    f"[itc4.seed] new_rank={new_rank} overriding auto "
+                    f"rank_a={auto_rank_a} with user rank_a={rank_a}",
+                    flush=True,
+                )
+
+        # 2) Choose rank_b: neighbour of rank_a with a suitable interface for
+        #    the seed_etype (prefer neighbours with many faces of that etype).
+        rb_local = self._pick_rank_b_min_mpi_faces_local(rank_a, etype=seed_etype)
+        rank_b = int(comm['world'].bcast(int(rb_local), root=rank_a))
+
+        if this_rank == root['world']:
+            print(
+                f"[itc4.seed] seeding R{new_rank} from interface "
+                f"(R{rank_a}, R{rank_b}) seed_etype={seed_etype}",
+                flush=True,
+            )
+
+        # 3) Build a tiny "cluster" everywhere, but only rank_a will donate
+        cluster = self.collect_mpi_vertex_cluster(rank_a, rank_b, seed_etype=seed_etype)
+
+        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
+
+        if this_rank == rank_a:
+            gids = np.asarray(cluster.get(seed_etype, ()), dtype=np.int64)
+
+            if gids.size:
+                cur = np.asarray(self.i.eidxs.get(seed_etype, ()), dtype=np.int64)
+                if cur.size:
+                    # Intersect with local gids (defensive; cluster is local)
+                    mask = np.isin(gids, cur, assume_unique=False)
+                    sel = gids[mask][: int(n_seed_per_etype)]
+
+                    if sel.size:
+                        eidxs_diff.setdefault(int(new_rank), {})[seed_etype] = sel
+                        print(
+                            f"[itc4.seed] R{this_rank} donating "
+                            f"{sel.size} {seed_etype} element(s) to R{new_rank}: "
+                            f"{sel.tolist()}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[itc4.seed] R{this_rank} cluster for {seed_etype} "
+                            "does not intersect local gids; nothing donated",
+                            flush=True,
+                        )
+                else:
+                    print(
+                        f"[itc4.seed] R{this_rank} has no local {seed_etype} "
+                        "elements; nothing donated",
+                        flush=True,
+                    )
+            else:
+                # Fallback: no seed_etype on this interface, but we still want to
+                # seed the new rank with *something* of seed_etype from rank_a.
+                cur = np.asarray(self.i.eidxs.get(seed_etype, ()), dtype=np.int64)
+
+                if cur.size:
+                    sel = cur[: int(n_seed_per_etype)]
+                    eidxs_diff.setdefault(int(new_rank), {})[seed_etype] = sel
+                    print(
+                        f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
+                        f"on interface (R{rank_a}, R{rank_b}); "
+                        f"fallback donating {sel.size} local {seed_etype} "
+                        f"element(s) to R{new_rank}: {sel.tolist()}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
+                        f"on interface (R{rank_a}, R{rank_b}) and has no local "
+                        f"{seed_etype} elements; nothing donated",
+                        flush=True,
+                    )
+
+
+        # 4) Apply the seeding relocation collectively
+        self._apply_plan_and_commit(eidxs_diff)
+
+        # 5) Recompute counts and perform a short vertex-based diffusion
+        cur0 = self._cur_counts_total
+        
+        if this_rank == root['world']:
+            print(f"[itc4.seed] mode=seed_rank CURRENT={cur0}", flush=True)
+
+        M0 = self.element_flow_plan(cur0, targets)
+
+        self.diffuse_smoothing_vertices(flow_matrix=M0, skip_last=True)
+
+    def collect_mpi_vertex_cluster(self, rank_a: int, rank_b: int, 
+                                   seed_etype: str | None = None, ):
+        """
+        Per-rank "seed" element on a vertex interface between two ranks.
+
+        Given two ranks (rank_a, rank_b), this returns, on each calling rank,
+        a mapping {etype -> np.ndarray[int64]} of *at most one* global element
+        ID on THIS rank which touches any MPI-vertices on the (rank_a, rank_b)
+        interface.
+
+        Semantics
+        ---------
+        - If this_rank ∉ {rank_a, rank_b}, the returned dict has the same
+          keys (etypes) but all arrays are empty.
+        - If this_rank ∈ {rank_a, rank_b}, we:
+            * determine the relevant neighbour rank,
+            * look up its MPI-vertex set,
+            * scan etypes in a preference order:
+                  - if seed_etype is given, try that first (if present),
+                    then all remaining etypes in self._etype_order();
+                  - otherwise just self._etype_order();
+            * for the first etype in that scan order that has at least one
+              element whose spts_nodes contain a neighbour MPI-vertex,
+              select exactly ONE such element (lowest local index),
+              and store its global ID in the returned dict.
+        - All etypes that are not chosen have empty arrays.
+
+        This is intentionally minimal: it is designed to support `seed_rank`,
+        not to capture a full "cluster".
+        """
+
+        ra = int(rank_a)
+        rb = int(rank_b)
+        if ra == rb:
+            raise ValueError("rank_a and rank_b must differ")
+
+        this_rank = int(rank['world'])
+
+        # Initialise result with per-etype empty arrays
+        cluster_by_et: dict[str, np.ndarray] = {
+            et: np.empty(0, dtype=np.int64) for et in self.etypes
+        }
+
+        # Base etype order (backend / device preference)
+        base_order = list(self._etype_order()) or list(self.etypes)
+
+        # Build scan order:
+        # - If a seed_etype is provided, we try that type first (if it exists),
+        #   then all remaining etypes in base_order.
+        # - Otherwise, just use base_order.
+        if seed_etype is not None:
+            et_scan: list[str] = []
+
+            # Hard preference: seed_etype first, if it exists on this mesh.
+            if seed_etype in self.etypes:
+                et_scan.append(seed_etype)
+
+            # Append remaining etypes, preserving base_order but avoiding dups.
+            for et in base_order:
+                if et != seed_etype and et not in et_scan:
+                    et_scan.append(et)
+
+            # As an ultimate fallback (very defensive), if for some reason
+            # et_scan ended up empty, fall back to all etypes.
+            if not et_scan:
+                et_scan = list(self.etypes)
+        else:
+            et_scan = base_order
+
+        # Ensure we have up-to-date MPI-vertex sets per neighbour.
+        mvu = self.collect_mpi_vertex_nodes()
+
+        if this_rank not in (ra, rb):
+            # Not part of this interface; nothing to do.
+            print(
+                f"[itc4.cluster] R{this_rank} not in (R{ra}, R{rb}); "
+                f"cluster empty (seed_etype={seed_etype})",
+                flush=True,
+            )
+            return cluster_by_et
+
+        # Decide which neighbour's MPI-vertices are relevant on this rank.
+        nbr = rb if this_rank == ra else ra
+        nbr_vertices = np.asarray(mvu.get(nbr, ()), dtype=np.int64)
+
+        if nbr_vertices.size == 0:
+            # We *are* one of the pair, but there is no MPI-vertex interface.
+            print(
+                f"[itc4.cluster] R{this_rank} (ra={ra}, rb={rb}) "
+                f"no MPI vertices with R{nbr}; cluster empty "
+                f"(seed_etype={seed_etype})",
+                flush=True,
+            )
+            return cluster_by_et
+
+        chosen_total = 0
+        chosen_etype: str | None = None
+
+        # Core logic: for each etype (in preference order), pick the first
+        # local element whose spts_nodes contain any of the neighbour's
+        # interface vertices.
+        for et in et_scan:
+            nds = self.i.spts_nodes[et]
+            gids = self.i.eidxs[et]
+
+            if nds is None or nds.size == 0 or gids.size == 0:
+                continue
+
+            # Elements which contain any of the neighbour's interface vertices.
+            v_in = np.isin(nds, nbr_vertices, assume_unique=False)
+            sel = v_in.any(axis=1)
+
+            lids = np.nonzero(sel)[0].astype(np.int64, copy=False)
+            if lids.size == 0:
+                continue
+
+            # Pick exactly ONE element: the first in local index order
+            cluster_by_et[et] = gids[lids[0]]
+            chosen_total = 1
+            chosen_etype = et
+
+            # For seeding we only need one element from the most-preferred
+            # etype that exists on this interface; stop after we find it.
+            break
+
+        print(
+            f"[itc4.cluster] R{this_rank} (ra={ra}, rb={rb}) "
+            f"seed_etype={seed_etype} chosen_total={chosen_total} "
+            f"chosen_etype={chosen_etype} cluster={{"
+            + ", ".join(
+                f"{et}:{cluster_by_et[et].tolist()}" for et in self.etypes
+            )
+            + "}",
+            flush=True,
+        )
+
+        return cluster_by_et
+
+    def swap_partitions(self, r0: int, r1: int) -> None:
+        """
+        Swap the per-rank mesh partition (State `i`) between two *world* ranks.
+
+        Intended usage:
+          - After a 'to-remove-rank' iterate, when some rank r0 is empty and
+            you want to bubble that empty partition to the end (r1 = size - 1).
+          - Once swapped, your existing "remove last rank" logic can safely
+            drop the final rank without touching the MetaMesh internals.
+
+        This:
+          * exchanges `self.i` between ranks r0 and r1 via sendrecv,
+          * recomputes the gid->owner maps,
+          * retags con_i[..., 0] = owner_rank consistently,
+          * invalidates topology-dependent caches.
+        """
+
+        commw = comm['world']
+        myr   = int(rank['world'])
+        nr    = commw.size
+
+        # Normalise & validate inputs
+        r0 = int(r0)
+        r1 = int(r1)
+
+        if r0 == r1:
+            if myr == root['world']:
+                print(f"[mm.swap] noop swap_partitions r0=r1={r0}", flush=True)
+            return
+
+        if not (0 <= r0 < nr and 0 <= r1 < nr):
+            raise ValueError(
+                f"swap_partitions: ranks out of range: r0={r0} r1={r1} size={nr}"
+            )
+
+        # Local bookkeeping: element count before swap
+        before_local = self._local_count
+
+        # Only the two ranks participate in the sendrecv; others are spectators
+        if myr == r0 or myr == r1:
+            partner    = r1 if myr == r0 else r0
+            send_state = self.i
+            # Send our State, receive partner's State (pickled Python object)
+            recv_state = commw.sendrecv(send_state, dest=partner, source=partner)
+            # Overwrite local State
+            self.i = recv_state
+
+        after_local = self._local_count
+
+        # Collect before/after counts for a sanity log (all ranks participate)
+        before_all = commw.allgather(before_local)
+        after_all  = commw.allgather(after_local)
+
+        if myr == root['world']:
+            print(
+                f"[mm.swap] swap_partitions r0={r0} r1={r1} "
+                f"before={before_all} after={after_all}",
+                flush=True,
+            )
+
+        # Ownership tags in con_i have to be updated to reflect the new
+        # gid->owner distribution. Do this once per rank.
+        self._retag_con_owners()
+
+        # Invalidate topology-dependent caches (owners_map, nei_gid_sets, ...)
+        self._invalidate_topology()
+
+    # ----------------- Carving partitions to look better ----------------------
+
+
+class CarverMixin:
+    """
+        Mixin class to diffusion repartitioner only.
+        for working with carving partitions to be contiguous and good-looking.
+    """
+    
+    def __init__(self, cfg=None):
+
+        # Island stuff
+        if cfg is not None:
+            self.island_remove_fraction   = cfg.getfloat('partition', 'island-remove-fraction'  , 0.5)
+            self.outlier_removal_mode     = cfg.get(     'partition', 'outlier-removal-mode'    , 'faces')
+            self.outlier_removal_fraction = cfg.getfloat('partition', 'outlier-removal-fraction', 0.00)
+            self.inlier_addition_mode     = cfg.get(     'partition', 'inlier-addition-mode'    , 'vertices')
+            self.inlier_addition_fraction = cfg.getfloat('partition', 'inlier-addition-fraction', 0.00)
+        else:
+            self.island_remove_fraction   = 0.5
+            self.outlier_removal_mode     = 'faces'
+            self.outlier_removal_fraction = 0.00
+            self.inlier_addition_mode     = 'vertices'
+            self.inlier_addition_fraction = 0.00
+    
+    def label_islands_faces(self) -> tuple["np.ndarray", "np.ndarray"]:
+        import numpy as np
+        from collections import deque
+
+        st = self.i
+        gids = np.asarray(st.eidxs_flat, dtype=np.int64)
+        nloc = int(gids.size)
+        if nloc == 0:
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int64)
+
+        order = np.argsort(gids, kind="mergesort")
+        gids_sorted = gids[order]
+
+        uu_chunks: list[np.ndarray] = []
+        vv_chunks: list[np.ndarray] = []
+
+        for et in st.etypes:
+            sl = st.etype_slices.get(et, None)
+            if sl is None or sl.stop <= sl.start:
+                continue
+            ne = int(sl.stop - sl.start)
+
+            nbr = np.asarray(st.con_idx[et], dtype=np.int64).reshape(ne, -1)
+            m = (nbr >= 0)
+            if not np.any(m):
+                continue
+
+            vv = nbr[m].astype(np.int64, copy=False)
+            u_flat = np.arange(sl.start, sl.stop, dtype=np.int64)
+            uu = np.broadcast_to(u_flat[:, None], nbr.shape)[m].astype(np.int64, copy=False)
+
+            idx = np.searchsorted(gids_sorted, vv)
+            ok = (idx < nloc)
+            if np.any(ok):
+                ok_idx = idx[ok]
+                ok_vv  = vv[ok]
+                ok[ok] = (gids_sorted[ok_idx] == ok_vv)
+
+            if not np.any(ok):
+                continue
+
+            uu_chunks.append(uu[ok])
+            vv_chunks.append(order[idx[ok]])
+
+        if not uu_chunks:
+            island_id = np.arange(nloc, dtype=np.int32)
+            island_sizes = np.ones(nloc, dtype=np.int64)
+            return island_id, island_sizes
+
+        uu_all = np.concatenate(uu_chunks)
+        vv_all = np.concatenate(vv_chunks)
+
+        # Defensive: undirected connectivity
+        uu0, vv0 = uu_all, vv_all
+        uu_all = np.concatenate([uu0, vv0])
+        vv_all = np.concatenate([vv0, uu0])
+
+        perm = np.argsort(uu_all, kind="mergesort")
+        uu_all = uu_all[perm]
+        vv_all = vv_all[perm]
+
+        counts = np.bincount(uu_all, minlength=nloc)
+        vtab = np.empty(nloc + 1, dtype=np.int64)
+        vtab[0] = 0
+        np.cumsum(counts, out=vtab[1:])
+        etab = vv_all.astype(np.int64, copy=False)
+
+        island_id = np.full(nloc, -1, dtype=np.int32)
+        sizes: list[int] = []
+        cid = 0
+        q = deque()
+
+        for s in range(nloc):
+            if island_id[s] != -1:
+                continue
+            island_id[s] = cid
+            q.append(s)
+            sz = 0
+
+            while q:
+                u = q.pop()
+                sz += 1
+                beg = int(vtab[u])
+                end = int(vtab[u + 1])
+                for v in etab[beg:end].tolist():
+                    if island_id[v] == -1:
+                        island_id[v] = cid
+                        q.append(v)
+
+            sizes.append(sz)
+            cid += 1
+
+        sizes_arr = np.asarray(sizes, dtype=np.int64)
+        old_ids = np.arange(sizes_arr.size, dtype=np.int64)
+        order2 = np.lexsort((old_ids, -sizes_arr))  # size desc, then id asc
+
+        remap = np.empty_like(order2, dtype=np.int32)
+        remap[order2] = np.arange(order2.size, dtype=np.int32)
+
+        island_id = remap[island_id]
+        island_sizes = sizes_arr[order2]
+        return island_id.astype(np.int32, copy=False), island_sizes
+
+    def _best_iface_neighbor_per_local_element(self):
+        """
+        For each local element (flat index), compute:
+          - best_nbr[flat] : neighbour rank with max MPI-face contact
+          - best_cnt[flat] : number of MPI faces to best_nbr
+          - iface_mask[flat] : element touches any MPI face
+
+        Uses _mpi_faces_by_neighbor() = {nbr: [(et, lid, fidx), ...]}.
+        """
+        st = self.i
+        nloc = int(st.eidxs_flat.size)
+
+        best_nbr = np.full(nloc, -1, dtype=np.int32)
+        best_cnt = np.zeros(nloc, dtype=np.int16)   # face counts are small
+        iface_mask = np.zeros(nloc, dtype=bool)
+
+        per_nbr = self._mpi_faces_by_neighbor()
+        if not per_nbr:
+            return best_nbr, best_cnt, iface_mask
+
+        for nbr, faces in per_nbr.items():
+            nbr = int(nbr)
+            if not faces:
+                continue
+
+            # Group by etype on-the-fly; count faces per (etype, lid)
+            # Simple (Pythonic) approach; interface sizes are modest.
+            by_et = {}
+            for et, lid, _fidx in faces:
+                by_et.setdefault(et, []).append(int(lid))
+
+            for et, lids_list in by_et.items():
+                if not lids_list:
+                    continue
+
+                lids = np.asarray(lids_list, dtype=np.int64)
+                ulids, cnts = np.unique(lids, return_counts=True)  # counts = MPI faces to nbr
+
+                flats = st.lids_to_flat(et, ulids)
+
+                iface_mask[flats] = True
+
+                # Update best neighbour by max contact; tie-break by lower nbr id
+                cur_cnt = best_cnt[flats]
+                cur_nbr = best_nbr[flats]
+
+                better = (cnts > cur_cnt) | ((cnts == cur_cnt) & ((cur_nbr < 0) | (nbr < cur_nbr)))
+                if np.any(better):
+                    fsel = flats[better]
+                    best_cnt[fsel] = cnts[better].astype(best_cnt.dtype, copy=False)
+                    best_nbr[fsel] = np.int32(nbr)
+
+        return best_nbr, best_cnt, iface_mask
+
+    def remove_cluster_step(
+        self,
+        cluster_flat: np.ndarray,
+        *,
+        budget: int | None = None,
+        boundary_only: bool = True,
+        move_spts_nodes: bool = True,
+    ) -> int:
+        """
+        One collective-safe sweep: attempt to evict elements in cluster_flat off this rank.
+
+        IMPORTANT: Always calls _apply_plan_and_commit (even if no moves) so all ranks
+        participate consistently.
+        """
+        W = comm["world"]
+        rnk = int(rank["world"])
+
+        st = self.i
+        cluster_flat = np.asarray(cluster_flat, dtype=np.int64)
+
+        # Always start from i->j, like diffuse()
+        self._reset_j_with_i()
+
+        # Empty cluster on this rank => still commit empty plan (collective safety)
+        if cluster_flat.size == 0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        best_nbr, best_cnt, iface_mask = self._best_iface_neighbor_per_local_element()
+
+        m = np.ones(cluster_flat.shape[0], dtype=bool)
+        if boundary_only:
+            m &= iface_mask[cluster_flat]
+        m &= (best_nbr[cluster_flat] >= 0)
+
+        cand = cluster_flat[m]
+
+        # No eligible candidates => still commit empty plan (collective safety)
+        if cand.size == 0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        # Deterministic priority: highest MPI-face contact first; tie-break by global gid
+        gids = st.eidxs_flat[cand]
+        keys0 = -best_cnt[cand].astype(np.int32)   # descending contact
+        keys1 = gids.astype(np.int64)              # ascending gid
+        order = np.lexsort((keys1, keys0))
+        cand = cand[order]
+
+        if budget is not None:
+            budget = int(budget)
+            if budget > 0 and cand.size > budget:
+                cand = cand[:budget]
+
+        chosen_flat = cand
+        chosen_nbrs = best_nbr[chosen_flat].astype(np.int64, copy=False)
+
+        # Build & apply relocation plan
+        eidxs_diff = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbrs, st)
+
+        moved_local = 0
+        for _nbr, per_et in eidxs_diff.items():
+            moved_local += sum(len(g) for g in per_et.values())
+
+        # If chosen_flat non-empty but moved_local==0, something is inconsistent
+        # (most likely _build_eidxs_diff_from_flat expects a different "flat" view).
+        if chosen_flat.size and moved_local == 0 and rnk == int(root["world"]):
+            print(
+                f"[rmcluster.warn] chosen_flat={int(chosen_flat.size)} but moved_local=0; "
+                "check _build_eidxs_diff_from_flat input expectations",
+                flush=True,
+            )
+
+        self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
+        return int(moved_local)
+
+    def remove_small_islands_step(self, *, max_move: int | None = None,
+                                           max_sweeps: int = 50,
+                                           patience: int = 1) -> None:
+        W = comm["world"]
+        rnk = int(rank["world"])
+        root_w = int(root["world"])
+
+        frac_remove = self.island_remove_fraction
+
+        island_id, island_sizes = self.label_islands_faces()
+        nis  = int(island_sizes.size)
+        nloc = int(island_id.size)
+
+        is_trivial = (nis <= 1) or (nloc == 0)
+
+        if is_trivial:
+            cluster_gids = np.empty(0, np.int64)
+            nrm = 0
+        else:
+            cand_ids = np.arange(1, nis, dtype=np.int32)
+            nrm = int(np.ceil(frac_remove * cand_ids.size))
+            nrm = max(1, min(nrm, cand_ids.size))
+            ids_rm = cand_ids[-nrm:]
+
+            cluster_flat0 = np.nonzero(np.isin(island_id, ids_rm))[0].astype(np.int64, copy=False)
+            cluster_gids  = np.asarray(self.i.eidxs_flat[cluster_flat0], dtype=np.int64)
+
+        # Aggressive eviction loop (collective-safe)
+        budget_left = None if max_move is None else int(max_move)
+        stable = 0
+
+        for k in range(int(max_sweeps)):
+            if cluster_gids.size:
+                in_cluster = np.isin(self.i.eidxs_flat, cluster_gids, assume_unique=False)
+                cluster_flat = np.nonzero(in_cluster)[0].astype(np.int64, copy=False)
+            else:
+                cluster_flat = np.empty(0, np.int64)
+
+            remaining_loc  = int(cluster_flat.size)
+            remaining_glob = int(W.allreduce(remaining_loc, op=mpi.SUM))
+
+            if remaining_glob == 0:
+                break
+
+            # Enforce max_move as a *total* budget across sweeps
+            if budget_left is not None:
+                if budget_left <= 0:
+                    # still participate collectively
+                    moved_local = self.remove_cluster_step(np.empty(0, np.int64), budget=0)
+                else:
+                    moved_local = self.remove_cluster_step(cluster_flat, budget=budget_left)
+                budget_left -= int(moved_local)
+            else:
+                moved_local = self.remove_cluster_step(cluster_flat, budget=None)
+
+            moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+
+            if rnk == root_w:
+                print(f"[rmislands.aggr] sweep={k+1} remaining_glob={remaining_glob} moved_glob={moved_glob}", flush=True)
+
+            if moved_glob == 0:
+                stable += 1
+            else:
+                stable = 0
+
+            if stable >= int(patience):
+                if rnk == root_w:
+                    print("[rmislands.aggr] STALL: moved_glob=0 while remaining_glob>0", flush=True)
+                break
+
+        # Optional one-shot summary (cheap)
+        stats_local = (nloc, nis, nrm, int(cluster_gids.size))
+        stats_all   = W.allgather(stats_local)
+        if rnk == root_w:
+            print(f"[rmislands.aggr] done stats={stats_all}", flush=True)
+
+
+        # Return remaining islands, nrm
+        nrms = W.allgather(nrm)
+        return nrms
+
+    def _iface_from_deltas(self, mode: str, *, delta_max: int | None = None):
+        st   = self.i
+        nloc = int(st.eidxs_flat.size)
+
+        deltas = self._compute_deltas(mode)  # {nbr:{et:(N,2)[lid,delta]}}
+        iface_mask = np.zeros(nloc, dtype=bool)
+
+        if not deltas:
+            return (
+                iface_mask,
+                np.full(nloc, -1, dtype=np.int32),
+                np.full(nloc,  2**30, dtype=np.int32),
+            )
+
+        best_nbr = np.full(nloc, -1, dtype=np.int32)
+        best_del = np.full(nloc,  2**30, dtype=np.int32)
+
+        for nbr, per_et in deltas.items():
+            nbr = int(nbr)
+            for et, mat in per_et.items():
+                if mat is None or mat.size == 0:
+                    continue
+
+                lids  = mat[:, 0].astype(np.int64, copy=False)
+                delt  = mat[:, 1].astype(np.int32, copy=False)
+                flats = st.lids_to_flat(et, lids)
+
+                # touches some MPI interface (regardless of delta gate)
+                iface_mask[flats] = True
+
+                if delta_max is not None:
+                    ok = (delt <= int(delta_max))
+                    if not np.any(ok):
+                        continue
+                    flats2 = flats[ok]
+                    delt2  = delt[ok]
+                else:
+                    flats2 = flats
+                    delt2  = delt
+
+                curd = best_del[flats2]
+                curn = best_nbr[flats2]
+                better = (delt2 < curd) | ((delt2 == curd) & ((curn < 0) | (nbr < curn)))
+                if np.any(better):
+                    sel = flats2[better]
+                    best_del[sel] = delt2[better]
+                    best_nbr[sel] = np.int32(nbr)
+
+        return iface_mask, best_nbr, best_del
+
+    def _move_by_best_rank(self, chosen_flat, best_rank, *, move_spts_nodes: bool):
+        st = self.i
+        chosen_flat = np.asarray(chosen_flat, dtype=np.int64)
+        if chosen_flat.size == 0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        chosen_nbrs = np.asarray(best_rank[chosen_flat], dtype=np.int64)
+        eidxs_diff  = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbrs, st)
+
+        moved_local = int(sum(len(g) for per in eidxs_diff.values() for g in per.values()))
+        self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
+        return moved_local
+
+    def _centroids_flat(self):
+        st = self.i
+        cflat = np.zeros((st.eidxs_flat.size, 3), dtype=np.float64)
+        okc   = np.zeros((st.eidxs_flat.size,), dtype=bool)
+
+        for et, sl in st.etype_slices.items():
+            if sl.stop <= sl.start:
+                continue
+            c = st.centroids.get(et)
+            if c is None or c.shape[0] != (sl.stop - sl.start):
+                continue
+            cflat[sl, :] = c
+            okc[sl] = np.isfinite(c).all(axis=1)
+
+        return cflat, okc
+
+    def _select_top_fraction(self, cand_flat, score, *, frac: float, higher_is_better: bool = True):
+        import numpy as np
+
+        cand_flat = np.asarray(cand_flat, dtype=np.int64)
+        if cand_flat.size == 0:
+            return cand_flat
+
+        frac = float(frac)
+        if frac <= 0.0:
+            return np.empty(0, np.int64)
+
+        n = int(cand_flat.size)
+        nsel = int(np.ceil(frac * n))
+        nsel = max(1, min(nsel, n))
+
+        gids = self.i.eidxs_flat[cand_flat].astype(np.int64, copy=False)
+        sc   = np.asarray(score, dtype=np.float64)
+
+        # primary score, secondary gid (deterministic)
+        key0 = -sc if higher_is_better else sc
+        order = np.lexsort((gids, key0))
+        return cand_flat[order[:nsel]]
+
+    def remove_outliers(
+        self,
+        *,
+        attach_bias: float = 0.0,
+        require_nonpos_delta_for_faces: bool = True,
+        move_spts_nodes: bool = True,
+        verbose: bool = True,
+    ) -> int:
+        top  = float(self.outlier_removal_fraction)
+        mode = str(self.outlier_removal_mode).lower()
+
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
+
+        self._reset_j_with_i()
+
+        if top <= 0.0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        self._cores = self._compute_cores_from_centroids()
+        core = np.asarray(self._cores[rnk], dtype=np.float64)
+        if not np.all(np.isfinite(core)):
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        cflat, okc = self._centroids_flat()
+
+        is_faces = mode.startswith(("f", "e"))  # faces/edges
+        dmax = 0 if (is_faces and require_nonpos_delta_for_faces) else None
+        iface_mask, best_nbr, best_del = self._iface_from_deltas(mode, delta_max=dmax)
+
+        cand_flat = np.nonzero(iface_mask & okc & (best_nbr >= 0))[0].astype(np.int64, copy=False)
+        if cand_flat.size == 0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        d = np.linalg.norm(cflat[cand_flat, :] - core[None, :], axis=1)
+        mu, sig = float(d.mean()), float(d.std())
+        z = (d - mu) / sig if sig > 0 else np.zeros_like(d)
+
+        # far-away + neighbour-tied (small/negative delta => larger bonus)
+        score = z + float(attach_bias) * (-best_del[cand_flat].astype(np.float64))
+
+        chosen_flat = self._select_top_fraction(cand_flat, score, frac=top, higher_is_better=True)
+        moved_local = self._move_by_best_rank(chosen_flat, best_nbr, move_spts_nodes=move_spts_nodes)
+
+        moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+        if verbose and rnk == root_w:
+            print(f"[rmoutliers] mode={mode} top={top} cand={int(cand_flat.size)} moved_glob={moved_glob}", flush=True)
+
+        return int(moved_local)
+
+    def _best_dest_by_core_from_deltas(
+        self,
+        mode: str,
+        *,
+        cores: np.ndarray,
+        cflat: np.ndarray,
+        okc: np.ndarray,
+        delta_max: int | None = None,
+    ):
+        st   = self.i
+        nloc = int(st.eidxs_flat.size)
+        P    = int(cores.shape[0])
+
+        deltas = self._compute_deltas(mode)  # {nbr:{et:(N,2)[lid,delta]}}
+        iface_mask = np.zeros(nloc, dtype=bool)
+
+        if not deltas:
+            return (
+                iface_mask,
+                np.full(nloc, -1, dtype=np.int32),
+                np.full(nloc, np.inf, dtype=np.float64),
+                np.full(nloc, 2**30, dtype=np.int32),
+            )
+
+        best_dest  = np.full(nloc, -1, dtype=np.int32)
+        best_dist  = np.full(nloc, np.inf, dtype=np.float64)
+        best_delta = np.full(nloc, 2**30, dtype=np.int32)
+
+        for nbr, per_et in deltas.items():
+            nbr = int(nbr)
+            if nbr < 0 or nbr >= P:
+                continue
+
+            core_n = cores[nbr]
+            if not np.all(np.isfinite(core_n)):
+                continue
+
+            for et, mat in per_et.items():
+                if mat is None or mat.size == 0:
+                    continue
+
+                lids  = mat[:, 0].astype(np.int64, copy=False)
+                delt  = mat[:, 1].astype(np.int32, copy=False)
+                flats = st.lids_to_flat(et, lids)
+
+                iface_mask[flats] = True
+
+                # centroid-valid only
+                m_ok = okc[flats]
+                if not np.any(m_ok):
+                    continue
+
+                flats2 = flats[m_ok]
+                delt2  = delt[m_ok]
+
+                if delta_max is not None:
+                    m_d = (delt2 <= int(delta_max))
+                    if not np.any(m_d):
+                        continue
+                    flats2 = flats2[m_d]
+                    delt2  = delt2[m_d]
+
+                d = np.linalg.norm(cflat[flats2, :] - core_n[None, :], axis=1)
+
+                curd = best_dist[flats2]
+                curk = best_dest[flats2]
+                better = (d < curd) | ((d == curd) & ((curk < 0) | (nbr < curk)))
+                if np.any(better):
+                    sel = flats2[better]
+                    best_dist[sel]  = d[better]
+                    best_dest[sel]  = np.int32(nbr)
+                    best_delta[sel] = delt2[better]
+
+        return iface_mask, best_dest, best_dist, best_delta
+
+    def add_inliers(
+        self,
+        *,
+        margin: float = 0.0,
+        move_spts_nodes: bool = True,
+        verbose: bool = True,
+    ) -> int:
+        top  = float(self.inlier_addition_fraction)
+        mode = str(self.inlier_addition_mode).lower()
+
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
+
+        self._reset_j_with_i()
+
+        if top <= 0.0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        self._cores = self._compute_cores_from_centroids()
+        cores = np.asarray(self._cores, dtype=np.float64)
+        if cores.ndim != 2:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        core_self = cores[rnk]
+        if not np.all(np.isfinite(core_self)):
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        cflat, okc = self._centroids_flat()
+
+        # Typically you do NOT delta-gate inliers, but you now can if desired:
+        iface_mask, best_dest, best_dist, _best_delta = self._best_dest_by_core_from_deltas(
+            mode, cores=cores, cflat=cflat, okc=okc, delta_max=None
+        )
+
+        cand_flat = np.nonzero(iface_mask & okc & (best_dest >= 0))[0].astype(np.int64, copy=False)
+        if cand_flat.size == 0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        c      = cflat[cand_flat, :]
+        d_self = np.linalg.norm(c - core_self[None, :], axis=1)
+        d_dest = best_dist[cand_flat]
+        score  = d_self - d_dest  # >0 means improvement
+
+        m = score > float(margin)
+        cand2 = cand_flat[m]
+        if cand2.size == 0:
+            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            return 0
+
+        chosen_flat = self._select_top_fraction(cand2, score[m], frac=top, higher_is_better=True)
+        moved_local = self._move_by_best_rank(chosen_flat, best_dest, move_spts_nodes=move_spts_nodes)
+
+        moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+        if verbose and rnk == root_w:
+            print(f"[addinliers] mode={mode} top={top} cand={int(cand2.size)} moved_glob={moved_glob}", flush=True)
+
+        return int(moved_local)
+
+
+class OfflineRepartitioner(_MetaMesh):
+    """
+        Does not use config file at all.
+    """
+
+    def __init__(self, mesh, cfg=None):
+        _MetaMesh.__init__(self, mesh, cfg)
+
+    def calc_target_ecounts(self, ecounts_ratio, g1a=None, g1s=None, g1r=None):
+        """
+        Builds target element counts using MPI wait-split data.
+        Returns integer per-rank targets in *newcompute* comm
+            (world-rank list from rankmap_new).
+        """
+        # --- Rankmaps for old and new compute comms ---
+        # New compute: communicator built from online.ini compute-ranklist
+
+        def _expand_ratio(ratio, nparts: int) -> np.ndarray:
+                """Return float weights of length nparts."""
+                if ratio is None:
+                    w = np.ones(nparts, dtype=float)
+                    return w
+
+                # String forms like "1*4:2*4:3*4" or "1:2:3"
+                if isinstance(ratio, str):
+                    w = []
+                    for tok in ratio.split(':'):
+                        tok = tok.strip()
+                        if not tok:
+                            continue
+                        if '*' in tok:
+                            a, b = tok.split('*', 1)
+                            a = float(a.strip())
+                            b = int(b.strip())
+                            w.extend([a] * b)
+                        else:
+                            w.append(float(tok))
+                    w = np.asarray(w, dtype=float)
+                else:
+                    w = np.asarray(ratio, dtype=float).ravel()
+
+                if w.size == 1:
+                    w = np.full(nparts, float(w[0]), dtype=float)
+
+                if w.size != nparts:
+                    raise RuntimeError(
+                        f"[get_target] ecounts_ratio expands to {w.size} weights, "
+                        f"but compute comm has {nparts} ranks"
+                    )
+
+                if not np.all(np.isfinite(w)):
+                    raise RuntimeError("[get_target] ecounts_ratio contains non-finite values")
+
+                if np.all(w == 0):
+                    raise RuntimeError("[get_target] ecounts_ratio is all zeros (no feasible targets)")
+
+                return w
+
+        # Gather current element counts per compute-rank
+        if comm['compute'] != mpi.COMM_NULL:
+            ecurrs_old_per_rank = int(self.i.nelems)
+            ecurrs_old = comm['compute'].gather(ecurrs_old_per_rank, root=root['compute'])
+        else:
+            ecurrs_old = None
+
+        if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
+
+            #ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
+            # Get from mmesh
+            ecurrs_old = np.asarray(ecurrs_old, dtype=np.int64)
+            Ntot = self.i.nelems_g
+            
+            if_online = g1a is not None
+             # Expand ratio into per-rank weights (compute-rank order)
+            w_ratio = _expand_ratio(ecounts_ratio, nparts=comm['compute'].size)
+
+
+            if if_online:
+                self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
+
+                def compute_cost(g1a, g1s, g1r):
+                    g1a_old = np.asarray(g1a, dtype=float)
+                    g1s_old = np.asarray(g1s, dtype=float)
+                    g1r_old = np.asarray(g1r, dtype=float)
+
+                    s_out = g1s_old.sum(axis=1)
+                    r_in  = g1r_old.sum(axis=1)
+                    r_out = g1r_old.sum(axis=0)
+
+                    return (g1a_old - r_in  * self.lb_cost_scale_g1r
+                                    - s_out * self.lb_cost_scale_g1s
+                                    + r_out * self.lb_cost_scale_g1rt)
+
+                cost_old = compute_cost(g1a, g1s, g1r)
+                # Online: inferred inv_cost times offline ratio prior
+                inv_cost = (ecurrs_old / cost_old) * w_ratio 
+ 
+            else:
+                inv_cost = w_ratio.astype(float, copy=False)
+
+            # MOVE TO RANK REALLOCATOR MIXIN
+
+            #if list(rankmap['compute']) != list(rankmap['newcompute']):
+            #    N_star_new = self.remap_targets_by_ranklist(N_star_old,
+            #        old_ranks=rankmap['compute'], new_ranks=rankmap['newcompute'],
+            #        devices=self.devices, tag="[lb-group]")
+            #else:
+            #    N_star_new = N_star_old.copy()
+
+            # MOVE TO SOME OTHER MIXIN?
+            #if self._cyclic_jitter_fraction > 0.0:
+            #    pulse_idx = self._lb_next_cyclic_pulse_index(comm['newcompute'], root['newcompute'])
+            #    N_star_new = self._lb_apply_single_rank_weight_bump(N_star_new, pulse_idx, 
+            #                                            self._cyclic_jitter_fraction)
+
+
+            s = float(inv_cost.sum())
+            if s <= 0 or not np.isfinite(s):
+                raise RuntimeError("[get_target] inv_cost sum is non-positive or non-finite")
+
+            N_star_old = Ntot * (inv_cost / s)
+
+            N_int = self.normalise_and_round_targets(N_star_old, Ntot=Ntot, tag="[lb-round]",)
+
+            targets = N_int.tolist()
+
+        else:
+            targets = None
+
+        # Broadcast to all world ranks so everyone agrees
+        targets     = comm['world'].bcast(targets)
+
+        # Extend targets to world size using rankmap['newcompute']
+
+
+        # MOVE TO RANK REALLOCATOR MIXIN
+        #targets = [
+        #    targets[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
+        #    for i in range(comm['world'].size)
+        #]
+
+        #if rank['world'] == root['world']:
+        #    print(f"{ecurrs  = }")
+        #    print(f"{targets = }")
+        # 
+
+        return targets
+
+    def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):
+        """
+        Rescale continuous targets N_star to sum to Ntot and round to integers.
+
+        Parameters
+        ----------
+        N_star : array-like of float
+            Continuous targets (new compute order).
+        Ntot : int
+            Total element count to preserve.
+        tag : str
+            Log prefix.
+
+        Returns
+        -------
+        np.ndarray of int
+            Integer targets summing to Ntot.
+        """
+        N_star = np.asarray(N_star, dtype=float)
+        sum_star = float(N_star.sum())
+
+        if sum_star <= 0.0:
+            raise ValueError(f"{tag} sum(N_star) <= 0 (got {sum_star})")
+
+        scale = float(Ntot) / sum_star
+        N_scaled = N_star * scale
+        N_floor = np.floor(N_scaled).astype(np.int64)
+
+        k = int(Ntot - N_floor.sum())
+
+        if k != 0:
+            frac = N_scaled - N_floor
+            order = np.argsort(frac)  # ascending
+
+            if k > 0:
+                idxs = order[-k:]   # bump largest fractions
+                N_floor[idxs] += 1
+            else:
+                idxs = order[:-k]   # k < 0 → drop smallest fractions
+                N_floor[idxs] -= 1
+
+        return N_floor
+
+
+class OnlinePartitioner(RankReallocatorMixin, WaitsToTargetsModelMixin, OfflineRepartitioner):
+    """
+        Wrapper around existing offline partitioners available in PyFR.
     """
 
     def __init__(self, mesh, cfg):
         # Everything related to costs
-        _MetaMesh.__init__(self, mesh, cfg)
-        WaitsToTargetsModel.__init__(self, cfg)
+        OfflineRepartitioner.__init__(self, mesh, cfg)
+        WaitsToTargetsModelMixin.__init__(self, cfg)
+        RankReallocatorMixin.__init__(self, cfg)
+
+    def _retag_con_owners_from_vparts(self, vparts):
+        """
+        Retag con_mpi neighbor-rank fields using global partition vector vparts.
+        Assumes con_idx stores global flat element ids (same eid space as vparts).
+        """
+        vparts = np.asarray(vparts, dtype=np.int32)
+
+        for et in self.i.etypes:
+            con_idx = self.i.con_idx[et]
+            con_mpi = self.i.con_mpi[et]
+            if con_idx.size == 0 or con_mpi.size == 0:
+                continue
+
+            eid = con_idx.reshape(-1)
+            nbr = con_mpi.reshape(-1)
+
+            m = (eid >= 0) & (eid < vparts.size)
+            if np.any(m):
+                nbr[m] = vparts[eid[m]]
 
     def apply_global_partition(self, vparts, *, move_spts_nodes=True):
         """
@@ -2328,7 +3418,7 @@ class OnlinePartitioner(WaitsToTargetsModel, _MetaMesh):
         vparts : array-like, shape (nelems_g,)
             Partition id for every global element in PyFR ordering:
             concatenate over etypes (sorted), within each etype order by global gid.
-            This is the same ordering your reconstruct_by_diffusion() builds.
+            This is the same ordering your construct_by_diffusion() builds.
         move_spts_nodes : bool
             Whether to relocate spts_nodes.
         """
@@ -2407,25 +3497,6 @@ class OnlinePartitioner(WaitsToTargetsModel, _MetaMesh):
 
         return eidxs_dest
 
-    def _retag_con_owners_from_vparts(self, vparts):
-        """
-        Retag con_mpi neighbor-rank fields using global partition vector vparts.
-        Assumes con_idx stores global flat element ids (same eid space as vparts).
-        """
-        vparts = np.asarray(vparts, dtype=np.int32)
-
-        for et in self.i.etypes:
-            con_idx = self.i.con_idx[et]
-            con_mpi = self.i.con_mpi[et]
-            if con_idx.size == 0 or con_mpi.size == 0:
-                continue
-
-            eid = con_idx.reshape(-1)
-            nbr = con_mpi.reshape(-1)
-
-            m = (eid >= 0) & (eid < vparts.size)
-            if np.any(m):
-                nbr[m] = vparts[eid[m]]
 
 class OnlineSCOTCHPartitioner(OnlinePartitioner):
     """

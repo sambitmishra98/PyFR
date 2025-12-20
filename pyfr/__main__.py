@@ -5,6 +5,8 @@ import io
 from pathlib import Path
 import re
 
+from uuid import uuid4
+
 import h5py
 import mpi4py.rc
 import numpy as np
@@ -14,16 +16,17 @@ from pyfr._version import __version__
 from pyfr.backends import BaseBackend, get_backend
 from pyfr.inifile import Inifile
 from pyfr.mpiutil import (get_comm_rank_root, init_mpi, initialise_new_comm,
-                          comm, rank, root)
+                          comm, rank, root, rankmap)
 from pyfr.partitioners import (BasePartitioner, get_partitioner,
                                reconstruct_partitioning, write_partitioning,
-                               reconstruct_by_diffusion)
+                               construct_by_diffusion)
 from pyfr.plugins import BaseCLIPlugin
 from pyfr.progress import (NullProgressSequence, ProgressBar,
                            ProgressSequenceAction)
 from pyfr.readers import BaseReader, get_reader_by_name, get_reader_by_extn
 from pyfr.readers.native import NativeReader
-from pyfr.partitioners.online.base import _MetaMesh
+from pyfr.partitioners.online.base import _MetaMesh, _MeshInterconnector
+from pyfr.partitioners.online.diffusion import DiffusionRepartitioner
 from pyfr.readers.stl import read_stl
 from pyfr.resamplers import (BaseInterpolator, NativeCloudResampler,
                              get_interpolator)
@@ -130,7 +133,8 @@ def main():
         process=process_partition_reconstruct
     )
 
-    # Reconstruct partitioning by diffusion from an existing partitioning
+    # Construct partitioning by diffusion
+    # Optionally reconstruct from an existing partitioning
     ap_partition_diffuse = ap_partition.add_parser(
         'diffuse', help='partition diffuse --help'
     )
@@ -409,6 +413,74 @@ def _random_vparts_nonempty(n: int, nparts: int, *, seed: int) -> np.ndarray:
         if np.unique(v).size == nparts:
             return v
 
+def _parse_rank_weights(spec: str | None, nparts: int) -> list[float]:
+    """
+    Parse weights spec into exactly nparts weights (one per MPI rank).
+
+    spec formats supported:
+      '-' or None: default equal weights
+      'R' (digits): must equal nparts; treated as equal weights
+      '1*4:2*4:3*4' expansion
+      '1:2:3:...' explicit list, must have length nparts
+    """
+    if spec is None or spec == '-' or spec == '':
+        return [1.0] * nparts
+
+    # Digits-only: interpret as "number of partitions"
+    if re.fullmatch(r'\d+', spec):
+        n = int(spec)
+        if n != nparts:
+            raise NotImplementedError(
+                f"[diffuse] differing MPI ranks not supported yet: "
+                f"mpirun -n {nparts} but weights spec requests {n} partitions"
+            )
+        return [1.0] * nparts
+
+    # Expand forms like "1*4:2*4"
+    if '*' in spec:
+        def psub(m): return ':'.join([m[1]] * int(m[2]))
+        spec = re.sub(r'(\d+)\*(\d+)', psub, spec)
+
+    w = [float(x) for x in spec.split(':') if x.strip()]
+
+    if len(w) != nparts:
+        raise ValueError(
+            f"[diffuse] weights must expand to exactly {nparts} entries "
+            f"(one per rank); got {len(w)}"
+        )
+
+    return w
+
+def _partitioning_nparts(mesh: h5py.File, pname: str) -> int:
+    if f'partitionings/{pname}/eles' not in mesh:
+        raise ValueError(f"[diffuse] partitioning {pname!r} does not exist in mesh")
+
+    regions = mesh[f'partitionings/{pname}/eles'].attrs['regions']
+    return int(len(regions))
+
+def _create_temp_random_partitioning(mesh_path: str, nparts: int, *, seed: int = -1) -> str:
+    """
+    Create a temporary random partitioning of size `nparts` in the mesh file.
+    Returns the temp partitioning name (string). Root-rank only.
+    """
+    tmpname = f"__tmp_rand_{nparts}_{uuid4().hex[:10]}"
+
+    with h5py.File(mesh_path, 'r+') as mesh:
+        mesh.require_group('partitionings')
+
+        # Build global connectivity arrays
+        con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
+        ntotal = int(len(ecurved))
+
+        # Random global assignment
+        vparts = _random_vparts_nonempty(ntotal, nparts, seed=seed)
+
+        # Construct + write partitioning
+        pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps, con, vparts)
+        write_partitioning(mesh, tmpname, pinfo)
+
+    return tmpname
+
 
 def _vparts_to_scatter_eidxs(
     vparts: np.ndarray,
@@ -592,61 +664,89 @@ def process_partition_reconstruct(args):
         with args.progress.start('Write partitioning'):
             write_partitioning(mesh, args.name, pinfo)
 
-
 def process_partition_diffuse(args):
-    # Validate the partitioning name
-    if not re.match(r'\w+$', args.name):
+    # Validate the output partitioning name
+    if not re.match(r'\w+$', args.dpname):
         raise ValueError('Invalid partitioning name')
 
     init_mpi()
 
-    # If running with n MPI ranks and mesh args.name has m partitions, then
-    # create new comms with m ranks each
-    comm, rank, root = get_comm_rank_root()
+    nparts = int(comm['world'].size)
 
-    etypes = []
-    pwts   = []
-    if rank == root:
-        with (h5py.File(args.mesh, 'r+') as mesh):
-            etypes = list(mesh['eles'])
+    if nparts < 2:
+        raise ValueError('Diffusion is meaningless for nranks < 2.')
 
-            # Partition weights
-            if ':' in args.np or '*' in args.np:
-                def psub(m): return ':'.join([m[1]]*int(m[2]))
-                pwts = re.sub(r'(\d+)\*(\d+)', psub, args.np)
-                pwts = [int(w) for w in pwts.split(':')]
+    # Sentinel behavior
+    init_pname = None if args.name == '-' else args.name
+    weights_spec = args.np  # may be '-'
+
+    # Root parses weights and validates initial partitioning size
+    err = None
+    pwts = None
+    tmp_pname = None
+    used_tmp = False
+
+    if rank['world'] == root['world']:
+        try:
+            pwts = _parse_rank_weights(weights_spec, nparts=nparts)
+
+            if init_pname is not None:
+                # Validate that init partitioning has nparts parts
+                with h5py.File(args.mesh, 'r') as mesh:
+                    p_nparts = _partitioning_nparts(mesh, init_pname)
+                if p_nparts != nparts:
+                    raise NotImplementedError(
+                        f"[diffuse] differing MPI ranks not supported yet: "
+                        f"init partitioning {init_pname!r} has {p_nparts} parts "
+                        f"but mpirun -n {nparts}"
+                    )
             else:
-                pwts = [1]*int(args.np)
+                # Create a temporary random init partitioning
+                tmp_pname = _create_temp_random_partitioning(args.mesh, nparts, seed=-1)
+                used_tmp = True
 
-    etypes = comm.bcast(etypes, root=root)
-    pwts   = comm.bcast(pwts  , root=root)
+            print(f"[diffuse] init_pname={(init_pname or tmp_pname)!r} used_tmp={used_tmp}", flush=True)
+            print(f"[diffuse] weights_len={len(pwts)} weights_sum={float(sum(pwts)):.6g}", flush=True)
 
-    if comm.size < 2:
-        raise ValueError('Diffusion is meaningless for nranks > 1.')
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
 
-    reader = NativeReader(args.mesh, pname=args.name)
+    err = comm['world'].bcast(err, root=root['world'])
+    if err:
+        raise RuntimeError(err)
+
+    pwts = comm['world'].bcast(pwts, root=root['world'])
+    tmp_pname = comm['world'].bcast(tmp_pname, root=root['world'])
+    used_tmp = comm['world'].bcast(used_tmp, root=root['world'])
+
+    # Barrier to ensure temp partitioning is visible to all ranks
+    comm['world'].barrier()
+
+    # Read mesh partitioned according to init_pname (or temp)
+    pname = init_pname if init_pname is not None else tmp_pname
+    reader = NativeReader(args.mesh, pname=pname)
     read_only_mesh = reader.mesh
     reader.close()
 
-    # Reconstruct the partitioning used in the solution
-    vparts = reconstruct_by_diffusion(read_only_mesh, pwts, args.progress)
+    # Run diffusion relocation
+    vparts = construct_by_diffusion(read_only_mesh, pwts, args.progress)
 
-    if rank == root:
-        with args.progress.start('Repartition'):
-            if rank == root:
-                with (h5py.File(args.mesh, 'r+') as mesh):
-                    # Check it does not already exist unless --force is given
-                    if args.dpname in mesh['partitionings'] and not args.force:
-                        raise ValueError('Partitioning already exists; use -f to replace')
+    # Root writes the final partitioning and deletes temp if created
+    if rank['world'] == root['world']:
+        with h5py.File(args.mesh, 'r+') as mesh:
+            if args.dpname in mesh['partitionings'] and not args.force:
+                raise ValueError('Partitioning already exists; use -f to replace')
 
-                    con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
+            con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
+            pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps, con, vparts)
+            write_partitioning(mesh, args.dpname, pinfo)
+            print(f"[diffuse] wrote partitionings/{args.dpname}", flush=True)
 
-                    pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps,
-                                                                con, vparts)
+            if used_tmp:
+                del mesh['partitionings'][tmp_pname]
+                print(f"[diffuse] removed temporary partitioning {tmp_pname!r}", flush=True)
 
-                    # Write out the new partitioning
-                    with args.progress.start('Write partitioning'):
-                            write_partitioning(mesh, args.dpname, pinfo)
+    comm['world'].barrier()
 
 def process_partition_remove(args):
     with h5py.File(args.mesh, 'r+') as mesh:
@@ -797,6 +897,37 @@ def process_resample(args):
         writer.set_shapes_eidxs(tshapes, treader.mesh.eidxs)
         writer.write(tsoln, None, metadata)
 
+def _relocate_soln_by_etype(mesh_src, mesh_dst, soln, *, edim=2):
+    """
+    Relocate restart solution arrays that are keyed by element type.
+    Leaves any non-etype metadata keys untouched.
+
+    For `pyfr run`, soln is None -> return None.
+    """
+    if soln is None:
+        return None
+
+    inter = _MeshInterconnector(mesh_src.eidxs, mesh_dst.eidxs)
+
+    # Only relocate keys that correspond to element types present in the mesh
+    et_soln = {
+        et: soln[et]
+        for et in mesh_src.eidxs.keys()
+        if et in soln and soln[et] is not None
+    }
+
+    if not et_soln:
+        return soln
+
+    et_soln_new = inter.relocate(et_soln, edim=edim)
+
+    # Preserve metadata keys (config/stats/etc.)
+    soln_out = dict(soln)
+    for et in et_soln.keys():
+        soln_out[et] = et_soln_new[et]
+
+    return soln_out
+
 
 def _process_common(args, soln, cfg):
     # Manually initialise MPI
@@ -810,20 +941,74 @@ def _process_common(args, soln, cfg):
 
     initialise_new_comm('compute', part_ranklist)
 
-    compute_pname = None
-    
-    if cfg.hasopt('partition', 'compute-pname'):
+    # --- Minimal + safe compute_pname handling (no default arg assumption) ---
+    if cfg is not None and cfg.hasopt('partition', 'compute-pname'):
         compute_pname = cfg.get('partition', 'compute-pname')
-    
-    # Read the mesh
-    reader = NativeReader(args.mesh, pname=compute_pname,
-                          comm_name='compute')
+    else:
+        compute_pname = '1'
+
+    # If we start from a 1-way mesh but run with >1 ranks, create a temp random pname
+    startup_from_one = (str(compute_pname) == '1' and comm['compute'].size > 1)
+
+    if startup_from_one:
+        # For now, be strict (you asked for NotImplemented liberally)
+        if comm['compute'].size != comm['world'].size:
+            raise NotImplementedError(
+                "[startup-rand] compute comm != world comm not supported yet"
+            )
+
+        seed = -1
+        if cfg is not None and cfg.hasopt('partition', 'startup-rand-seed'):
+            seed = cfg.getint('partition', 'startup-rand-seed')
+
+        if rank['world'] == root['world']:
+            tmp = _write_startup_random_partitioning(args.mesh, comm['compute'].size, seed=seed)
+            print(f"[startup-rand] wrote partitioning {tmp!r} (nparts={comm['compute'].size}, seed={seed})",
+                  flush=True)
+        else:
+            tmp = None
+
+        compute_pname = comm['world'].bcast(tmp, root=root['world'])
+        comm['world'].barrier()
+
+    # --- Read mesh on compute comm for ALL ranks ---
+    reader = NativeReader(args.mesh, pname=str(compute_pname), comm_name='compute')
     mesh = reader.mesh
-    mmesh = _MetaMesh(mesh, cfg)
 
     # Load a provided solution, if any
     if soln is not None:
         soln = reader.load_soln(soln)
+
+    # Close reader (good hygiene)
+    reader.close()
+
+    mmesh = DiffusionRepartitioner(mesh, cfg)
+
+    # Optional: if you want your original “clean up random” passes
+    if startup_from_one:
+        target_counts = mmesh.calc_target_ecounts([1] * comm['compute'].size)
+
+        mmesh.i.info()
+        mmesh.remove_islands_till_convergence()
+        mmesh.i.info()
+        mmesh.diffuse_till_convergence(target_counts, max_iters=100)
+        mmesh.i.info()
+
+
+    # If compute-ranklist differs from current communicator, reinitialise
+    if len(part_ranklist) != len(rankmap['compute']):
+        initialise_new_comm('newcompute', part_ranklist)
+    else:
+        initialise_new_comm('newcompute', list(range(len(part_ranklist))))
+
+    # New mesh lives under the 'newcompute' logical name while we migrate.
+    ncmesh = mmesh.to_mesh(mmesh.i.eidxs)
+
+    # Relocate restart solution if present (pyfr run => soln is None)
+    soln = _relocate_soln_by_etype(mesh, ncmesh, soln, edim=2)
+
+    if rank['world'] == root['world']:
+        print(f"[startup] soln_relocated={soln is not None}", flush=True)
 
     # If we do not have a config file then take it from the solution
     if cfg is None:
@@ -835,16 +1020,39 @@ def _process_common(args, soln, cfg):
     # Construct the solver
     solver = get_solver(backend, mmesh, soln, cfg)
 
-    # If we are running interactively then create a progress bar
+    # Progress bar unchanged...
     if args.progress and rank['world'] == root['world']:
         pbar = ProgressBar()
         pbar.start(solver.tend, start=solver.tstart, curr=solver.tcurr)
-
-        # Register a callback to update the bar after each step
         solver.plugins.append(lambda intg: pbar(intg.tcurr))
 
     # Execute!
     solver.run()
+
+
+def _write_startup_random_partitioning(mesh_path: str, nparts: int, *, seed: int = -1) -> str:
+    """
+    Root-only: write a temporary random partitioning with `nparts` parts into mesh_path.
+    Returns the new partitioning name.
+    """
+    pname = f"__startup_rand_{nparts}_{uuid4().hex[:8]}"
+    rng = np.random.default_rng(None if seed < 0 else int(seed))
+
+    with h5py.File(mesh_path, 'r+') as mesh:
+        mesh.require_group('partitionings')
+
+        con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
+        ntotal = int(len(ecurved))
+
+        if nparts <= 1:
+            vparts = np.zeros(ntotal, dtype=np.int32)
+        else:
+            vparts = rng.integers(0, nparts, size=ntotal, dtype=np.int32)
+
+        pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps, con, vparts)
+        write_partitioning(mesh, pname, pinfo)
+
+    return pname
 
 
 def process_run(args):
