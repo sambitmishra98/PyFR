@@ -6,43 +6,7 @@ import numpy as np
 from pyfr.mpiutil import comm, rank, root, mpi
 from pyfr.partitioners.online.base import OnlinePartitioner
 
-import os, hashlib
-import numpy as np
-
-def _dbg_on():
-    return bool(int(os.environ.get("PYFR_LB_DBG", "1")))
-
-def _dbg_tag():
-    return os.environ.get("PYFR_LB_DBG_TAG", "latest")  # set "legacy" in legacy run
-
-def _dbg_path(rank):
-    # per-rank log, always append
-    return f"dbg.latest.r{rank}.log"
-
-def _md5_arr(a: np.ndarray) -> str:
-    a = np.asarray(a)
-    a = np.ascontiguousarray(a)
-    return hashlib.md5(a.view(np.uint8)).hexdigest()
-
-def _summ_int_arr(a: np.ndarray, k=12):
-    a = np.asarray(a)
-    if a.size == 0:
-        return "[]"
-    head = a[:k].tolist()
-    tail = a[-k:].tolist() if a.size > k else []
-    return f"n={a.size} head={head} tail={tail}"
-
-def _dbg_write(rank, msg):
-    if not _dbg_on():
-        return
-    with open(_dbg_path(rank), "a") as f:
-        f.write(msg + "\n")
-
-
 class OnlineDiffusionPartitioner(OnlinePartitioner):
-    """
-    A collection of all diffusion related strategies.
-    """
 
     def __init__(self, mesh, cfg):
         OnlinePartitioner.__init__(self, mesh, cfg)
@@ -396,7 +360,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         else:
             raise ValueError(f"_compute_affinity: invalid mode {mode!r}")
 
-    def _compute_deltas(self, score_by: str) -> dict[int, dict[str, "np.ndarray"]]:
+    def _compute_deltas(self, score_by: str) -> dict[int, dict[str, np.ndarray]]:
         sb = str(score_by).lower()
         if sb in ("edge", "edges", "face", "faces"):
             return self._calc_mpi_faces_deltas()      # your con_mpi-based integer deltas
@@ -407,31 +371,25 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
     def compute_mpi_face_delta_from_vertices(self) -> dict[int, dict[str, "np.ndarray"]]:
         """
-        LEGACY-PARITY vertex deltas.
+        Vertex deltas (legacy parity).
 
-        Returns
-        -------
-        {nbr: {et: (N,2) int64 [[lid, delta], ...] sorted by (delta, lid)}}
-
-        where delta = c_int - c_n:
-        c_n   = # of element VERTICES in neighbour's MPI-vertex set
-        c_int = # of element VERTICES NOT in union of all MPI vertices
+        Returns {nbr: {et: (N,2) int64 [[lid, delta], ...] sorted by (delta, lid)}}
+        delta = c_int - c_n
+        c_n   = #corner-vertices of element in nbr's MPI-vertex set
+        c_int = #corner-vertices of element NOT in union of all MPI-face vertices
+        Only MPI-face interface elements to nbr are eligible (lids via _iface_lids_by_neighbor_faces()).
         """
         import numpy as np
 
         st = self.i
-
-        # Canonical interface lids by neighbour (only these are eligible)
-        iface = self._iface_lids_by_neighbor_faces()  # {nbr:{et:lids}}
+        iface = self._iface_lids_by_neighbor_faces()
         if not iface:
             return {}
 
-        # Per-neighbour MPI vertex IDs
-        mvu = self.collect_mpi_vertex_nodes()         # {nbr: np[int64]}
+        mvu = self.collect_mpi_vertex_nodes()
         if not mvu:
             return {}
 
-        # Union of all MPI vertex IDs across all neighbours
         allv = [np.asarray(v, dtype=np.int64).ravel() for v in mvu.values() if v is not None and len(v)]
         union_all = np.unique(np.concatenate(allv)) if allv else np.empty(0, dtype=np.int64)
 
@@ -458,22 +416,20 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                     continue
 
                 nds_v = np.asarray(nds_full[:, vcols], dtype=np.int64, copy=False)
+                nds_i = nds_v[lids_iface]                 # only interface elements
+                valid = (nds_i >= 0)
 
-                # restrict to MPI-face interface elements only
-                nds_i = nds_v[lids_iface]
-
-                # counts
-                c_n   = np.isin(nds_i, nbr_vertices, assume_unique=False).sum(axis=1).astype(np.int16, copy=False)
+                c_n = (np.isin(nds_i, nbr_vertices, assume_unique=False) & valid).sum(axis=1).astype(np.int16, copy=False)
                 if union_all.size:
-                    c_int = (~np.isin(nds_i, union_all, assume_unique=False)).sum(axis=1).astype(np.int16, copy=False)
+                    c_int = ((~np.isin(nds_i, union_all, assume_unique=False)) & valid).sum(axis=1).astype(np.int16, copy=False)
                 else:
-                    c_int = np.full_like(c_n, vcols.size, dtype=np.int16)
+                    c_int = valid.sum(axis=1).astype(np.int16, copy=False)
 
                 sel = (c_n > 0)
                 if not np.any(sel):
                     continue
 
-                lids = lids_iface[sel].astype(np.int64, copy=False)
+                lids  = lids_iface[sel].astype(np.int64, copy=False)
                 delta = (c_int[sel].astype(np.int32) - c_n[sel].astype(np.int32)).astype(np.int64, copy=False)
 
                 mat = np.column_stack((lids, delta)).astype(np.int64, copy=False)
@@ -481,21 +437,10 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
                 per[et] = mat
 
-                # --- DEBUG (this is what you compare latest vs legacy) ---
-                try:
-                    self._dbg_write(
-                        f"[vdlt] nbr={nbr} et={et} iface={int(lids_iface.size)} kept={int(mat.shape[0])} "
-                        f"delta[min/med/max]=[{int(mat[:,1].min())},{int(np.median(mat[:,1]))},{int(mat[:,1].max())}] "
-                        f"md5={self._dbg_md5(mat)[:12]}"
-                    )
-                except Exception:
-                    pass
-
             if per:
                 out[nbr] = per
 
         return out
-
 
     def _mpi_faces_by_neighbor(self) -> dict[int, list[tuple[str, int, int]]]:
         """
@@ -527,114 +472,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                 lst = per_nbr.setdefault(nbr, [])
                 lst.extend((et, int(lid_i), int(f_i)) for lid_i, f_i in zip(lids[sel], fidxs[sel]))
 
-        # DEBUG summary (rank-local)
-        self._dbg_write(f"[mpi_faces] nbrs={sorted(per_nbr.keys())}")
-        for nbr in sorted(per_nbr.keys()):
-            self._dbg_write(f"[mpi_faces] nbr={nbr} nfaces={len(per_nbr[nbr])}")
-
         return per_nbr
-
-    
-    
-    def compute_mpi_face_deltas(self) -> dict[int, dict[str, np.ndarray]]:
-        cons = {et: np.asarray(self.con_i.get(et, ()), dtype=np.int64) for et in self.etypes}
-
-        use_nei = os.getenv('PYFR_FACEDELTA_NEI', '0') not in ('', '0')
-        if not use_nei:
-            # keep your current safe path
-            owners_map = self._gid_owner_maps(self.eidxs_i)
-            neighbor_set = sorted({
-                int(owners_map[self.etypes[int(code)]].get(int(ngid), rank['world']))
-                for et, con in cons.items() if con.size
-                for code, ngid in zip(con[..., 1].ravel(), con[..., 2].ravel())
-                if code >= 0
-            } - {rank['world']})
-
-            empty = np.empty((0, 2), np.int64)
-            idx2et = self.etypes
-
-            def per_et(et, con, nrank):
-                if con.size == 0: return empty
-                codes, ngids = con[..., 1], con[..., 2]
-                valid = (codes >= 0)
-
-                def owner_of(idx, gid):
-                    if idx < 0: return -99
-                    return owners_map[idx2et[int(idx)]].get(int(gid), rank['world'])
-
-                owners = np.vectorize(owner_of)(
-                    np.where(valid, codes, -1),
-                    np.where(valid, ngids, -1)
-                )
-                c_me = np.sum(valid & (owners == rank['world']), axis=1).astype(np.int16)
-                c_n  = np.sum(valid & (owners == nrank), axis=1).astype(np.int16)
-                sel  = (c_n > 0)
-                if not np.any(sel): return empty
-                lids  = np.nonzero(sel)[0].astype(np.int64)
-                delta = (c_me - c_n)[sel].astype(np.int64)
-                mat   = np.c_[lids, delta]
-                return mat[np.lexsort((mat[:,0], mat[:,1]))]
-
-            return {n: {et: per_et(et, cons[et], n) for et in self.etypes} for n in neighbor_set}
-
-        # ---- FAST PATH: neighbor-only membership (no global map) ----
-        # neighbors directly from con owners (no global ops)
-        neighbor_set = sorted({
-            int(rec[0])
-            for con in cons.values() if con.size
-            for rec in con.reshape(-1, con.shape[-1])
-            if rec[1] >= 0 and int(rec[0]) != rank
-        })
-
-        # local per-etype gid arrays for quick membership
-        my_gids = {et: np.asarray(self.eidxs_i.get(et, ()), dtype=np.int64) for et in self.etypes}
-        nei_gids = self._neighbor_gid_sets_cached()  # {nbr: {et: np.ndarray}}
-
-        empty = np.empty((0, 2), np.int64)
-
-        def per_et_nei(et: str, con: np.ndarray, nrank: int) -> np.ndarray:
-            if con.size == 0: return empty
-
-            codes = con[..., 1]  # neighbor etype index
-            ngids = con[..., 2]  # neighbor gid
-            valid = (codes >= 0)
-
-            # accumulate counts across neighbor etypes
-            c_me = np.zeros(ngids.shape[0], dtype=np.int16)
-            c_n  = np.zeros_like(c_me)
-
-            for k, net in enumerate(self.etypes):
-                mk = valid & (codes == k)
-                if not np.any(mk): continue
-
-                # owner==me  ⇔ gid in my_gids[net]
-                me_hit = np.isin(ngids[mk], my_gids[net], assume_unique=False)
-                # owner==nrank ⇔ gid in nei_gids[nrank][net]
-                ng = nei_gids.get(int(nrank), {}).get(net, np.empty(0, np.int64))
-                n_hit = np.isin(ngids[mk], ng, assume_unique=False)
-
-                # fold back into per-element tallies
-                # mk has shape (Ne, nfaces); sum across faces axis=1 at the end
-                # so we add booleans directly and sum later
-                # build a scratch zeros with same shape as mk to place hits
-                tmp = np.zeros_like(mk, dtype=np.int8)
-                tmp[mk] = me_hit
-                c_me += tmp.sum(axis=1).astype(np.int16)
-
-                tmp[:] = 0
-                tmp[mk] = n_hit
-                c_n  += tmp.sum(axis=1).astype(np.int16)
-
-            sel = (c_n > 0)
-            if not np.any(sel): return empty
-            lids  = np.nonzero(sel)[0].astype(np.int64)
-            delta = (c_me - c_n)[sel].astype(np.int64)
-            mat   = np.c_[lids, delta]
-            return mat[np.lexsort((mat[:,0], mat[:,1]))]
-
-        return {n: {et: per_et_nei(et, cons[et], n) for et in self.etypes} for n in neighbor_set}
-
-
 
     def _calc_mpi_faces_affinity(self) -> dict[int, dict[str, np.ndarray]]:
         myr = int(rank['world'])
@@ -811,116 +649,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         return result
 
-    def _calc_mpi_vertices_deltas(self) -> dict[int, dict[str, np.ndarray]]:
-        """
-        Compute per-neighbour per-etype (lid, delta) matrices using MPI vertex
-        connectivity.
-
-        For each element e and neighbour rank n:
-
-            c_int(e) = # vertices of e that are strictly interior
-                       (not on ANY MPI interface with any neighbour)
-            c_n(e)   = # vertices of e that participate in an MPI interface
-                       with neighbour n
-            delta    = c_int(e) - c_n(e)
-
-        For a given neighbour n and etype et we return all elements with
-        c_n(e) > 0 as an int64 array of shape (N, 2):
-
-            [ [lid_0, delta_0],
-              [lid_1, delta_1],
-              ...
-            ]
-
-        sorted by (delta, lid), consistent with _calc_mpi_faces_deltas.
-        """
-
-        # 1) Per-neighbour sets of MPI vertex-node IDs on faces to that neighbour
-        mvu = self.collect_mpi_vertex_nodes()  # {nbr: np[int64]}
-
-        if not mvu:
-            return {}
-
-        # 2) Union of all MPI vertex-node IDs seen on any neighbour
-        all_sets = [
-            np.asarray(v, dtype=np.int64).ravel()
-            for v in mvu.values()
-            if v is not None
-        ]
-        union_all = (
-            np.unique(np.concatenate(all_sets))
-            if all_sets else np.empty(0, dtype=np.int64)
-        )
-
-        # 2b) Precompute per-etype vertex-column indices once
-        #     (union of all per-face vertex columns)
-        vcols_by_et: dict[str, np.ndarray] = {}
-        for et in self.etypes:
-            fidx = self._face_vertex_indices(et)  # list of 1D arrays of cols
-            if not fidx:
-                vcols_by_et[et] = np.empty(0, dtype=np.int64)
-            else:
-                vcols_by_et[et] = np.unique(
-                    np.concatenate(fidx).astype(np.int64, copy=False)
-                )
-
-        def per_et(et: str, nds: np.ndarray, nbr_vertices: np.ndarray) -> np.ndarray:
-            """
-            Compute (lid, delta) for a single etype given:
-              - et: etype name
-              - nds: spts_nodes[et] of shape (Ne, Nspts)
-              - nbr_vertices: 1D array of vertex IDs participating in an
-                              MPI interface with the *current* neighbour.
-            """
-            if nds is None:
-                return np.empty((0, 2), dtype=np.int64)
-
-            nds = np.asarray(nds, dtype=np.int64)
-            if nds.size == 0:
-                return np.empty((0, 2), dtype=np.int64)
-
-            v_in_n = np.isin(nds, nbr_vertices, assume_unique=False)
-            c_n    = v_in_n.sum(axis=1).astype(np.int16, copy=False)
-            
-            if union_all.size:
-                v_is_int = np.isin(nds, union_all, invert=True, assume_unique=False)
-            else:
-                v_is_int = np.ones_like(nds, dtype=bool)
-            
-            c_int = v_is_int.sum(axis=1).astype(np.int16, copy=False)
-            
-            sel = (c_n > 0)
-
-            if not np.any(sel):
-                return np.empty((0, 2), dtype=np.int64)
-
-            lids = np.nonzero(sel)[0].astype(np.int64, copy=False)
-
-            # Delta semantics consistent with faces:
-            #   delta = c_int - c_n
-            # Negative delta => more tied to neighbour than to interior.
-            delta = (
-                c_int[sel].astype(np.int32) - c_n[sel].astype(np.int32)
-            ).astype(np.int64, copy=False)
-
-            mat = np.c_[lids, delta]
-            # Sort by (delta, lid) to be deterministic and compatible with faces
-            order = np.lexsort((mat[:, 0], mat[:, 1]))
-            return mat[order]
-
-        # 3) Build {nbr: {etype: (N,2)}} result
-        out: dict[int, dict[str, np.ndarray]] = {}
-        for nrank, verts in mvu.items():
-            nbr_vertices = np.asarray(verts, dtype=np.int64).ravel()
-            per: dict[str, np.ndarray] = {}
-            for et in self.etypes:
-                nds = self.i.spts_nodes.get(et, None)
-                per[et] = per_et(et, nds, nbr_vertices)
-                
-            out[int(nrank)] = per
-
-        return out
-
     def _face_vertex_indices(self, et: str) -> list[np.ndarray]:
         """
         For each etype, return a list whose i-th item is an np.int64 array of
@@ -1008,10 +736,12 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         raise NotImplementedError(f"_face_vertex_indices: etype '{et}' not implemented")
 
-    def collect_mpi_vertex_nodes(self) -> dict[int, np.ndarray]:
+    def collect_mpi_vertex_nodes(self) -> dict[int, "np.ndarray"]:
         """
         {nbr: sorted unique global vertex-node IDs that lie on MPI faces to nbr}
         """
+        import numpy as np
+
         if not getattr(self, "_spts_valid", True):
             raise RuntimeError("spts_nodes are stale")
         if self.i.spts_nodes is None:
@@ -1022,7 +752,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         out: dict[int, np.ndarray] = {}
 
-        for nbr in sorted(per_nbr_faces.keys()):
+        for nbr in sorted(int(k) for k in per_nbr_faces.keys()):
             faces = per_nbr_faces[nbr]
             verts_all: list[np.ndarray] = []
 
@@ -1030,32 +760,22 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                 nds = self.i.spts_nodes.get(et)
                 if nds is None or nds.size == 0:
                     continue
-                if not (0 <= lid < nds.shape[0]):
+                if not (0 <= int(lid) < int(nds.shape[0])):
                     continue
 
-                fv = face_vtx_by_et[et][int(f)]
-                # IMPORTANT: take only *vertex columns* of the element.
+                fv = face_vtx_by_et[str(et)][int(f)]
                 verts = nds[int(lid), fv]
                 if verts.size:
-                    verts_all.append(np.asarray(verts, dtype=np.int64).reshape(-1))
+                    verts_all.append(np.asarray(verts, dtype=np.int64).ravel())
 
             if verts_all:
                 vcat = np.concatenate(verts_all).astype(np.int64, copy=False)
                 vcat = vcat[vcat >= 0]
-                out[nbr] = np.unique(vcat)
+                out[int(nbr)] = np.unique(vcat)
             else:
-                out[nbr] = np.empty(0, dtype=np.int64)
-
-            # DEBUG
-            vv = out[nbr]
-            self._dbg_write(
-                f"[mpi_vtx] nbr={nbr} nuniq={int(vv.size)} "
-                f"min={int(vv.min()) if vv.size else -1} max={int(vv.max()) if vv.size else -1} md5={self._dbg_md5(vv)}"
-            )
+                out[int(nbr)] = np.empty(0, dtype=np.int64)
 
         return out
-
-
 
     def _metric_from_ab(self, a: np.ndarray, b: np.ndarray, metric: str) -> np.ndarray:
         # Always float64 for future-proofing and to support ratio cleanly.
@@ -1074,53 +794,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         else:
             raise ValueError(f"Unknown metric {metric!r}; expected 'delta' or 'ratio'")
 
-    def _score_from_metric(
-        self,
-        metric: np.ndarray,
-        *,
-        et: str,
-        nbr: int,
-        etype_scale: dict[str, float] | None,
-        device_bias: dict[str, dict[str, float]] | None,
-        rank_tags: list[str] | None,
-    ) -> np.ndarray:
-        s = metric
-        if etype_scale is not None:
-            s = s * float(etype_scale.get(et, 1.0))
-
-        if device_bias is not None and rank_tags is not None:
-            tag = rank_tags[int(nbr)]
-            s = s + float(device_bias.get(tag, {}).get(et, 0.0))
-
-        return s
-
-
-    def _vertex_cols(self, et: str) -> np.ndarray:
-        """
-        Cached vertex-column indices within spts_nodes[et].
-
-        Uses your _face_vertex_indices(et) list and takes the union of all
-        face-vertex columns (== set of element vertices).
-        """
-        import numpy as np
-
-        et = str(et).lower()
-        cache = getattr(self, "_vcols_by_et", None)
-        if cache is None:
-            cache = self._vcols_by_et = {}
-
-        v = cache.get(et, None)
-        if v is None:
-            fidx = self._face_vertex_indices(et)  # list of arrays
-            if not fidx:
-                v = np.empty(0, dtype=np.int64)
-            else:
-                v = np.unique(np.concatenate(fidx).astype(np.int64, copy=False))
-            cache[et] = v
-
-        return v
-
-
     def _calc_mpi_vertices_affinity(self) -> dict[int, dict[str, np.ndarray]]:
         """
         Vertex-based affinity for MPI-face interface elements only.
@@ -1136,7 +809,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         # union of all MPI-face vertices (for "interior vertex" counting)
         all_sets = [np.asarray(v, dtype=np.int64).ravel() for v in mvu.values() if v is not None and np.asarray(v).size]
         union_all = np.unique(np.concatenate(all_sets)) if all_sets else np.empty(0, dtype=np.int64)
-        self._dbg_write(f"[vaff.union] n={int(union_all.size)} md5={self._dbg_md5(union_all)}")
 
         # Build iface lids per (nbr, et) from actual MPI faces
         per_nbr_faces = self._mpi_faces_by_neighbor()
@@ -1156,7 +828,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                 continue
 
             per_et: dict[str, np.ndarray] = {}
-            self._dbg_write(f"[vaff.nbr] nbr={nbr} nverts={int(nbr_vertices.size)} md5={self._dbg_md5(nbr_vertices)}")
 
             for et in self._etype_order():
                 nodes = st.spts_nodes.get(et, None)
@@ -1180,20 +851,10 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
                 # Elements on MPI faces to nbr should have cnt_n > 0; enforce as a debug invariant
                 keep = (cnt_n > 0)
-                if not np.any(keep):
-                    self._dbg_write(f"[vaff.warn] nbr={nbr} et={et} lids_iface={int(lids_iface.size)} but cnt_n==0 for all")
-                    continue
 
                 lids = lids_iface[keep].astype(np.int64, copy=False)
                 a = cnt_i[keep].astype(np.int64, copy=False)
                 b = cnt_n[keep].astype(np.int64, copy=False)
-
-                # HARD invariant: b must be <= #corner vertices for this etype
-                nvtx = int(vcols.size)
-                bmax = int(b.max()) if b.size else -1
-                if bmax > nvtx:
-                    self._dbg_write(f"[vaff.FATAL] nbr={nbr} et={et} bmax={bmax} > nvtx={nvtx} (you are NOT vertex-only)")
-                    raise RuntimeError(f"vertex affinity counting non-vertex nodes for et={et}: bmax={bmax} nvtx={nvtx}")
 
                 mat = np.empty((lids.size, 3), dtype=np.int64)
                 mat[:, 0] = lids
@@ -1205,32 +866,15 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
                 per_et[et] = mat
 
-                # DEBUG: summary; ranges should look like hex a,b in [0..8]
-                self._dbg_write(
-                    f"[vaff.et] nbr={nbr} et={et} N={int(mat.shape[0])} "
-                    f"a[min/med/max]=[{int(a.min())},{int(np.median(a))},{int(a.max())}] "
-                    f"b[min/med/max]=[{int(b.min())},{int(np.median(b))},{int(b.max())}] md5={self._dbg_md5(mat)}"
-                )
-
             if per_et:
                 out[nbr] = per_et
-                self._dbg_write(f"[vaff.sum] nbr={nbr} totalN={sum(int(v.shape[0]) for v in per_et.values())}")
 
         return out
 
-
-    def _iface_lids_by_neighbor_faces(self) -> dict[int, dict[str, np.ndarray]]:
+    def _iface_lids_by_neighbor_faces(self) -> dict[int, dict[str, "np.ndarray"]]:
         """
-        Canonical interface definition (LEGACY parity anchor).
-
-        Returns
-        -------
+        Canonical interface definition (parity anchor).
         {nbr: {et: unique_sorted_lids_on_MPI_faces_to_nbr}}
-
-        IMPORTANT:
-        - This is the ONLY source of truth for "which elements are eligible for
-        vertex-based (and optionally face-based) MPI decisions".
-        - Using lids avoids all flat-index / slice-space ambiguity.
         """
         import numpy as np
 
@@ -1242,36 +886,38 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             by_et: dict[str, list[int]] = {}
 
             for et, lid, _f in faces:
-                by_et.setdefault(et, []).append(int(lid))
+                by_et.setdefault(str(et), []).append(int(lid))
 
             per: dict[str, np.ndarray] = {}
             for et in self._etype_order():
                 lids = by_et.get(et, [])
-                if not lids:
-                    continue
-                ulids = np.unique(np.asarray(lids, dtype=np.int64))
-                per[et] = ulids
+                if lids:
+                    per[et] = np.unique(np.asarray(lids, dtype=np.int64))
 
-            out[int(nbr)] = per
-
-        # --- DEBUG (rank-local) ---
-        try:
-            self._dbg_write(f"[iface.lids] nbrs={sorted(out.keys())}")
-            for nbr in sorted(out.keys()):
-                per = out[nbr]
-                for et in self._etype_order():
-                    lids = per.get(et, None)
-                    if lids is None:
-                        continue
-                    self._dbg_write(
-                        f"[iface.lids] nbr={nbr} et={et} n={int(lids.size)} "
-                        f"lids[min/med/max]=[{int(lids.min())},{int(np.median(lids))},{int(lids.max())}] "
-                        f"md5={self._dbg_md5(lids)[:12]}"
-                    )
-        except Exception:
-            pass
+            if per:
+                out[int(nbr)] = per
 
         return out
+
+
+    def _vertex_cols(self, et: str) -> "np.ndarray":
+        """
+        Cached vertex-column indices within spts_nodes[et].
+        """
+        import numpy as np
+
+        et = str(et).lower()
+        cache = getattr(self, "_vcols_by_et", None)
+        if cache is None:
+            cache = self._vcols_by_et = {}
+
+        v = cache.get(et, None)
+        if v is None:
+            fidx = self._face_vertex_indices(et)  # list[np.ndarray]
+            v = np.unique(np.concatenate(fidx).astype(np.int64, copy=False)) if fidx else np.empty(0, np.int64)
+            cache[et] = v
+
+        return v
 
     # ----------------- Legacy-style smoothing pass ----------------------------
 
@@ -1279,8 +925,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                      etype_scale: dict[str, float] | None = None,
                      device_bias: dict[str, dict[str, float]] | None = None,
                      rank_tags: list[str] | None = None) -> int:
-        rnk = int(rank["world"])
-
         metric = str(metric).lower()
         if metric not in ("delta", "ratio"):
             raise ValueError(f"smooth: metric must be 'delta' or 'ratio', got {metric!r}")
@@ -1395,26 +1039,10 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             if stop_all:
                 break
 
-    def diffuse_smoothing2(
-        self,
-        flow_matrix,
-        *,
-        threshold: float = 0.0,
-        return_count: bool = False,
-        scale: float = 0.5,
-        score_by: str = "vertex",
-    ):
-        import numpy as np
-
-        W = comm["world"]
-        r = int(rank["world"])
-        rt = int(root["world"])
+    def diffuse_smoothing2(self, flow_matrix, *, threshold: float = 0.0,
+                                 scale: float = 0.5, score_by: str = "vertex",):
 
         M = np.asarray(flow_matrix, dtype=np.int64)
-        if M.ndim != 2 or M.shape[0] != M.shape[1]:
-            raise ValueError(f"[parity] flow_matrix must be square; got {M.shape}")
-        if int(M.shape[0]) != int(W.size):
-            raise ValueError(f"[parity] flow_matrix size {M.shape[0]} != comm size {int(W.size)}")
 
         # legacy-style relaxation: ceil
         scale = float(scale)
@@ -1424,86 +1052,15 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
         mode = "vertices" if str(score_by).lower().startswith("v") else "faces"
 
-        # Log matrix hashes + this row
-        row = M_eff[r, :]
-        nz = np.nonzero(row)[0].astype(int).tolist()
-        self._parity(f"[latest.flow] rank={r} thr={threshold} scale={scale:.6f} "
-                    f"mode={mode} md5M={self._md5_arr_int64(M)[:12]} md5Meff={self._md5_arr_int64(M_eff)[:12]} "
-                    f"row_nz={nz} row_vals={[int(row[j]) for j in nz]} row_sum={int(row.sum())}")
+        moved_local, flow_used, eidxs_diff = self.diffuse(mode=mode,
+                                                          threshold=threshold,
+                                                          flow_matrix=M_eff,
+                                        move_spts_nodes=(mode == "vertices"),)
 
-        moved_local, flow_used, eidxs_diff = self.diffuse(
-            mode=mode,
-            threshold=float(threshold),
-            flow_matrix=M_eff,
-            metric="delta",
-            move_spts_nodes=(mode == "vertices"),
-        )
+        moved_glob = int(comm["world"].allreduce(int(moved_local), op=mpi.SUM))
 
-        moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+        return moved_glob, eidxs_diff
 
-        # Root prints moved_local vector to immediately find the rank that diverges
-        mv = W.allgather(int(moved_local))
-        if r == rt:
-            self._parity(f"[latest.glob] moved_glob={moved_glob} moved_locals={mv}")
-
-        if return_count:
-            return moved_glob, eidxs_diff
-        else:
-            return moved_glob, None
-
-
-
-    def iterate_to_convergence(self, target_counts, *, flowmat_relax: float = 0.5):
-        W = comm["world"]
-        r = int(rank["world"])
-        rt = int(root["world"])
-
-        self._dbg_path = f"dbg.parity.latest.r{rank['world']}.log"   # or legacy
-        self._dbg_write("[parity] start")
-
-
-        # IMPORTANT: disable jitter / anything time-dependent outside this function while debugging.
-        # IMPORTANT: ensure CURRENT is computed correctly (call the function!)
-        cur = W.allgather(int(self._local_count))
-
-        # If you want fixed TARGET for parity, override here (as you did)
-        # target_counts = [...]
-
-        # Open per-rank log
-        self._parity_open(tag="latest")   # change to "legacy" in the legacy branch
-
-        #target_counts = [13893, 17944, 15901, 15138, 13723, 18506, 16010, 19397, 12936, 19821, 19052, 16405]
-
-        self._parity(f"[parity] CURRENT={cur}")
-        self._parity(f"[parity] TARGET ={list(map(int, target_counts))}")
-
-
-
-        # Force the next debug step: one vertex-based iteration with thr=6
-        exec_order =(  [(6.0, "vertex")]
-                     + [(2.0, "face")]
-                     + [(0.0, "face")] * comm["world"].size
-                    )
-
-        for thr, score_by in exec_order:
-            M0 = self.element_flow_plan(target_counts)
-            moved_glob, eidxs_diff = self.diffuse_smoothing2(M0, threshold=thr, scale=flowmat_relax, score_by=score_by)
-            self.smooth_until_stagnates()
-
-            self._parity(f"[parity] DONE moved_glob={int(moved_glob)} "
-                        f"eidxs_md5={self._md5_eidxs_diff(eidxs_diff)[:12] if eidxs_diff is not None else None}")
-
-        cur = W.allgather(int(self._local_count))
-        self._parity(f"[parity] FINAL CURRENT={cur}")
-
-        with open("latest.txt", "a") as f:
-            f.write(f"R{rank} eidxs_diff: {eidxs_diff}\n")
-
-
-        self._parity_close()
-        #import sys
-        #sys.exit()
-        
     def iterate_to_convergence(self, target_counts: List[int], *,
                                      flowmat_relax: float = 0.5,
     ) -> list[int]:
@@ -1514,328 +1071,115 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         """
         # Force the next debug step: one vertex-based iteration with thr=6
         exec_order =(  [(6.0, "vertex")]
-                     + [(2.0, "face")]
-                     + [(0.0, "face")] * comm["world"].size
+                     #+ [(2.0, "face")]
+                     #+ [(0.0, "face")] * comm["world"].size
                     )
+        # TEST WITH/WITHOUT ABOVE FACE MOVEMENTS !!!! 
+        # NO FACE MOVEMENTS GIVES BETTER ANSWER!!!!
 
         for thr, score_by in exec_order:
             M0 = self.element_flow_plan(target_counts)
             self.diffuse_smoothing2(M0, threshold=thr, scale=flowmat_relax, score_by=score_by)
             self.smooth_until_stagnates()
 
-    def _dbg_dump_eidxs_diff(self, *, tag: str, eidxs_diff: dict):
-        r = int(rank["world"])
-        # canonicalize for stable logs
-        nbrs = sorted(int(n) for n in (eidxs_diff or {}).keys())
-        _dbg_write(r, f"[dbg.{_dbg_tag()}.{tag}] nbrs={nbrs}")
-
-        for nbr in nbrs:
-            per = eidxs_diff.get(nbr, {}) or {}
-            ets = sorted(per.keys())
-            _dbg_write(r, f"[dbg.{_dbg_tag()}.{tag}] nbr={nbr} etypes={ets}")
-            for et in ets:
-                gids = np.asarray(per[et], dtype=np.int64)
-                gids.sort()
-                _dbg_write(
-                    r,
-                    f"[dbg.{_dbg_tag()}.{tag}] nbr={nbr} et={et} "
-                    f"n={gids.size} md5={_md5_arr(gids)} minmax={[int(gids.min()), int(gids.max())] if gids.size else None} "
-                    f"{_summ_int_arr(gids, k=12)}"
-                )
-
-
-
-
-
-
-    def _pick_diff_legacy_style(
-        self,
-        flow_matrix,
-        *,
-        threshold: float,
-        scale: float,
-        mode: str,
-        dbg_prefix: str,
-        dbg,
-    ):
-        """
-        Legacy-equivalent picker:
-        - uses _compute_deltas(mode) => {nbr:{et:(N,2)[lid,delta]}}
-        - builds global candidate list per neighbor: (delta, gid, et, lid)
-        - sorts by (delta, gid), picks need=ceil(cap*scale)
-        - ensures picked-once (per etype gid-set, matching legacy)
-        - returns eidxs_diff WITHOUT committing
-        """
-        import numpy as np
-        import hashlib, json
-
-        W = comm["world"]
-        r = int(rank["world"])
-        P = int(W.size)
-
-        st = self.i
-        M = np.asarray(flow_matrix, dtype=np.int64)
-
-        thr_i = int(threshold)
-        scale = float(scale)
-
-        def _h(a) -> str:
-            a = np.asarray(a)
-            return hashlib.md5(a.tobytes()).hexdigest()
-
-        # Compute deltas (this is where many “latest vs legacy” divergences originate)
-        deltas_by_rank = self._compute_affinity(mode)
-
-        # Dump deltas signature per neighbor/etype (counts + min/max + hash)
-        nbrs_sorted = sorted(int(k) for k in (deltas_by_rank or {}).keys())
-        dbg(f"{dbg_prefix} r={r} deltas_nbrs={nbrs_sorted}")
-        for nbr in nbrs_sorted:
-            per = deltas_by_rank.get(nbr, {})
-            for et in sorted(per.keys()):
-                mat = per.get(et)
-                if mat is None or getattr(mat, "size", 0) == 0:
-                    dbg(f"{dbg_prefix} r={r} nbr={nbr} et={et} EMPTY")
-                    continue
-                mm = np.asarray(mat, dtype=np.int64)
-                d = mm[:, 1]
-                dbg(f"{dbg_prefix} r={r} nbr={nbr} et={et} N={int(mm.shape[0])} "
-                    f"d[min,max]=[{int(d.min())},{int(d.max())}] hash={_h(mm)} head10={mm[:10].tolist()}")
-
-        base_order = list(self._etype_order())
-        picked_by_et = {et: set() for et in base_order}
-
-        eidxs_diff = {}
-        moved_local = 0
-
-        for nbr in range(P):
-            cap = int(M[r, nbr])
-            if cap <= 0:
-                continue
-
-            need = int(np.ceil(cap * scale))
-            if need <= 0:
-                continue
-
-            per_et = deltas_by_rank.get(nbr, {})
-            cand = []
-
-            for et in base_order:
-                arr = per_et.get(et)
-                if arr is None or getattr(arr, "size", 0) == 0:
-                    continue
-
-                mm = np.asarray(arr, dtype=np.int64)
-                lids = mm[:, 0].astype(np.int64, copy=False)
-                dlt  = mm[:, 1].astype(np.int64, copy=False)
-
-                m = (dlt <= thr_i)
-                if not np.any(m):
-                    continue
-
-                lids = lids[m]
-                dlt  = dlt[m]
-
-                eids = np.asarray(st.eidxs[et], dtype=np.int64)
-                for lid, d in zip(lids.tolist(), dlt.tolist()):
-                    gid = int(eids[int(lid)])
-                    if gid not in picked_by_et[et]:
-                        cand.append((int(d), int(gid), et, int(lid)))
-
-            cand.sort(key=lambda t: (t[0], t[1]))  # (delta asc, gid asc)
-            take = min(int(need), len(cand))
-            chosen = cand[:take]
-
-            # Debug: print candidate + chosen signatures
-            if cand:
-                dbg(f"{dbg_prefix} r={r} nbr={nbr} cap={cap} need={need} thr={thr_i} "
-                    f"candN={len(cand)} cand_head20={chosen[:20]}")
-            else:
-                dbg(f"{dbg_prefix} r={r} nbr={nbr} cap={cap} need={need} thr={thr_i} candN=0")
-
-            if take <= 0:
-                continue
-
-            per = {}
-            for d, gid, et, lid in chosen:
-                per.setdefault(et, []).append(gid)
-                picked_by_et[et].add(gid)
-
-            # store sorted gids per etype (deterministic)
-            per2 = {et: np.asarray(sorted(v), dtype=np.int64) for et, v in per.items() if v}
-            if per2:
-                eidxs_diff[int(nbr)] = per2
-                moved_local += sum(len(v) for v in per2.values())
-
-        dbg(f"{dbg_prefix} r={r} moved_local={moved_local} diff_keys={sorted(map(int, eidxs_diff.keys()))}")
-
-        # diff signature per nbr/etype
-        for nbr in sorted(eidxs_diff.keys()):
-            for et in sorted(eidxs_diff[nbr].keys()):
-                g = np.asarray(eidxs_diff[nbr][et], dtype=np.int64)
-                dbg(f"{dbg_prefix} r={r} diff nbr={nbr} et={et} N={int(g.size)} hash={_h(g)} head10={g[:10].tolist()}")
-
-        return eidxs_diff
-
-
-    def _dbg_compare_eidxs_diff(self, A, B, *, dbg):
-        """
-        Compare two eidxs_diff objects:
-        A/B: {nbr:{et: np.ndarray[gids]}}
-        Logs:
-        - per (nbr,et) counts + hashes
-        - small symmetric difference sample if mismatch
-        """
-        import numpy as np
-        import hashlib
-
-        def _h(a) -> str:
-            a = np.asarray(a, dtype=np.int64)
-            return hashlib.md5(a.tobytes()).hexdigest()
-
-        keys = set()
-        for nbr, per in (A or {}).items():
-            for et in per.keys():
-                keys.add((int(nbr), str(et)))
-        for nbr, per in (B or {}).items():
-            for et in per.keys():
-                keys.add((int(nbr), str(et)))
-
-        dbg(f"[dbg.latest.compare] keysN={len(keys)}")
-
-        for nbr, et in sorted(keys):
-            a = np.asarray((A.get(nbr, {}).get(et, np.empty(0, np.int64))), dtype=np.int64)
-            b = np.asarray((B.get(nbr, {}).get(et, np.empty(0, np.int64))), dtype=np.int64)
-
-            if a.size == b.size and _h(a) == _h(b):
-                dbg(f"[dbg.latest.compare] OK nbr={nbr} et={et} N={int(a.size)} hash={_h(a)}")
-                continue
-
-            # mismatch: show counts/hashes and a tiny symmetric difference
-            sa = set(map(int, a.tolist()))
-            sb = set(map(int, b.tolist()))
-            only_a = sorted(sa - sb)[:20]
-            only_b = sorted(sb - sa)[:20]
-
-            dbg(f"[dbg.latest.compare] MISMATCH nbr={nbr} et={et} "
-                f"A(N={int(a.size)},hash={_h(a)}) B(N={int(b.size)},hash={_h(b)}) "
-                f"onlyA_head20={only_a} onlyB_head20={only_b}")
-
-
     # ----------------- Diffusion / smoothing -----------------------
 
-    def diffuse(self, *, mode="faces", threshold=0.0, flow_matrix=None, metric="delta",
-                etype_scale=None, device_bias=None, rank_tags=None, move_spts_nodes=False):
+    def diffuse(
+        self,
+        *,
+        mode: str = "faces",
+        threshold: float = 0.0,
+        flow_matrix,
+        move_spts_nodes: bool = False,
+    ):
         import numpy as np
 
         W   = comm["world"]
         rnk = int(rank["world"])
         P   = int(W.size)
 
+        mode = str(mode).lower()
+        mode = "vertices" if mode.startswith("v") else "faces"
+
         thr = int(threshold) if float(threshold).is_integer() else float(threshold)
 
-        if str(mode).lower() == "vertices":
+        # Vertex mode must keep spts_nodes consistent for subsequent vertex scoring
+        if mode == "vertices":
             move_spts_nodes = True
 
         M = np.asarray(flow_matrix, dtype=np.int64)
-        if M.ndim != 2 or M.shape[0] != M.shape[1] or M.shape[0] != P:
+        if M.ndim != 2 or M.shape[0] != M.shape[1] or int(M.shape[0]) != P:
             raise ValueError(f"diffuse: bad flow_matrix shape {M.shape}, comm size {P}")
 
+        # Always start from i -> j (collective safety relies on everyone committing)
         self._reset_j_with_i()
         st = self.i
         etypes_all = list(self._etype_order())
 
-        # --- LEGACY candidate source ---
-        if str(mode).lower() == "vertices":
-            deltas_by_rank = self._compute_deltas("vertex")  # {nbr:{et:(N,2)[lid,delta]}}
-        else:
-            # keep your existing affinity path for now (or also route through _compute_deltas("faces"))
-            aff_by_rank = self._compute_affinity("faces")    # {nbr:{et:(N,3)[lid,a,b]}}
+        # Canonical candidate source (per neighbour, per etype: [lid, delta])
+        deltas_by_rank = self._compute_deltas(mode)  # {nbr: {et: (N,2) int64}}
 
-        picked_by_et = {et: set() for et in etypes_all}
+        picked_by_et = {et: set() for et in etypes_all}     # gid de-dupe per etype, per sweep
         eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
         flow_used = np.zeros_like(M, dtype=np.int64)
-
-        # --- DEBUG: neighbour keys ---
-        try:
-            if str(mode).lower() == "vertices":
-                self._dbg_write(f"[diff.enter] mode=vertices thr={thr} nbrs={sorted(deltas_by_rank.keys())}")
-            else:
-                self._dbg_write(f"[diff.enter] mode=faces thr={thr} nbrs={sorted(aff_by_rank.keys())}")
-        except Exception:
-            pass
 
         for nbr in range(P):
             cap = int(M[rnk, nbr])
             if cap <= 0 or nbr == rnk:
                 continue
 
-            cand = []  # list of (delta,gid,et) for sorting like legacy
+            per_et = deltas_by_rank.get(int(nbr), {})
+            cand: list[tuple[int, int, str]] = []  # (delta, gid, et)
 
-            if str(mode).lower() == "vertices":
-                per_et = deltas_by_rank.get(int(nbr), {})
-                for et in etypes_all:
-                    mat = per_et.get(et, None)
-                    if mat is None or mat.size == 0:
-                        continue
+            # Deterministic etype iteration
+            for et in etypes_all:
+                mat = per_et.get(et, None)
+                if mat is None or mat.size == 0:
+                    continue
 
-                    lids = mat[:, 0].astype(np.int64, copy=False)
-                    dlt  = mat[:, 1].astype(np.int64, copy=False)
+                lids = mat[:, 0].astype(np.int64, copy=False)
+                dlt  = mat[:, 1].astype(np.int64, copy=False)
 
-                    m_thr = (dlt <= thr)
-                    if not np.any(m_thr):
-                        continue
+                m_thr = (dlt <= thr)
+                if not np.any(m_thr):
+                    continue
 
-                    lids_t = lids[m_thr]
-                    dlt_t  = dlt[m_thr]
+                lids_t = lids[m_thr]
+                dlt_t  = dlt[m_thr]
 
-                    gids_t = st.eidxs[et][lids_t].astype(np.int64, copy=False)
+                gids_t = st.eidxs[et][lids_t].astype(np.int64, copy=False)
 
-                    # enforce pick-once-per-sweep by gid (legacy)
-                    for gid, dd in zip(gids_t.tolist(), dlt_t.tolist()):
-                        if gid not in picked_by_et[et]:
-                            cand.append((int(dd), int(gid), et))
-
-            else:
-                # keep your face path (not shown)
-                pass
-
-            # --- DEBUG: candidate size BEFORE sort ---
-            try:
-                self._dbg_write(f"[diff.cand] mode={mode} nbr={nbr} cap={cap} candN={len(cand)}")
-            except Exception:
-                pass
+                # Legacy semantics: pick at most once per sweep by gid (per etype)
+                pset = picked_by_et[et]
+                for gid, dd in zip(gids_t.tolist(), dlt_t.tolist()):
+                    if gid not in pset:
+                        cand.append((int(dd), int(gid), et))
 
             if not cand:
                 continue
 
-            cand.sort(key=lambda t: (t[0], t[1]))  # (delta,gid)
-            take = min(cap, len(cand))
-            chosen = cand[:take]
+            # Deterministic: sort by (delta, gid); python sort is stable
+            cand.sort(key=lambda t: (t[0], t[1]))
 
-            per: dict[str, list[int]] = {}
+            chosen = cand[: min(cap, len(cand))]
+
+            per_out: dict[str, list[int]] = {}
             for dd, gid, et in chosen:
-                per.setdefault(et, []).append(int(gid))
-                picked_by_et[et].add(int(gid))
+                per_out.setdefault(et, []).append(gid)
+                picked_by_et[et].add(gid)
 
-            # finalize deterministic arrays
-            out_per = {et: np.asarray(sorted(v), dtype=np.int64) for et, v in per.items() if v}
+            # Finalize deterministic arrays per etype (sorted gids)
+            out_per = {
+                et: np.asarray(sorted(v), dtype=np.int64)
+                for et, v in per_out.items()
+                if v
+            }
+
             if out_per:
                 eidxs_diff[int(nbr)] = out_per
                 flow_used[rnk, int(nbr)] = int(sum(len(v) for v in out_per.values()))
 
-            # --- DEBUG: chosen summary ---
-            try:
-                first = [x[1] for x in chosen[:12]]
-                self._dbg_write(f"[diff.pick] nbr={nbr} chosenN={take} first12_gids={first}")
-            except Exception:
-                pass
-
         moved_local = int(sum(len(g) for per in eidxs_diff.values() for g in per.values()))
-        try:
-            self._dbg_write(f"[diff.commit] moved_local={moved_local} eidxs_md5={self._md5_eidxs_diff(eidxs_diff)[:12]}")
-        except Exception:
-            pass
-
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
         return moved_local, flow_used, eidxs_diff
 
@@ -2521,82 +1865,38 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
 
     # ----------------- Part/Island removal ------------------------------------
 
-    def label_islands_faces(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Label face-connected components ("islands") within THIS rank.
+    def label_islands_faces(self) -> tuple["np.ndarray", "np.ndarray"]:
+        import numpy as np
+        from collections import deque
 
-        Returns
-        -------
-        island_id_flat : (nelems_local,) int32
-            Island label for each local element, in the same order as
-            self.i.eidxs_flat / local flat indexing.
-            Labels are renumbered so that:
-                - island 0 is the largest island,
-                - island 1 is the 2nd largest, etc.
-        island_sizes : (nislands,) int64
-            Sizes of islands in descending order; island_sizes[k] is the
-            number of elements with island_id_flat == k.
-        """
         st = self.i
         gids = np.asarray(st.eidxs_flat, dtype=np.int64)
         nloc = int(gids.size)
-
         if nloc == 0:
             return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int64)
 
-        # --- Map neighbour global IDs -> local flat indices (or "not local") ---
-        # Sort local gids once; use searchsorted for vectorized membership+mapping
         order = np.argsort(gids, kind="mergesort")
         gids_sorted = gids[order]
 
-        # --- Build directed local adjacency edges (u_flat -> v_flat) ---
         uu_chunks: list[np.ndarray] = []
         vv_chunks: list[np.ndarray] = []
 
-        # (Optional) sanity: ensure con_idx stores global element numbers
-        nglb = int(comm["world"].allreduce(nloc, op=mpi.SUM))
-
         for et in st.etypes:
             sl = st.etype_slices.get(et, None)
-            if sl is None:
+            if sl is None or sl.stop <= sl.start:
                 continue
             ne = int(sl.stop - sl.start)
-            if ne == 0:
-                continue
 
-            nbr = np.asarray(st.con_idx[et], dtype=np.int64)
-
-            # Treat trailing dims as faces; ensure shape (ne, nfaces*)
-            if nbr.ndim == 1:
-                nbr = nbr.reshape(ne, -1)
-            else:
-                nbr = nbr.reshape(ne, -1)
-
-            if nbr.shape[0] != ne:
-                raise ValueError(
-                    f"[islands] con_idx[{et}] wrong element axis: got {nbr.shape[0]} expected {ne}"
-                )
-
+            nbr = np.asarray(st.con_idx[et], dtype=np.int64).reshape(ne, -1)
             m = (nbr >= 0)
             if not np.any(m):
                 continue
 
             vv = nbr[m].astype(np.int64, copy=False)
-
-            # Sanity: neighbour gids must be in [0, nglb)
-            if vv.size and int(vv.max()) >= nglb:
-                raise ValueError(
-                    f"[islands] con_idx[{et}] appears not to be global eids "
-                    f"(max nbr={int(vv.max())} >= nglb={nglb})."
-                )
-
             u_flat = np.arange(sl.start, sl.stop, dtype=np.int64)
             uu = np.broadcast_to(u_flat[:, None], nbr.shape)[m].astype(np.int64, copy=False)
 
-            # Map vv (global) -> local flat index if vv is owned locally
             idx = np.searchsorted(gids_sorted, vv)
-
-            # SAFE membership test: avoid indexing gids_sorted with any idx == nloc
             ok = (idx < nloc)
             if np.any(ok):
                 ok_idx = idx[ok]
@@ -2610,16 +1910,17 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             vv_chunks.append(order[idx[ok]])
 
         if not uu_chunks:
-            # No local adjacencies: every element is its own island
             island_id = np.arange(nloc, dtype=np.int32)
             island_sizes = np.ones(nloc, dtype=np.int64)
-            # All equal; "largest first" is arbitrary but already deterministic
             return island_id, island_sizes
 
         uu_all = np.concatenate(uu_chunks)
         vv_all = np.concatenate(vv_chunks)
 
-        # --- CSR adjacency over local flat indices 0..nloc-1 ---
+        # Defensive: undirected connectivity
+        uu_all = np.concatenate([uu_all, vv_all])
+        vv_all = np.concatenate([vv_all, uu_all[:vv_all.size]])
+
         perm = np.argsort(uu_all, kind="mergesort")
         uu_all = uu_all[perm]
         vv_all = vv_all[perm]
@@ -2630,17 +1931,14 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         np.cumsum(counts, out=vtab[1:])
         etab = vv_all.astype(np.int64, copy=False)
 
-        # --- BFS/DFS connected components ---
         island_id = np.full(nloc, -1, dtype=np.int32)
         sizes: list[int] = []
         cid = 0
-
         q = deque()
+
         for s in range(nloc):
             if island_id[s] != -1:
                 continue
-
-            # Start new component
             island_id[s] = cid
             q.append(s)
             sz = 0
@@ -2650,10 +1948,7 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                 sz += 1
                 beg = int(vtab[u])
                 end = int(vtab[u + 1])
-                nbrs = etab[beg:end]
-
-                # Iterate neighbours (Python loop OK; speed not your priority)
-                for v in nbrs.tolist():
+                for v in etab[beg:end].tolist():
                     if island_id[v] == -1:
                         island_id[v] = cid
                         q.append(v)
@@ -2662,18 +1957,16 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
             cid += 1
 
         sizes_arr = np.asarray(sizes, dtype=np.int64)
-
-        # --- Renumber so largest island is 0 (descending by size; tie-break by old id) ---
         old_ids = np.arange(sizes_arr.size, dtype=np.int64)
-        order2 = np.lexsort((old_ids, -sizes_arr))  # stable: size desc, then id asc
+        order2 = np.lexsort((old_ids, -sizes_arr))  # size desc, then id asc
 
         remap = np.empty_like(order2, dtype=np.int32)
         remap[order2] = np.arange(order2.size, dtype=np.int32)
 
         island_id = remap[island_id]
         island_sizes = sizes_arr[order2]
-
         return island_id.astype(np.int32, copy=False), island_sizes
+
 
     def _best_iface_neighbor_per_local_element(self):
         """
@@ -2885,54 +2178,6 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
         # Return remaining islands, nrm
         nrms = W.allgather(nrm)
         return nrms
-
-    def _remove_cluster_by_mpi_vertex(self, cluster_flat: np.ndarray, *, max_sweeps: int = 200) -> None:
-        W      = comm['world']
-        rnk    = int(rank['world'])
-        root_w = int(root['world'])
-
-        cluster_flat = np.asarray(cluster_flat, dtype=np.int64)
-        if cluster_flat.size == 0:
-            return
-
-        # Track by GIDs so the set is stable across retag/reindex
-        cluster_gids = np.asarray(self.i.eidxs_flat[cluster_flat], dtype=np.int64)
-
-        for k in range(int(max_sweeps)):
-            # Rebuild local membership in current state
-            in_cluster = np.isin(self.i.eidxs_flat, cluster_gids, assume_unique=False)
-            nloc = int(in_cluster.sum())
-            nglob = int(W.allreduce(nloc, op=mpi.SUM))
-
-            if rnk == root_w:
-                print(f"[rmcluster] sweep={k+1} remaining_glob={nglob}", flush=True)
-
-            if nglob == 0:
-                break
-
-            src_mask_flat = in_cluster  # already bool, correct length
-
-            moved_local, _ = self.diffuse(
-                mode="vertices",
-                threshold=0,
-                flow_matrix=None,
-                move_spts_nodes=True,
-
-                # internal-only:
-                src_mask_flat=src_mask_flat,
-                ignore_targets=True,
-                verbose=True,   # so [diffuse.debug] prints candidate stats
-            )
-
-            moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
-            if rnk == root_w:
-                print(f"[rmcluster] sweep={k+1} moved_glob={moved_glob}", flush=True)
-
-            # If nothing moved but cluster remains, you're genuinely stuck topologically or selection is broken.
-            if moved_glob == 0:
-                if rnk == root_w:
-                    print("[rmcluster] STALL: moved_glob=0 while remaining_glob>0", flush=True)
-                break
 
     def remove_outliers(self, *,
         attach_bias: float = 0.0,   # >0 biases toward more neighbour-tied elems (smaller delta)
@@ -3193,73 +2438,3 @@ class OnlineDiffusionPartitioner(OnlinePartitioner):
                     best_dest[sel] = np.int32(nbr)
 
         return iface_mask, best_dest, best_dist
-
-    def _parity_open(self, tag: str):
-        import os
-        W = comm["world"]
-        r = int(rank["world"])
-        # overwrite each run (intentional)
-        path = f"dbg.parity.{tag}.r{r}.log"
-        # line-buffered text
-        self._parity_fh = open(path, "w", buffering=1)
-        self._parity_tag = str(tag)
-        # header
-        print(f"[parity] tag={tag} rank={r} size={int(W.size)}", file=self._parity_fh, flush=True)
-        return self._parity_fh
-
-    def _parity_close(self):
-        fh = getattr(self, "_parity_fh", None)
-        if fh:
-            try:
-                fh.flush()
-                fh.close()
-            finally:
-                self._parity_fh = None
-
-    def _parity(self, msg: str):
-        fh = getattr(self, "_parity_fh", None)
-        if fh:
-            print(msg, file=fh, flush=True)
-
-    @staticmethod
-    def _md5_arr_int64(a):
-        import hashlib
-        import numpy as np
-        a = np.asarray(a, dtype=np.int64)
-        return hashlib.md5(a.tobytes()).hexdigest()
-
-    @staticmethod
-    def _md5_eidxs_diff(eidxs_diff):
-        """
-        Canonical hash for {nbr:{et: gids}} with sorted keys and sorted gids.
-        """
-        import hashlib, numpy as np
-        h = hashlib.md5()
-        for nbr in sorted(eidxs_diff.keys()):
-            h.update(np.int64(nbr).tobytes())
-            per = eidxs_diff[nbr]
-            for et in sorted(per.keys()):
-                h.update(et.encode("utf-8") + b"\0")
-                gids = np.asarray(per[et], dtype=np.int64)
-                gids = np.sort(gids)
-                h.update(np.int64(gids.size).tobytes())
-                h.update(gids.tobytes())
-        return h.hexdigest()
-
-    def _dbg_write(self, msg: str):
-        fh = getattr(self, "_dbg_fh", None)
-        if fh is None:
-            return
-        self._dbg_seq += 1
-        fh.write(f"{self._dbg_seq:08d} {msg}\n")
-        fh.flush()
-
-    def _dbg_md5(self, arr: np.ndarray) -> str:
-        if arr is None:
-            return "none"
-        a = np.asarray(arr)
-        if a.size == 0:
-            return "empty"
-        a = np.ascontiguousarray(a)
-        h = hashlib.md5(a.view(np.uint8)).hexdigest()[:12]
-        return h
