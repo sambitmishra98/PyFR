@@ -990,12 +990,12 @@ def _process_common(args, soln, cfg):
         ecurrs_wr = comm['world'].allgather(ne_loc)   # length = comm['world'].size
 
         # Offline / uniform targets (since g1* not provided)
-        target_counts = mmesh.calc_target_ecounts(ecurrs_wr, g1a=None, g1s=None, g1r=None)
+        target = mmesh.calc_target(ecurrs_wr)
 
         mmesh.i.info()
         mmesh.remove_islands_till_convergence()
         mmesh.i.info()
-        mmesh.diffuse_till_convergence(target_counts, max_iters=100)
+        mmesh.diffuse_till_convergence(target, max_iters=100)
         mmesh.i.info()
 
 

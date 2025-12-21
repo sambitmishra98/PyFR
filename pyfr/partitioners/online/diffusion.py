@@ -8,8 +8,43 @@ from pyfr.mpiutil import comm, rank, root, mpi
 from pyfr.partitioners.online.base import OnlinePartitioner, CarverMixin, OfflineRepartitioner
 
 class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
-    """
-        Does not use config file at all.
+    """Local, iterative diffusion-based repartitioner operating on a `_MetaMesh` state.
+
+    This partitioner implements *online-friendly* refinement steps that move elements
+    along existing MPI interfaces to approach a target load vector while attempting
+    to minimise edge-cut and preserve contiguity.
+
+    Core algorithmic pieces
+    -----------------------
+    - Flow planning:
+        * `element_flow_plan(targets, ...) -> M` computes an integer flow matrix
+          prescribing how many elements each rank should send to each neighbour.
+          The plan must respect the current MPI adjacency graph (faces) and any
+          additional masks (active rank sets, direction constraints).
+    - Candidate scoring:
+        * `_compute_deltas(mode)` produces per-neighbour candidate lists scored by
+          a “tie strength” metric (faces- or vertices-based).
+        * `diffuse(mode, threshold, flow_matrix, ...)` realises a single flow plan by
+          greedily selecting candidates under caps.
+    - Seam smoothing / regularisation:
+        * `smooth(...)` and `smooth_until_stagnates(...)` improve interface quality
+          after a diffusion move without significantly affecting global counts.
+    - Convergence drivers:
+        * `iterate(...)`, `diffuse_till_convergence(...)` orchestrate repeated passes.
+
+    Contractual requirements
+    ------------------------
+    - Every diffusion/smoothing/carving step must call the collective commit gate
+      (`_apply_plan_and_commit`) exactly once per sweep, even if no moves occur.
+    - Deterministic tie-breaks are mandatory (delta, gid, neighbour id, etype order).
+    - Vertex-based modes require `spts_nodes` to be kept consistent across moves.
+
+    Extensibility
+    -------------
+    The diffusion engine should accept pluggable scoring and flow planners so you can:
+    - experiment with vertex vs face metrics,
+    - introduce device/etype biases,
+    - constrain moves for rank draining/seeding scenarios.
     """
 
     def __init__(self, mesh, cfg):
@@ -237,18 +272,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             mask_full |= mask_faces
 
         np.fill_diagonal(mask_full, False)
-
-        # --- DEBUG: world-space inputs and mask ---
-        #if int(rank['world']) == 0:
-        #    print("[elec_plan.v2] cur_full =", cur_full.tolist(), flush=True)
-        #    print("[elec_plan.v2] tgt_full =", tgt_full.tolist(), flush=True)
-        #    print("[elec_plan.v2] F_full (faces) =")
-        #    # cast to int for cleaner printing
-        #    print(F_full.astype(np.int64), flush=True)
-        #    print("[elec_plan.v2] mask_full (bool as 0/1) =")
-        #    print(mask_full.astype(np.int64), flush=True)
-
-
 
         # Active ranks: those that have or will have elements
         active = [
@@ -1065,7 +1088,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return moved_glob, eidxs_diff
 
-    def iterate(self, target_counts: List[int], *, flowmat_relax: float = 0.5) -> list[int]:
+    def iterate(self, target_counts: List[int], *, flowmat_relax: float = 0.5,
+                smooth=True) -> list[int]:
         """
         Debug controller (kept intentionally):
         - for now executes ONE pass: (thr=6, score_by='vertex')
@@ -1082,29 +1106,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         for thr, score_by in exec_order:
             M0 = self.element_flow_plan(target_counts)
             self.diffuse_smoothing2(M0, threshold=thr, scale=flowmat_relax, score_by=score_by)
-            self.smooth_until_stagnates(move_spts_nodes=True)
-
-    def diffuse_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
-                                 max_iters: int = 1):
-        if rank["world"] == root['world']:
-            print(f"TARGET: {target_counts}")
-
-        iters = 0
-
-        while True:
-            if max_iters != -1 and iters >= max_iters:  
-                break   
-            iters += 1
-
-            cur0 = self._cur_counts_total
-            if rank["world"] == root['world']:
-                print(f"CURRENT: {cur0}")     
-
-            self.iterate(target_counts, flowmat_relax=flowmat_relax)
-
-            cur1 = self._cur_counts_total
-            if cur1 == cur0:
-                break
+            if smooth==True:
+                self.smooth_until_stagnates(move_spts_nodes=True)
 
     def diffuse(self, *, mode: str = "faces", threshold: float = 0.0,
         flow_matrix, move_spts_nodes: bool = False):
@@ -1199,6 +1202,64 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
         return moved_local, flow_used, eidxs_diff
 
+    def diffuse_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
+                                 max_iters: int = 1, smooth: bool = True):
+        if rank["world"] == root['world']:
+            print(f"TARGET: {target_counts}")
+
+        iters = 0
+
+        while True:
+            if max_iters != -1 and iters >= max_iters:  
+                break   
+            iters += 1
+
+            cur0 = self._cur_counts_total
+            if rank["world"] == root['world']:
+                print(f"CURRENT: {cur0}")     
+
+            self.iterate(target_counts, flowmat_relax=flowmat_relax, smooth=smooth)
+
+            cur1 = self._cur_counts_total
+            if cur1 == cur0:
+                break
+
+    def drain_till_convergence(self, target: List[int], max_iters: int = 100):
+        drain_ranks = [i for i, (cnt, tgt) in enumerate(zip(self._cur_counts_total, target))
+                   if tgt == 0 and cnt > 0]
+
+        # Find all ranks that have elements to drain
+        curr0_to_drain = [i for i, cnt in enumerate(self._cur_counts_total) if cnt > 0]
+
+        # Check only those ranks and see if the have been drained
+        drained = all(self._cur_counts_total[i] == 0 for i in curr0_to_drain)
+        if drained:
+            return
+
+
+        if rank["world"] == root['world']:
+            print(f"TARGET: {target}")
+
+        iters = 0
+
+        while not drained:
+
+            cur = self._cur_counts_total
+            if all(cur[i] == 0 for i in drain_ranks):
+                break
+
+            drained = all(self._cur_counts_total[i] == 0 for i in curr0_to_drain)
+
+            if max_iters != -1 and iters >= max_iters:  
+                break   
+            iters += 1
+
+            self.iterate(target, flowmat_relax=1.0)
+
+            cur0 = self._cur_counts_total
+            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+
+
     def remove_islands_till_convergence(self, max_iters=-1):
 
         iters = 0
@@ -1209,9 +1270,10 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             iters += 1
 
             cur0 = self._cur_counts_total
-            nrms = self.remove_small_islands_step()
-            #self.remove_outliers()
-            #self.add_inliers()
+            nrms = self.remove_islands_step()
+            
+            self.remove_outliers()
+            self.add_inliers()
 
             self.smooth_until_stagnates(move_spts_nodes=True)
             #if not any(nrms[i] > 1.0 for i in range(comm['world'].size) if targets[i] > 0):
@@ -1225,6 +1287,38 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
 
 class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
+
+    """Convenience aggregation of the online orchestration layer with diffusion + carving.
+
+    Current implementation uses multiple inheritance:
+        OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner)
+
+    This is functional but creates a diamond-shaped dependency graph and makes
+    initialisation and method resolution order (MRO) fragile.
+
+    Ideal responsibilities
+    ----------------------
+    - Provide a single “mmesh object” to the controller that supports:
+        * `calc_target_ecounts(...)`
+        * rank add/remove primitives (`seed_rank`, `swap_partitions`, draining hooks)
+        * carving (`remove_islands_*`, `remove_outliers`, `add_inliers`)
+        * diffusion refinement (`diffuse_till_convergence`, `smooth_*`)
+        * export to PyFR mesh (`to_mesh(...)`)
+    - Expose a *minimal*, stable surface area to the integrator, hiding internal
+      caches and staging state.
+
+    Refactoring direction
+    ---------------------
+    Move towards composition:
+    - Keep `_MetaMesh` as the executor/mutator.
+    - Make Diffusion/Carver/Reallocator “strategy objects” that operate on an
+      executor interface.
+    - Keep OnlinePartitioner as a façade that wires them together and owns config.
+
+    Until then, this class must:
+    - explicitly initialise every parent (`__init__` must call both bases),
+    - document which base owns which attributes to prevent accidental shadowing.
+    """
 
     def __init__(self, mesh, cfg):
         OnlinePartitioner.__init__(self, mesh, cfg)

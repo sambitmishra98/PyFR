@@ -69,130 +69,34 @@ class BaseStdController(BaseStdIntegrator):
     def load_balance(self):
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
         if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
-            # Read inifile  from /scratch/EFFORTS/LoadBalancer3/c3900/online.ini
-            part_ranklist = self.mmesh.online_cfg.getliteral('partition', 'compute-ranklist')
-
-            # If compute-ranklist differs from current communicator, reinitialise
-            if len(part_ranklist) != len(rankmap['compute']):
-                initialise_new_comm('newcompute', part_ranklist)
-            else:
-                initialise_new_comm('newcompute', list(range(len(part_ranklist))))
-
-            # 🔍 NEW: print communicator state after creating newcompute
-            #if rank['world'] == root['world']:
-            #    print(
-            #        f"[comm-debug] init-newcompute: "
-            #        f"world_size={comm['world'].size} "
-            #        f"compute_size={comm['compute'].size} "
-            #        f"rankmap_compute={rankmap['compute']} "
-            #        f"newcompute_size={comm['newcompute'].size} "
-            #        f"rankmap_newcompute={rankmap['newcompute']}",
-            #        flush=True
-            #    )
-
+            if rank['world'] == root['world']: print('Switching, nacptsteps = ', self.nacptsteps)
             wallt_start = perf_counter_ns()
 
-            g1a, g1s, g1r = self.get_median_matrices()
+            mmesh = self.mmesh ; mmesh.restart()            
+            mmesh.i.info() ; mmesh.i.info_to_csv(tcurr=self.tcurr)
 
-            if rank['world'] == root['world']:
-                print('Switching, nacptsteps = ', self.nacptsteps)
-
-            # Build MetaMesh over the *world* communicator
-            #mmesh = _MetaMesh.from_mesh(self.meshes['compute'])
-            mmesh = self.mmesh
-            mmesh.restart()
-            
-            ndofs = execute['compute'](lambda: sum(self.system.ele_ndofs),
-                                       default=1e12)
-
-            # allgather across all world ranks
-            ndofs = comm['world'].allgather(ndofs)
-
-            mmesh.i.info()
-            mmesh.i.info_to_csv(tcurr=self.tcurr)
+            mmesh.recheck_online_file()
 
             # Element counts per world rank
-            current_local = sum(len(eidxs) for eidxs in self.meshes['compute'].eidxs.values())
-            ecurrs = np.asarray(comm['world'].allgather(int(current_local)), dtype=np.int64)
+            targets = mmesh.calc_target(*self.get_median_matrices())
 
-            #print(f"[lb] world-rank {rank['world']} ecurrs={ecurrs.tolist()}")
+            mmesh.drain_till_convergence(targets)
+            mmesh.add_ranks(targets)
+            # If islands exist, then remove them
+            mmesh.remove_islands_till_convergence()
 
-            targets = mmesh.calc_target_ecounts(ecurrs, g1a, g1s, g1r)
-
-            # RANK REMOVAL STRATEGY:
-            # Get all ranks with zero target and non-zero current, 
-            # load balance until one of the ranks reaches the zero target.
-
-            ranks_to_remove = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
-                              if t == 0 and n > 0 ]
-
-            ranks_to_add = [i for i, (n, t) in enumerate(zip(ecurrs, targets))
-                            if t > 0 and n == 0 ]
-
-            # If more than 1 rank to clear, raise 
-            if len(ranks_to_remove) > 1:
-                raise NotImplementedError(
-                    "Relocator supports removing one rank at a time."
-                )   
-            elif len(ranks_to_remove) == 1:
-                mmesh.iterate("to-remove-rank", targets)
             
-                # If we actually removed all elements from the rank to remove,
-                end_rank = len(rankmap['compute']) - 1
-                if ranks_to_remove[0] != end_rank and \
-                    sum([t!=0 for t in targets]) == end_rank:               
-                    mmesh.swap_partitions(ranks_to_remove[0], end_rank)
+            mmesh.diffuse_till_convergence(targets)
 
-                mmesh.smooth_until_stagnates(patience=1)
+            mmesh.rearrange_partitions()
+            mmesh.i.info()
 
-            elif len(ranks_to_add) > 1:
-                raise NotImplementedError("Add one rank at a time.")
-            elif len(ranks_to_add) == 1:
-                mmesh.seed_rank(ranks_to_add[0], targets)
-            else:
-                # parts_g = mmesh.partition_scotch(targets, ufactor=10)
-                # mmesh.apply_global_partition(parts_g)  # you implement: build eidxs_dest + relocate
-
-                mmesh.remove_islands_till_convergence()
-                #mmesh.remove_outliers()
-                #mmesh.add_inliers()
-                mmesh.diffuse_till_convergence(targets)
-
-                #targets = [13893, 17944, 15901, 15138, 13723, 18506, 16010, 19397, 12936, 19821, 19052, 16405]
-                # mmesh.iterate_to_convergence(targets)
-                
-                #import sys ; sys.exit()
-
-            # Build / update 'newcompute' communicator
-            #initialise_new_comm('newcompute', list(range(comm['newcompute'].size)))
-            initialise_new_comm('newcompute', list(range(len(part_ranklist))))
-    
-            # Convert back to mesh, relocate solution, and reinit system
-            #soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.j.eidxs), self.compute_soln)
+            initialise_new_comm('newcompute', list(range(len(rankmap['newcompute']))))
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
-
+            promote_comm('newcompute', 'compute')
 
             wallt_iterate = perf_counter_ns() - wallt_start
-
-            # Optional safety check: new element counts per world rank
-            current_local_new = sum(len(eidxs)
-                                    for eidxs in self.meshes['compute'].eidxs.values())
-            ecurrs_new = np.asarray(
-                comm['world'].allgather(int(current_local_new)),
-                dtype=np.int64
-            )
-
-            # At this point, rankmap['newcompute'] is still valid.
-            new_active = set(rankmap['newcompute'])
-
-            # Assert: any world-rank not in new_active has zero elements.
-            # (If you want to be looser, just drop the assert.)
-            if all((i in new_active) or (ecurrs_new[i] == 0) for i in range(comm['world'].size)):
-                promote_comm('newcompute', 'compute')
-
-            # Reinitialise backend+system on the new 'compute' layout
             self.reinit_backend_and_system(self.meshes['compute'], soln)
-
             wallt_reinit = perf_counter_ns() - wallt_start - wallt_iterate
 
             # Write wall times
@@ -200,14 +104,9 @@ class BaseStdController(BaseStdIntegrator):
                 with open('lb_walltimes.csv', 'a') as f:
                     f.write(f"{self.tcurr:.6f},"
                             f"{(wallt_start - self.wallt_end)/1e9},"
-                            f"{wallt_iterate/1e9},"
-                            f"{wallt_reinit/1e9}\n")
+                            f"{wallt_iterate/1e9},{wallt_reinit/1e9}\n")
 
             self.wallt_end = perf_counter_ns()
-
-            mmesh.i.info()
-
-            # import sys ; sys.exit()
 
     def reinit_mesh_soln(self, mesh, soln):
         # New mesh lives under the 'newcompute' logical name while we migrate.

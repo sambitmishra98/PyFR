@@ -13,12 +13,64 @@ from pyfr.inifile import Inifile
 from pyfr.nputil import iter_struct
 from pyfr.partitioners.base import BasePartitioner
 from pyfr.partitioners.scotch import SCOTCHPartitioner
-from pyfr.mpiutil import comm, rank, root, mpi, AlltoallMixin, rankmap, get_comm_info
+from pyfr.mpiutil import comm, rank, root, mpi, AlltoallMixin, rankmap, get_comm_info, execute, initialise_new_comm
 from pyfr.shapes import BaseShape
 from pyfr.util import subclass_where
 
 @dataclass
 class PartitionState:
+    """Data model for a *single-rank* view of a partitioned PyFR mesh.
+
+    This object is the canonical carrier of partition state used by online
+    repartitioning.  It is intentionally *algorithm-agnostic*: it stores arrays and
+    provides deterministic indexing utilities, but it must not decide *how* a
+    partition changes (diffusion, SCOTCH, METIS, carving, etc.) and must not perform
+    MPI communication.
+
+    Responsibilities
+    ---------------
+    - Store per-etype element ownership:
+        * `eidxs[etype]`: global element ids owned by this rank.
+    - Store per-etype element-to-element connectivity:
+        * `con_idx[etype]`: global element ids of neighbours per face (or -1).
+        * `con_mpi[etype]`: neighbour owner rank for each face (or -1 for non-element).
+    - Store geometric/topological auxiliaries required by algorithms:
+        * `spts_nodes[etype]`: global node ids for each element (used for vertex modes).
+        * Optional: `centroids[etype]` if centroid-based carving is enabled.
+    - Precompute a stable *flat indexing* over all local elements:
+        * `eidxs_flat`: concatenation of `eidxs` in deterministic etype order.
+        * `etype_slices`: mapping etype -> slice into `eidxs_flat`.
+
+    Key invariants (must be preserved by all writers)
+    -------------------------------------------------
+    - Global element ids are in the PyFR global ordering and are unique *within* each
+      etype (and globally unique once you apply the per-etype offsets/edisps).
+    - `con_idx` uses the *same* global id space as `eidxs_flat` (and as any global
+      partition vector `vparts` you apply).
+    - `con_mpi[..., f]` is the owner rank of `con_idx[..., f]` (or -1 when
+      `con_idx` is -1 / a boundary / invalid face).
+    - All integer arrays are contiguous, have explicit dtypes (int32/int64), and
+      have stable shapes across ranks (empty arrays are present, not missing keys).
+
+    Public API (expected)
+    ---------------------
+    - Conversion helpers:
+        * `lids_to_flat(etype, lids) -> flat_indices`
+        * `flat_to_lid(flat_indices) -> (etype, lids)` or equivalent iterator
+    - Lightweight diagnostics (no heavy MPI):
+        * `info()` / `info_to_csv(...)` should only summarise local counts and
+          top-level invariants.
+    - Construction-time normalisation:
+        * `_preproc_attr_dict(...)` should enforce dtype/shape policy consistently.
+
+    Collaboration / Ownership
+    -------------------------
+    - `_MetaMesh` owns a *current* `PartitionState` (usually `self.i`) and a scratch
+      `PartitionState` (`self.j`) to stage updates.
+    - Algorithms (Diffusion/Carver/Reallocator) should treat the state as read-only
+      except through `_MetaMesh` commit primitives.
+    """
+
     eidxs:   Dict[str, np.ndarray]
     con_idx: Dict[str, np.ndarray]
     con_mpi: Dict[str, np.ndarray]
@@ -454,7 +506,66 @@ class PartitionState:
         with open(csv_path, "a") as f:
             f.write(",".join(row) + "\n")
 
+
 class _MetaMesh:
+
+    """Distributed, mutable partition object providing *collective-safe* mutation
+    primitives for online repartitioning.
+
+    `_MetaMesh` is the “operational” layer: it owns `PartitionState` instances and
+    offers methods to *apply* a chosen set of element moves, update connectivity
+    ownership tags, and export/import to PyFR mesh objects.  Partition *decisions*
+    belong in algorithms/mixins; `_MetaMesh` is the execution substrate.
+
+    Design goals
+    ------------
+    - Separation of concerns:
+        * algorithms compute “what to move” (plans),
+        * `_MetaMesh` executes plans *correctly* and keeps state consistent.
+    - Collective safety: any method that can trigger MPI communication must be safe
+      when called by *all* world ranks, even if some ranks have empty partitions.
+    - Determinism: given the same state and plan, results should be bitwise
+      reproducible (ordering, tie-breaks, id remaps).
+
+    Core responsibilities
+    ---------------------
+    - Own and maintain:
+        * `self.i`: current `PartitionState`
+        * `self.j`: next/scratch `PartitionState` (staging buffer)
+        * topology caches (gid->owner maps, neighbour sets, etc.) with explicit
+          invalidation rules.
+    - Provide execution primitives:
+        * `_reset_j_with_i()` / `restart()` to reinitialise staging state.
+        * `_apply_plan_and_commit(eidxs_diff, ...)` as the *only* mutating entry point
+          that changes element ownership across ranks.
+        * `_retag_con_owners()` / `_retag_con_owners_from_*()` to restore
+          `con_mpi[...,0]=owner` invariants after a move or after applying global
+          partitions.
+    - Provide import/export:
+        * `from_mesh(...)` / `to_mesh(...)` for PyFR mesh objects.
+        * `to_mesh` must be usable to rebuild compute meshes during controller
+          reinitialisation.
+    - Provide cheap state introspection:
+        * element counts (`nelems_total`, `_cur_counts_total`), device tagging hooks,
+          and debug summaries.
+
+    Expected public surface (contract)
+    ----------------------------------
+    - *Plan execution*: `_apply_plan_and_commit(...)` is collective and must be called
+      by all ranks every time an algorithm iteration occurs (even if the plan is
+      empty on some ranks).
+    - *Topology validity flags*: e.g. `_spts_nodes_valid`, `_owners_valid`, and a
+      single `_invalidate_topology()` entry point.
+    - *Convenience*: helpers like `_mpi_faces_by_neighbor()`, `collect_mpi_vertex_nodes()`
+      may exist but should be carefully scoped: they are algorithm inputs, not
+      mutation operations.
+
+    Extensibility
+    -------------
+    - Subclasses/algorithms should not override commit semantics.  If specialised
+      paths are needed (e.g. SCOTCH apply path), add *new* well-scoped helpers that
+      still end in `_apply_plan_and_commit` or an equivalent single commit gate.
+    """
 
     def __init__(self, mesh, cfg):
         self.mesh_src  = mesh
@@ -779,6 +890,35 @@ class _MetaMesh:
     def _nfaces(etype):
         """Number of faces in an element of a given etype."""
         return len(subclass_where(BaseShape, name=etype).faces)
+
+    def int_round(self, N_star):
+        """
+            _MetaMesh
+            Rescale targets to total elements in mesh.
+        """
+
+        Ntot = self.i.nelems_g
+        N_star = np.asarray(N_star, dtype=float)
+        sum_star = float(N_star.sum())
+
+        scale = float(Ntot) / sum_star
+        N_scaled = N_star * scale
+        N_floor = np.floor(N_scaled).astype(np.int64)
+
+        k = int(Ntot - N_floor.sum())
+
+        if k != 0:
+            frac = N_scaled - N_floor
+            order = np.argsort(frac)  # ascending
+
+            if k > 0:
+                idxs = order[-k:]   # bump largest fractions
+                N_floor[idxs] += 1
+            else:
+                idxs = order[:-k]   # k < 0 → drop smallest fractions
+                N_floor[idxs] -= 1
+
+        return N_floor
 
     # --------------------------------------------------------------------------
     # Element centroids and partition centroids (cores)
@@ -1201,7 +1341,59 @@ class _MetaMesh:
 
         return new_eidxs
 
+
 class WaitsToTargetsModelMixin:
+
+    """Cost-model mixin that maps measured runtime/communication signals to *target*
+    element counts per rank.
+
+    This mixin is the *performance-model* layer.  It should not mutate partitions.
+    It provides:
+      (i) ingestion of performance telemetry (waitsome matrices, per-rank compute),
+     (ii) regularisation/smoothing and device-aware weighting,
+    (iii) production of integer targets and (optionally) per-etype weights.
+
+    Inputs (typical)
+    ----------------
+    - `g1a, g1s, g1r`: aggregated/median MPI Waitsome time matrices:
+        * all-time, send-time, recv-time (or any consistent decomposition).
+    - Per-rank compute proxies (e.g. ndofs, wall-clock kernel time, FLOP proxies).
+    - Device tags and etype preference policies (CPU/GPU, hex/tet bias, etc.).
+    - Online controls from config:
+        * jitter fractions, smoothing windows, lb cadence, caps, min-elements, etc.
+
+    Outputs (typical)
+    -----------------
+    - `targets[r]`: integer target element counts for each *world rank* (or a defined
+      rank-list ordering), with exact global conservation enforced:
+          sum(targets) == sum(current_counts)
+    - Optional auxiliary products:
+        * rank weights / speeds,
+        * per-etype weighting vectors,
+        * diagnostic scalars for logging (fit residuals, stability metrics).
+
+    Contract / invariants
+    ---------------------
+    - Deterministic: same inputs -> same targets (seeded randomness only via an
+      explicit RNG/seed parameter).
+    - Conservative: targets must preserve total element count.
+    - Safe for dynamic ranks: ranks with `current==0` may still get `target>0`
+      (addition), and ranks with `target==0` may currently own elements (removal).
+
+    Public API (expected)
+    ---------------------
+    - `calc_target_ecounts(current_counts, g1a, g1s, g1r, ...) -> targets`
+    - `rank_tags()` / `device_tags` helpers to align devices with ranks.
+    - Configuration exposure:
+        * jitter schedule parameters,
+        * fitting window/robust statistics parameters.
+
+    Notes on architecture
+    ---------------------
+    If this mixin needs mesh-derived features (etype mix, ndofs), pass them in as
+    arguments or via a small immutable “telemetry bundle”.  Avoid reaching into
+    partition mutation internals to keep the model testable in isolation.
+    """
 
     _LB_CYCLIC_JITTER_CTR = 0
 
@@ -1277,71 +1469,6 @@ class WaitsToTargetsModelMixin:
         _append_csv_row('g1-send-median-ms.csv', mcols, [int(send_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
         _append_csv_row('g1-recv-median-ms.csv', mcols, [int(recv_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
 
-    def remap_targets_by_ranklist(self, N_star_old, old_ranks, new_ranks, devices, tag="[lb-group]"):
-        """
-        Remap continuous targets N_star_old from old_ranks -> new_ranks using device groups.
-
-        Parameters
-        ----------
-        N_star_old : array-like of float, shape (P_old,)
-            Continuous targets on the old compute ranks, in old-compute index order.
-        old_ranks : list[int]
-            World ranks in old compute order (len == len(N_star_old)).
-        new_ranks : list[int]
-            World ranks in new compute order.
-        devices : Sequence[str]
-            Device label per *world* rank, e.g. ['gpu','cpu',...].
-        tag : str
-            Log prefix.
-
-        Returns
-        -------
-        np.ndarray of float, shape (len(new_ranks),)
-            Continuous targets in new compute order.
-        """
-        N_star_old = np.asarray(N_star_old, dtype=float)
-        assert len(N_star_old) == len(old_ranks), \
-            f"{tag} len(N_star_old)={len(N_star_old)} != len(old_ranks)={len(old_ranks)}"
-
-        # Map world rank -> index in old-compute array
-        wr_to_idx = {wr: i for i, wr in enumerate(old_ranks)}
-
-        # Build device-group → list of old indices
-        group_to_indices = defaultdict(list)
-        for i, wr in enumerate(old_ranks):
-            dev = devices[wr]
-            group_to_indices[dev].append(i)
-
-        removed = sorted(set(old_ranks) - set(new_ranks))
-        print(f"{tag} old_ranks={old_ranks} new_ranks={new_ranks}")
-        print(f"{tag} removed_ranks={removed}")
-        print(f"{tag} group_to_indices="
-              f"{{{', '.join(f'{g}:{idxs}' for g, idxs in group_to_indices.items())}}}")
-
-        N_star_new = np.zeros(len(new_ranks), dtype=float)
-
-        for k, wr in enumerate(new_ranks):
-            dev = devices[wr]
-            if wr in wr_to_idx:
-                # Rank survives: carry its own target
-                i_old = wr_to_idx[wr]
-                N_star_new[k] = N_star_old[i_old]
-                print(f"{tag} wr={wr} (dev={dev}) reused_old idx={i_old} "
-                      f"N_star_old={N_star_old[i_old]:.6e}")
-            else:
-                # New compute rank: use device-group average, else global average
-                idxs = group_to_indices.get(dev, [])
-                if idxs:
-                    val = float(N_star_old[idxs].mean())
-                    print(f"{tag} wr={wr} (dev={dev}) new_rank using group_avg over idxs={idxs}: "
-                          f"{val:.6e}")
-                else:
-                    val = float(N_star_old.mean())
-                    print(f"{tag} wr={wr} (dev={dev}) new_rank using global_avg: {val:.6e}")
-                N_star_new[k] = val
-
-        return N_star_new
-
     def _lb_next_cyclic_pulse_index(self, comm_nc, root_nc: int) -> int:
         """
         Deterministically choose a pulse rank index in the *newcompute* ordering.
@@ -1393,12 +1520,51 @@ class WaitsToTargetsModelMixin:
         N[j] *= (1.0 + frac)
         return N
 
-class _MetaMeshInterconnector(AlltoallMixin):
-    """
-    Fast, MetaMesh-specific interconnector for inner diffusion iterations.
+    def compute_cost(self, g1a, g1s, g1r):
+        g1a_old = np.asarray(g1a, dtype=float)
+        g1s_old = np.asarray(g1s, dtype=float)
+        g1r_old = np.asarray(g1r, dtype=float)
 
-    Uses the same mesh-global flat indexing as PartitionState._eidxs_to_flat.
+        s_out = g1s_old.sum(axis=1)
+        r_in  = g1r_old.sum(axis=1)
+        r_out = g1r_old.sum(axis=0)
+
+        return (g1a_old - r_in  * self.lb_cost_scale_g1r
+                        - s_out * self.lb_cost_scale_g1s
+                        + r_out * self.lb_cost_scale_g1rt)
+
+
+class _MetaMeshInterconnector(AlltoallMixin):
+    """Pure index-space interconnector for *in-rank* relocation of mesh-attached arrays
+    when applying a global partition vector.
+
+    This helper is used for the “global partitioner apply” path (SCOTCH/METIS/KAHIP):
+    given `eidxs_src` and `eidxs_dest` on *the same rank*, it builds local mapping
+    tables that can relocate:
+    - connectivity arrays (`con_idx`, `con_mpi`)
+    - element-attached geometry (`spts_nodes`, centroids, etc.)
+
+    Key property: **no MPI communication**.
+    It only performs local permutation / filtering / remapping consistent with the
+    new local ownership.
+
+    Expected responsibilities
+    -------------------------
+    - Provide `relocate_cons(dict_of_arrays)` and similar helpers that:
+        * keep shapes consistent,
+        * preserve dtype,
+        * remap local element ordering deterministically.
+    - Expose enough metadata for fast paths:
+        * `eidxs_flat_src`, `etype_slices_src` (and possibly dest analogues),
+          so callers avoid recomputing expensive maps.
+
+    Limitations / contract
+    ----------------------
+    - Does not decide ownership; only realises a decision already expressed as
+      `eidxs_dest` (or a global `vparts` vector sliced into per-rank `eidxs_dest`).
+    - Must not touch MPI collectives; correctness is local-only.
     """
+
 
     def __init__(self, etypes,
                  eidxs_src: Dict[str, np.ndarray],
@@ -1706,7 +1872,39 @@ class _MetaMeshInterconnector(AlltoallMixin):
 
         return out
 
+
 class _MeshInterconnector(AlltoallMixin):
+
+    """MPI-aware interconnector for relocating *solution arrays* and other per-element
+    fields between two partition layouts.
+
+    This is the runtime data-migration primitive used by the integrator/controller
+    during a repartition event:
+        old 'compute' layout  ->  staging 'newcompute' layout  ->  promoted 'compute'
+
+    Responsibilities
+    ---------------
+    - Given source/destination element ownership (`eidxs_src`, `eidxs_dest`) and an
+      MPI communicator, compute:
+        * send lists (gids/indices per destination rank),
+        * recv lists (expected gids/indices from source ranks),
+        * stable ordering for packing/unpacking to preserve determinism.
+    - Provide relocation methods:
+        * `relocate_ary(intercon, ary, edim=..., ...)` (or equivalent)
+          for ndarray payloads shaped as (nelems, ..., nvars).
+    - Ensure collective correctness:
+        * All ranks in the communicator participate, even if they send/recv zero.
+        * Type/shape checks are strict; failures should be loud and early.
+    - Support minimal introspection for debugging:
+        * message volume, total bytes, max peer count, etc.
+
+    Design notes
+    ------------
+    - Keep this class independent of partition algorithms: it consumes `PartitionState`
+      snapshots and moves arrays; it must not mutate the mesh partition itself.
+    - Prefer explicit ownership of MPI requests/buffers to avoid leaks across repeated
+      load-balance events.
+    """
 
     def __init__(self, eidxs_src, eidxs_dest):
         # Link to src and dest eidxs
@@ -2070,419 +2268,82 @@ class _MeshInterconnector(AlltoallMixin):
         return out
 
 
-class RankReallocatorMixin:
+class RankAllocatorMixin:
+    """Algorithm-agnostic mixin implementing *rank addition/removal semantics* for any
+    partitioning backend (diffusion, SCOTCH, METIS, ...).
+
+    This mixin defines “how to change the *active rank set*” (grow/shrink the compute
+    communicator) while delegating “how to reshape the partition” to the underlying
+    partitioner/carver methods.
+
+    Conceptual model
+    ----------------
+    - The world communicator is fixed; “compute ranks” are a subset (`compute-ranklist`).
+    - Online changes are expressed via `online.ini` as a new `compute-ranklist`.
+    - A rank is *active* if it currently owns elements or is assigned a non-zero
+      target.  Rank add/remove is achieved by moving elements until:
+        * added rank transitions 0 -> >0 owned elements (seeding),
+        * removed rank transitions >0 -> 0 owned elements (draining).
+
+    Responsibilities
+    ---------------
+    - Parse and expose online ranklist intent:
+        * `self.online_cfg` provides the desired compute-ranklist.
+        * helper(s) should compute `ranks_to_add` and `ranks_to_remove`.
+    - Provide deterministic, collective-safe primitives:
+        * `seed_rank(new_rank, targets, ...)` to bootstrap an empty rank with a small
+          interface-connected patch so diffusion/global partitioning can take over.
+        * `drain_rank(old_rank, targets, ...)` (or current `iterate("to-remove-rank")`)
+          to evacuate elements from a rank slated for removal.
+        * `swap_partitions(r0, r1)` to bubble an empty partition to a convenient
+          position (e.g. end of ranklist).
+    - Define selection policies as overridable hooks (pure functions preferred):
+        * pick donor rank(s), pick interface neighbour, pick seed etype, pick budget.
+
+    Required collaboration with `_MetaMesh`
+    ---------------------------------------
+    This mixin assumes the host class provides:
+    - access to current state (`self.i`) and etype order,
+    - MPI-interface queries (`_mpi_faces_by_neighbor`, `collect_mpi_vertex_nodes`),
+    - collective commit (`_apply_plan_and_commit`),
+    - topology invalidation/retagging helpers.
+
+    Public API (what controllers should call)
+    -----------------------------------------
+    - `seed_rank(...)` and `swap_partitions(...)` are intended to be called from the
+      time integrator/controller during an LB event.
+    - A higher-level orchestration method is recommended:
+        * `reconcile_active_ranks(current_counts, targets) -> action plan`
+          returning a structured decision (add/remove/none) plus metadata for logging.
+
+    Architecture note
+    -----------------
+    Multiple inheritance works here only if *initialisation is explicit* or uses
+    cooperative `super()`.  Long-term, prefer composition: a `RankReallocator`
+    component that receives a host “partition executor” interface.
     """
-        Mixin class to diffusion repartitioner and METIS/SCOTCH/KAHIP partitioners
-        for working with addition and removal of ranks. 
-        The actual element movements must be placed appropriately in their class.
-    """    
+
     
     def __init__(self, cfg):
 
         # Online partitioning file
         if cfg.hasopt('partition', f'online-file'):
-            self.online_cfg = Inifile.load(cfg.get('partition', 'online-file'))
+            self.online_cfg_file = cfg.get('partition', 'online-file')
+            self.online_cfg = Inifile.load(self.online_cfg_file)
         else:
+            self.online_cfg_file = None
             self.online_cfg = cfg
+            
+    def recheck_online_file(self):
+        if self.online_cfg_file is not None:
+            self.online_cfg = Inifile.load(self.online_cfg_file)
 
-        # device details
-        self.devices = cfg.getliteral('backend', 'devices')
-    
-    def _pick_rank_b_min_mpi_faces_local(self, rank_a: int, etype: str | None = None, ):
-        """
-        Given world-rank `rank_a`, pick neighbour `rank_b` based on rank_a's
-        local MPI-face connectivity.
+        part_ranklist = self.online_cfg.getliteral('partition', 'compute-ranklist')
 
-        If `etype` is None (default):
-            - Choose neighbour with the smallest MPI-face interface.
-
-        If `etype` is not None:
-            - Prefer neighbour with the largest number of elements of this
-              etype on the interface; tie-break by smallest rank index.
-            - If that etype is absent on all interfaces, fall back to
-              "fewest faces".
-        """
-        commw = comm['world']
-        rank_a = int(rank_a)
-        myr = int(rank['world'])
-
-        if myr == rank_a:
-            per_nbr = self._mpi_faces_by_neighbor()   # {nbr: [(et, lid, fidx), ...]}
-
-            if not per_nbr:
-                rb = None
-            else:
-                iface_sizes = {nbr: len(faces) for nbr, faces in per_nbr.items()}
-
-                if etype is not None:
-                    et_counts: dict[int, int] = {}
-                    for nbr, faces in per_nbr.items():
-                        lids = [lid for (et, lid, fidx) in faces if et == etype]
-                        et_counts[nbr] = len(set(lids))
-
-                    max_count = max(et_counts.values()) if et_counts else 0
-
-                    if max_count > 0:
-                        candidates = [n for n, c in et_counts.items() if c == max_count]
-                        rb = int(min(candidates))
-                        # Condensed log: only chosen neighbour, no huge dicts
-                        if rank_a == root['world']:
-                            print(
-                                f"[itc4.pickb] R{rank_a} etype={etype} "
-                                f"max_iface_count={max_count} -> rb={rb}",
-                                flush=True,
-                            )
-                    else:
-                        rb = min(
-                            iface_sizes.keys(),
-                            key=lambda n: (iface_sizes[n], int(n)),
-                        )
-                        if rank_a == root['world']:
-                            print(
-                                f"[itc4.pickb] R{rank_a} etype={etype} "
-                                "no faces of this etype; "
-                                f"fallback -> rb={rb}",
-                                flush=True,
-                            )
-                else:
-                    rb = min(
-                        iface_sizes.keys(),
-                        key=lambda n: (iface_sizes[n], int(n)),
-                    )
-                    if rank_a == root['world']:
-                        print(
-                            f"[itc4.pickb] R{rank_a} etype=None -> rb={rb}",
-                            flush=True,
-                        )
+        if len(part_ranklist) != len(rankmap['compute']):
+            initialise_new_comm('newcompute', part_ranklist)
         else:
-            rb = None
-
-        rb = commw.bcast(rb, root=rank_a)
-        return rb
-
-    def _pick_seed_rank_for_new_rank(self, new_rank: int) -> tuple[int, str]:
-        """
-        Decide which existing rank should act as rank_a for seeding `new_rank`,
-        and which etype is used for seeding.
-
-        Current policy
-        --------------
-        - Take the first etype in `self._etype_order()` as the top-priority
-          etype for `new_rank` (e.g. 'hex' on CPU ranks).
-        - Each rank counts how many local elements it has of this etype.
-        - The global donor rank_a is the rank with the largest count; ties are
-          broken in favour of the smallest rank index.
-
-        Returns
-        -------
-        rank_a : int
-            Donor rank index in world communicator.
-        seed_etype : str
-            The top-priority etype used for seeding.
-        """
-        this_rank = int(rank['world'])
-
-        et_order = list(self._etype_order())
-        if not et_order:
-            if this_rank == root['world']:
-                print(
-                    f"[itc4.seed-info] new_rank={new_rank} has no etypes; "
-                    "unable to pick rank_a",
-                    flush=True,
-                )
-            # Fallback: no etypes -> no sensible seed_etype, caller should bail.
-            return 0, ""
-
-        seed_etype = et_order[0]
-
-        # Local count of top-priority etype
-        local_count_seed = int(len(self.i.eidxs.get(seed_etype, ())))
-        counts_seed = comm['world'].allgather(local_count_seed)
-
-        # Argmax over counts; deterministic tie-break via lowest rank
-        max_count = max(counts_seed)
-        rank_a_candidates = [
-            r for r, c in enumerate(counts_seed) if c == max_count
-        ]
-        rank_a = int(min(rank_a_candidates))
-
-        if this_rank == root['world']:
-            print(
-                f"[itc4.seed-info] new_rank={new_rank} "
-                f"seed_etype={seed_etype} counts={counts_seed} -> rank_a={rank_a}",
-                flush=True,
-            )
-
-        return rank_a, seed_etype
-
-    def seed_rank(self, new_rank: int, targets,
-        rank_a: int | None = None, n_seed_per_etype: int = 1, ) -> None:
-        """
-        Seed `new_rank` with a small patch of elements from a single preferred
-        etype, then run a short vertex-based diffusion to grow that patch.
-
-        Semantics
-        ---------
-        - Let `seed_etype` be the first etype in `self._etype_order()`
-          (top of the preference list for seeding).
-        - If rank_a is None, we choose rank_a globally as the rank with the
-          largest number of `seed_etype` elements via `_pick_seed_rank_for_new_rank`.
-        - We choose rank_b as the neighbour of rank_a with minimal MPI faces
-          (via `_pick_rank_b_min_mpi_faces_local`), then broadcast rank_b.
-        - On all ranks we call `collect_mpi_vertex_cluster(rank_a, rank_b)`,
-          but ONLY `rank_a` actually donates up to `n_seed_per_etype` elements
-          of `seed_etype` to `new_rank`.
-        - Then we recompute element counts and do a short vertex-based
-          diffusion with `skip_last=True` so that only the first N-1 etypes
-          grow via vertex-based smoothing.
-        """
-        this_rank = int(rank['world'])
-
-        # 1) Determine rank_a and seed_etype from global top-priority policy
-        auto_rank_a, seed_etype = self._pick_seed_rank_for_new_rank(new_rank)
-
-        if not seed_etype:
-            # No etypes at all; nothing sensible to do
-            if this_rank == root['world']:
-                print(
-                    f"[itc4.seed] new_rank={new_rank} no seed_etype; "
-                    "skipping seeding",
-                    flush=True,
-                )
-            return
-
-        if rank_a is None:
-            rank_a = auto_rank_a
-        else:
-            rank_a = int(rank_a)
-            if this_rank == root['world']:
-                print(
-                    f"[itc4.seed] new_rank={new_rank} overriding auto "
-                    f"rank_a={auto_rank_a} with user rank_a={rank_a}",
-                    flush=True,
-                )
-
-        # 2) Choose rank_b: neighbour of rank_a with a suitable interface for
-        #    the seed_etype (prefer neighbours with many faces of that etype).
-        rb_local = self._pick_rank_b_min_mpi_faces_local(rank_a, etype=seed_etype)
-        rank_b = int(comm['world'].bcast(int(rb_local), root=rank_a))
-
-        if this_rank == root['world']:
-            print(
-                f"[itc4.seed] seeding R{new_rank} from interface "
-                f"(R{rank_a}, R{rank_b}) seed_etype={seed_etype}",
-                flush=True,
-            )
-
-        # 3) Build a tiny "cluster" everywhere, but only rank_a will donate
-        cluster = self.collect_mpi_vertex_cluster(rank_a, rank_b, seed_etype=seed_etype)
-
-        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
-
-        if this_rank == rank_a:
-            gids = np.asarray(cluster.get(seed_etype, ()), dtype=np.int64)
-
-            if gids.size:
-                cur = np.asarray(self.i.eidxs.get(seed_etype, ()), dtype=np.int64)
-                if cur.size:
-                    # Intersect with local gids (defensive; cluster is local)
-                    mask = np.isin(gids, cur, assume_unique=False)
-                    sel = gids[mask][: int(n_seed_per_etype)]
-
-                    if sel.size:
-                        eidxs_diff.setdefault(int(new_rank), {})[seed_etype] = sel
-                        print(
-                            f"[itc4.seed] R{this_rank} donating "
-                            f"{sel.size} {seed_etype} element(s) to R{new_rank}: "
-                            f"{sel.tolist()}",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"[itc4.seed] R{this_rank} cluster for {seed_etype} "
-                            "does not intersect local gids; nothing donated",
-                            flush=True,
-                        )
-                else:
-                    print(
-                        f"[itc4.seed] R{this_rank} has no local {seed_etype} "
-                        "elements; nothing donated",
-                        flush=True,
-                    )
-            else:
-                # Fallback: no seed_etype on this interface, but we still want to
-                # seed the new rank with *something* of seed_etype from rank_a.
-                cur = np.asarray(self.i.eidxs.get(seed_etype, ()), dtype=np.int64)
-
-                if cur.size:
-                    sel = cur[: int(n_seed_per_etype)]
-                    eidxs_diff.setdefault(int(new_rank), {})[seed_etype] = sel
-                    print(
-                        f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
-                        f"on interface (R{rank_a}, R{rank_b}); "
-                        f"fallback donating {sel.size} local {seed_etype} "
-                        f"element(s) to R{new_rank}: {sel.tolist()}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"[itc4.seed] R{this_rank} found no {seed_etype} elements "
-                        f"on interface (R{rank_a}, R{rank_b}) and has no local "
-                        f"{seed_etype} elements; nothing donated",
-                        flush=True,
-                    )
-
-
-        # 4) Apply the seeding relocation collectively
-        self._apply_plan_and_commit(eidxs_diff)
-
-        # 5) Recompute counts and perform a short vertex-based diffusion
-        cur0 = self._cur_counts_total
-        
-        if this_rank == root['world']:
-            print(f"[itc4.seed] mode=seed_rank CURRENT={cur0}", flush=True)
-
-        M0 = self.element_flow_plan(cur0, targets)
-
-        self.diffuse_smoothing_vertices(flow_matrix=M0, skip_last=True)
-
-    def collect_mpi_vertex_cluster(self, rank_a: int, rank_b: int, 
-                                   seed_etype: str | None = None, ):
-        """
-        Per-rank "seed" element on a vertex interface between two ranks.
-
-        Given two ranks (rank_a, rank_b), this returns, on each calling rank,
-        a mapping {etype -> np.ndarray[int64]} of *at most one* global element
-        ID on THIS rank which touches any MPI-vertices on the (rank_a, rank_b)
-        interface.
-
-        Semantics
-        ---------
-        - If this_rank ∉ {rank_a, rank_b}, the returned dict has the same
-          keys (etypes) but all arrays are empty.
-        - If this_rank ∈ {rank_a, rank_b}, we:
-            * determine the relevant neighbour rank,
-            * look up its MPI-vertex set,
-            * scan etypes in a preference order:
-                  - if seed_etype is given, try that first (if present),
-                    then all remaining etypes in self._etype_order();
-                  - otherwise just self._etype_order();
-            * for the first etype in that scan order that has at least one
-              element whose spts_nodes contain a neighbour MPI-vertex,
-              select exactly ONE such element (lowest local index),
-              and store its global ID in the returned dict.
-        - All etypes that are not chosen have empty arrays.
-
-        This is intentionally minimal: it is designed to support `seed_rank`,
-        not to capture a full "cluster".
-        """
-
-        ra = int(rank_a)
-        rb = int(rank_b)
-        if ra == rb:
-            raise ValueError("rank_a and rank_b must differ")
-
-        this_rank = int(rank['world'])
-
-        # Initialise result with per-etype empty arrays
-        cluster_by_et: dict[str, np.ndarray] = {
-            et: np.empty(0, dtype=np.int64) for et in self.etypes
-        }
-
-        # Base etype order (backend / device preference)
-        base_order = list(self._etype_order()) or list(self.etypes)
-
-        # Build scan order:
-        # - If a seed_etype is provided, we try that type first (if it exists),
-        #   then all remaining etypes in base_order.
-        # - Otherwise, just use base_order.
-        if seed_etype is not None:
-            et_scan: list[str] = []
-
-            # Hard preference: seed_etype first, if it exists on this mesh.
-            if seed_etype in self.etypes:
-                et_scan.append(seed_etype)
-
-            # Append remaining etypes, preserving base_order but avoiding dups.
-            for et in base_order:
-                if et != seed_etype and et not in et_scan:
-                    et_scan.append(et)
-
-            # As an ultimate fallback (very defensive), if for some reason
-            # et_scan ended up empty, fall back to all etypes.
-            if not et_scan:
-                et_scan = list(self.etypes)
-        else:
-            et_scan = base_order
-
-        # Ensure we have up-to-date MPI-vertex sets per neighbour.
-        mvu = self.collect_mpi_vertex_nodes()
-
-        if this_rank not in (ra, rb):
-            # Not part of this interface; nothing to do.
-            print(
-                f"[itc4.cluster] R{this_rank} not in (R{ra}, R{rb}); "
-                f"cluster empty (seed_etype={seed_etype})",
-                flush=True,
-            )
-            return cluster_by_et
-
-        # Decide which neighbour's MPI-vertices are relevant on this rank.
-        nbr = rb if this_rank == ra else ra
-        nbr_vertices = np.asarray(mvu.get(nbr, ()), dtype=np.int64)
-
-        if nbr_vertices.size == 0:
-            # We *are* one of the pair, but there is no MPI-vertex interface.
-            print(
-                f"[itc4.cluster] R{this_rank} (ra={ra}, rb={rb}) "
-                f"no MPI vertices with R{nbr}; cluster empty "
-                f"(seed_etype={seed_etype})",
-                flush=True,
-            )
-            return cluster_by_et
-
-        chosen_total = 0
-        chosen_etype: str | None = None
-
-        # Core logic: for each etype (in preference order), pick the first
-        # local element whose spts_nodes contain any of the neighbour's
-        # interface vertices.
-        for et in et_scan:
-            nds = self.i.spts_nodes[et]
-            gids = self.i.eidxs[et]
-
-            if nds is None or nds.size == 0 or gids.size == 0:
-                continue
-
-            # Elements which contain any of the neighbour's interface vertices.
-            v_in = np.isin(nds, nbr_vertices, assume_unique=False)
-            sel = v_in.any(axis=1)
-
-            lids = np.nonzero(sel)[0].astype(np.int64, copy=False)
-            if lids.size == 0:
-                continue
-
-            # Pick exactly ONE element: the first in local index order
-            cluster_by_et[et] = gids[lids[0]]
-            chosen_total = 1
-            chosen_etype = et
-
-            # For seeding we only need one element from the most-preferred
-            # etype that exists on this interface; stop after we find it.
-            break
-
-        print(
-            f"[itc4.cluster] R{this_rank} (ra={ra}, rb={rb}) "
-            f"seed_etype={seed_etype} chosen_total={chosen_total} "
-            f"chosen_etype={chosen_etype} cluster={{"
-            + ", ".join(
-                f"{et}:{cluster_by_et[et].tolist()}" for et in self.etypes
-            )
-            + "}",
-            flush=True,
-        )
-
-        return cluster_by_et
+            initialise_new_comm('newcompute', list(range(len(part_ranklist))))
 
     def swap_partitions(self, r0: int, r1: int) -> None:
         """
@@ -2537,12 +2398,7 @@ class RankReallocatorMixin:
         before_all = commw.allgather(before_local)
         after_all  = commw.allgather(after_local)
 
-        if myr == root['world']:
-            print(
-                f"[mm.swap] swap_partitions r0={r0} r1={r1} "
-                f"before={before_all} after={after_all}",
-                flush=True,
-            )
+        if myr == root['world']: print(f"Swapped: {r0=} {r1=} ", flush=True)
 
         # Ownership tags in con_i have to be updated to reflect the new
         # gid->owner distribution. Do this once per rank.
@@ -2551,15 +2407,142 @@ class RankReallocatorMixin:
         # Invalidate topology-dependent caches (owners_map, nei_gid_sets, ...)
         self._invalidate_topology()
 
+    def rearrange_partitions(self) -> None:
+        """
+        Bubble all 0-element partitions to the end using repeated swap_partitions.
+
+        Policy (minimal):
+        - Pick the first i from the front with count[i] == 0
+        - Pick the last j from the back with count[j] > 0
+        - Swap i <-> j
+        - Repeat until no such i exists
+        """
+        commw  = comm["world"]
+        myr    = int(rank["world"])
+        root_w = int(root["world"])
+        nr     = int(commw.size)
+
+        while True:
+            # Everyone contributes their current local element count
+            counts = commw.allgather(int(self._local_count))
+
+            swap = None
+            if myr == root_w:
+                # Find last non-zero (ignore trailing zeros already "at the end")
+                j = nr - 1
+                while j >= 0 and counts[j] == 0:
+                    j -= 1
+
+                # Find first zero before j
+                i = 0
+                while i <= j and i < nr:
+                    if counts[i] == 0:
+                        # If i == j, it's already in the "end zone" effectively
+                        swap = (i, j) if i < j else None
+                        break
+                    i += 1
+
+                if swap is not None:
+                    print(f"[mm.rearrange] swap {swap[0]} <-> {swap[1]} counts={counts}", flush=True)
+                else:
+                    print(f"[mm.rearrange] done counts={counts}", flush=True)
+
+            # All ranks follow the same swap schedule
+            swap = commw.bcast(swap, root=root_w)
+
+            if swap is None:
+                break
+
+            self.swap_partitions(int(swap[0]), int(swap[1]))
+
+    def _to_world_targets(self, targets_comp, comp_ranks):
+        world = np.zeros(comm['world'].size, dtype=np.int64)
+        for i, wr in enumerate(map(int, comp_ranks)):
+            world[wr] = int(targets_comp[i])
+        return world
+
+    def remap_targets_by_ranklist(self, N_star_old):
+        """
+        Old compute-order targets -> WORLD-sized targets for the NEW ranklist.
+        Policy:
+        - Persisting ranks keep old mass
+        - Added ranks get mean_new = Ntot / len(new_ranks)
+        - Final int_round enforces sum == Ntot (over new_ranks only)
+        - Ranks not in new_ranks get 0 in the returned world vector
+        """
+        old_ranks = list(map(int, rankmap['compute']))
+        new_ranks = list(map(int, rankmap['newcompute']))
+
+        old_mass = dict(zip(old_ranks, map(float, N_star_old)))
+        mean_new = float(self.i.nelems_g) / float(len(new_ranks))
+
+        # Newcompute-order float masses
+        N_star_new = np.asarray([old_mass.get(wr, mean_new) for wr in new_ranks], dtype=float)
+        return self._to_world_targets(self.int_round(N_star_new), new_ranks)
+
     # ----------------- Carving partitions to look better ----------------------
 
 
 class CarverMixin:
+    """Partition “carving” and regularisation utilities: islands, outliers/inliers, and
+    interface-driven eviction/attraction.
+
+    Carving is *topology-first* improvement applied after a primary partition move:
+    - After global partitioning (SCOTCH/METIS), to remove islands and smooth seams.
+    - During rank add/remove, to evacuate or attach clusters in a controlled manner.
+    - During diffusion, as a stabiliser to reduce edge-cut and improve contiguity.
+
+    Principles
+    ----------
+    - Collective safety: carving steps must commit an (possibly empty) plan every
+      sweep so all ranks remain in lockstep.
+    - Determinism: all selection must have explicit tie-breaks (gid, rank id, etype).
+    - Locality: prefer moving elements on MPI interfaces using connectivity-derived
+      scores (faces/vertices deltas), optionally augmented by geometry (centroids).
+
+    Core capabilities (expected)
+    ----------------------------
+    1) Island detection
+       - `label_islands_faces()` (and optionally a vertex-based analogue) should label
+         connected components in the *local induced subgraph* of owned elements.
+       - Output should be stable under permutations and provide component sizes.
+
+    2) Cluster eviction primitives
+       - `remove_cluster_step(cluster_flat, budget=..., boundary_only=...)`:
+         evict a given set of elements off-rank using best neighbour heuristics.
+       - Higher-level loops (e.g. `remove_small_islands_step`) should manage budgets,
+         stall detection, and stopping criteria.
+
+    3) Outlier/Inlier operations
+       - Outliers: push “far” boundary elements to the neighbour they are most tied to.
+       - Inliers: pull boundary elements that would fit better in a neighbour core.
+       - Both should be configurable by fraction, metric (faces/vertices), and optional
+         centroid-based scoring.
+
+    4) Smoothing
+       - A “local seam optimiser” that improves interface quality without changing
+         global load targets; typically a bounded number of greedy moves.
+
+    Host-class requirements
+    -----------------------
+    The host must provide:
+    - connectivity and vertex access via `PartitionState` (`con_idx`, `con_mpi`,
+      `spts_nodes`, `centroids`),
+    - helper queries for MPI faces/vertices and per-neighbour interface lids,
+    - a collective commit gate `_apply_plan_and_commit(...)`.
+
+    Extensibility
+    -------------
+    Expose scoring as small overridable functions (or strategy objects) so carving can
+    be reused for:
+    - rank draining (evict all elements from a rank),
+    - seeding (attach a patch to a new rank),
+    - generic “make partitions look good” after any partitioner.
+
+    Long-term recommendation: evolve this into a standalone `Carver` component with a
+    minimal host interface, to avoid tight coupling with diffusion-specific methods.
     """
-        Mixin class to diffusion repartitioner only.
-        for working with carving partitions to be contiguous and good-looking.
-    """
-    
+
     def __init__(self, cfg=None):
 
         # Island stuff
@@ -2809,7 +2792,234 @@ class CarverMixin:
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
         return int(moved_local)
 
-    def remove_small_islands_step(self, *, max_move: int | None = None,
+    def add_ranks(self, targets, *, nseed: int = 1, verbose: bool = True) -> int:
+        """
+        Seed any rank with cur==0 and targets>0 by donating nseed elements.
+
+        This does *not* try to reach targets; it just ensures ranks become non-empty.
+        Your subsequent diffuse_till_convergence(targets) does the heavy lifting.
+        """
+        W = comm["world"]
+        rnk = int(rank["world"])
+        root_w = int(root["world"])
+
+        targets = np.asarray(targets, dtype=np.int64)
+        cur = np.asarray(self._cur_counts_total, dtype=np.int64)
+
+        new_ranks = [i for i in range(int(W.size)) if int(cur[i]) == 0 and int(targets[i]) > 0]
+
+        if verbose and rnk == root_w:
+            print(f"[add_ranks] cur0={cur.tolist()}", flush=True)
+            print(f"[add_ranks] tgt ={targets.tolist()}", flush=True)
+            print(f"[add_ranks] new_ranks={new_ranks}", flush=True)
+
+        # Collective-safe no-op
+        if not new_ranks:
+            self._apply_plan_and_commit({}, move_spts_nodes=True)
+            return 0
+
+        moved_local = self.seed_new_ranks(new_ranks, targets, nseed=nseed, verbose=verbose)
+        moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+
+        if verbose and rnk == root_w:
+            print(f"[add_ranks] moved_glob(seeds)={moved_glob}", flush=True)
+
+        self.diffuse_till_convergence(targets, smooth=False, max_iters=10)
+
+        return int(moved_local)
+
+    def seed_new_ranks(self, rank_ids, targets, *, nseed: int = 1, verbose: bool = True) -> int:
+        """
+        Seed each rank in rank_ids (currently empty but target>0) with nseed elements.
+
+        Output: applies relocation via _apply_plan_and_commit.
+        Deterministic and collective-safe.
+        """
+        W = comm["world"]
+        P = int(W.size)
+        rnk = int(rank["world"])
+        root_w = int(root["world"])
+
+        rank_ids = sorted({int(r) for r in rank_ids})
+        targets = np.asarray(targets, dtype=np.int64)
+        cur = np.asarray(self._cur_counts_total, dtype=np.int64)
+
+        # Per-rank preferred etype order (hardware-aware) gathered from each process itself
+        # Works even for empty ranks because they still run code and report their preference list.
+        pref_orders = W.allgather(list(self._etype_order()) if hasattr(self, "_etype_order") else [])
+
+        # Helper: pick seed etype for a given rank, sanitized to existing mesh etypes
+        mesh_etypes = list(self.i.etypes)
+        def seed_etype_for_rank(rr: int) -> str:
+            order = pref_orders[rr] or []
+            for et in order:
+                if et in mesh_etypes:
+                    return et
+            return mesh_etypes[0] if mesh_etypes else ""
+
+        # Build deterministic donor mapping
+        donor_for = {}
+        cur_work = cur.astype(np.int64, copy=True)
+
+        for nr in rank_ids:
+            d = self.donor_ranks_for_seed(nr, targets=targets, cur=cur_work)
+            donor_for[nr] = int(d)
+
+            # pessimistically decrement donor's "available" mass so multiple new ranks don't all hit the same donor
+            # (we only move nseed, but counts are in elements; this is just for donor selection stability)
+            cur_work[int(d)] = max(0, int(cur_work[int(d)] - int(nseed)))
+
+        donors = sorted(set(donor_for.values()))
+
+        if verbose and rnk == root_w:
+            print(f"[seed_new_ranks] rank_ids={rank_ids}", flush=True)
+            print(f"[seed_new_ranks] donor_for={donor_for}", flush=True)
+
+        # Build plan only on donor ranks; others keep {}.
+        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
+
+        # For each donor, broadcast which (new_rank, seed_etype) it must serve.
+        for d in donors:
+            req = None
+            if rnk == root_w:
+                req = [(nr, seed_etype_for_rank(nr)) for nr in rank_ids if donor_for[nr] == d]
+            req = W.bcast(req, root=root_w)
+
+            # Donor selects gids locally, then broadcasts chosen gids for logging consistency (optional)
+            payload = None
+            if rnk == d:
+                chosen = []
+                used = set()
+                for nr, et in req:
+                    et = str(et)
+                    gids = self.donor_seeds(et, n=nseed, used_gids=used)
+                    # gids may be empty if donor truly cannot provide; keep deterministic behavior
+                    chosen.append((int(nr), et, gids.astype(np.int64, copy=False)))
+                    for gg in gids.tolist():
+                        used.add(int(gg))
+                payload = chosen
+
+            payload = W.bcast(payload, root=d)
+
+            if rnk == d:
+                # Convert payload into eidxs_diff format: dest -> {etype -> gids}
+                for (nr, et, gids) in payload:
+                    if gids.size == 0:
+                        continue
+                    per = eidxs_diff.setdefault(int(nr), {})
+                    # Append if already exists (unlikely, but safe)
+                    if et in per:
+                        per[et] = np.concatenate([per[et], gids])
+                    else:
+                        per[et] = gids
+
+        moved_local = int(sum(len(g) for per in eidxs_diff.values() for g in per.values()))
+
+        if verbose and rnk == root_w:
+            seeded = []
+            for d in donors:
+                seeded.extend([(nr, donor_for[nr]) for nr in rank_ids if donor_for[nr] == d])
+            print(f"[seed_new_ranks] donors={donors} seeded_pairs={seeded}", flush=True)
+
+        # Collective-safe commit (even if empty on this rank)
+        self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=True)
+
+        return moved_local
+
+    def donor_ranks_for_seed(self, new_rank: int, *, targets, cur=None) -> int:
+        """
+        Pick a donor for seeding `new_rank`.
+
+        Policy (deterministic):
+        1) Among ranks with cur>0 and r!=new_rank, choose max surplus (cur-target).
+        2) If all surplus <= 0, choose rank with max cur.
+        3) Tie-break: smallest rank id.
+        """
+        W = comm["world"]
+        P = int(W.size)
+
+        new_rank = int(new_rank)
+        targets = np.asarray(targets, dtype=np.int64)
+
+        if cur is None:
+            cur = np.asarray(self._cur_counts_total, dtype=np.int64)
+        else:
+            cur = np.asarray(cur, dtype=np.int64)
+
+        candidates = [r for r in range(P) if r != new_rank and int(cur[r]) > 0]
+
+        if not candidates:
+            # Degenerate: nobody has elements; return root (caller will fail to seed anyway)
+            return int(root["world"])
+
+        surplus = {r: int(cur[r] - targets[r]) for r in candidates}
+        max_sur = max(surplus.values()) if surplus else None
+
+        if max_sur is not None and max_sur > 0:
+            best = [r for r in candidates if surplus[r] == max_sur]
+            return int(min(best))
+
+        # fallback: largest cur
+        best = sorted(candidates, key=lambda r: (-int(cur[r]), int(r)))
+        return int(best[0])
+
+    def donor_seeds(self, seed_etype: str, *, n: int = 1, used_gids=None) -> np.ndarray:
+        """
+        On the donor rank: choose up to n gids to donate.
+
+        Prefer elements of seed_etype that touch an MPI face and have high interface contact.
+        Tie-break by gid for determinism. Avoid gids in used_gids.
+        """
+        import numpy as np
+
+        n = int(n)
+        used_gids = set() if used_gids is None else used_gids
+
+        st = self.i
+        et = str(seed_etype)
+
+        # Fallback etype if donor has none of requested
+        if et not in st.etype_slices or st.etype_slices[et].stop <= st.etype_slices[et].start:
+            # pick any available etype with elements (deterministic order)
+            for et2 in st.etypes:
+                sl2 = st.etype_slices.get(et2)
+                if sl2 and sl2.stop > sl2.start:
+                    et = et2
+                    break
+
+        sl = st.etype_slices.get(et)
+        if sl is None or sl.stop <= sl.start:
+            return np.empty(0, dtype=np.int64)
+
+        # Interface-aware scoring
+        best_nbr, best_cnt, iface_mask = self._best_iface_neighbor_per_local_element()
+
+        flats = np.arange(int(sl.start), int(sl.stop), dtype=np.int64)
+        gids  = st.eidxs_flat[flats].astype(np.int64, copy=False)
+
+        # Prefer interface elements, but if none exist, allow interior
+        m_iface = iface_mask[flats]
+        cand = flats[m_iface] if np.any(m_iface) else flats
+
+        # Filter already-used gids
+        if used_gids:
+            cg = st.eidxs_flat[cand].astype(np.int64, copy=False)
+            m = np.array([int(g) not in used_gids for g in cg.tolist()], dtype=bool)
+            cand = cand[m]
+
+        if cand.size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        cgids = st.eidxs_flat[cand].astype(np.int64, copy=False)
+        ccnt  = best_cnt[cand].astype(np.int32, copy=False)
+
+        # Sort: max contact first, then gid ascending
+        order = np.lexsort((cgids, -ccnt))
+        pick = cand[order[: max(1, min(n, cand.size))]]
+
+        return st.eidxs_flat[pick].astype(np.int64, copy=False)
+
+    def remove_islands_step(self, *, max_move: int | None = None,
                                            max_sweeps: int = 50,
                                            patience: int = 1) -> None:
         W = comm["world"]
@@ -3010,40 +3220,54 @@ class CarverMixin:
 
         self._reset_j_with_i()
 
+        moved_local = 0  # ALWAYS define, ALWAYS participate in allreduce
+
         if top <= 0.0:
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
+        else:
+            self._cores = self._compute_cores_from_centroids()
+            core = np.asarray(self._cores[rnk], dtype=np.float64)
 
-        self._cores = self._compute_cores_from_centroids()
-        core = np.asarray(self._cores[rnk], dtype=np.float64)
-        if not np.all(np.isfinite(core)):
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
+            cflat, okc = self._centroids_flat()
 
-        cflat, okc = self._centroids_flat()
+            is_faces = mode.startswith(("f", "e"))  # faces/edges
+            dmax = 0 if (is_faces and require_nonpos_delta_for_faces) else None
+            iface_mask, best_nbr, best_del = self._iface_from_deltas(mode, delta_max=dmax)
 
-        is_faces = mode.startswith(("f", "e"))  # faces/edges
-        dmax = 0 if (is_faces and require_nonpos_delta_for_faces) else None
-        iface_mask, best_nbr, best_del = self._iface_from_deltas(mode, delta_max=dmax)
+            # Default: no-op commit unless we successfully pick moves
+            do_move = True
 
-        cand_flat = np.nonzero(iface_mask & okc & (best_nbr >= 0))[0].astype(np.int64, copy=False)
-        if cand_flat.size == 0:
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
+            if (not np.all(np.isfinite(core))):
+                do_move = False
+            else:
+                cand_flat = np.nonzero(iface_mask & okc & (best_nbr >= 0))[0].astype(np.int64, copy=False)
+                if cand_flat.size == 0:
+                    do_move = False
+                else:
+                    d = np.linalg.norm(cflat[cand_flat, :] - core[None, :], axis=1)
+                    mu, sig = float(d.mean()), float(d.std())
+                    z = (d - mu) / sig if sig > 0 else np.zeros_like(d)
 
-        d = np.linalg.norm(cflat[cand_flat, :] - core[None, :], axis=1)
-        mu, sig = float(d.mean()), float(d.std())
-        z = (d - mu) / sig if sig > 0 else np.zeros_like(d)
+                    score = z + float(attach_bias) * (-best_del[cand_flat].astype(np.float64))
 
-        # far-away + neighbour-tied (small/negative delta => larger bonus)
-        score = z + float(attach_bias) * (-best_del[cand_flat].astype(np.float64))
+                    chosen_flat = self._select_top_fraction(
+                        cand_flat, score, frac=top, higher_is_better=True
+                    )
 
-        chosen_flat = self._select_top_fraction(cand_flat, score, frac=top, higher_is_better=True)
-        moved_local = self._move_by_best_rank(chosen_flat, best_nbr, move_spts_nodes=move_spts_nodes)
+                    if chosen_flat.size == 0:
+                        do_move = False
+                    else:
+                        moved_local = self._move_by_best_rank(
+                            chosen_flat, best_nbr, move_spts_nodes=move_spts_nodes
+                        )
+
+            if not do_move:
+                self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
 
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
         if verbose and rnk == root_w:
-            print(f"[rmoutliers] mode={mode} top={top} cand={int(cand_flat.size)} moved_glob={moved_glob}", flush=True)
+            # cand size may be undefined if we never built it; keep log minimal/robust
+            print(f"[rmoutliers] mode={mode} top={top} moved_glob={moved_glob}", flush=True)
 
         return int(moved_local)
 
@@ -3138,214 +3362,163 @@ class CarverMixin:
 
         self._reset_j_with_i()
 
+        moved_local = 0
+
         if top <= 0.0:
             self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
+        else:
+            self._cores = self._compute_cores_from_centroids()
+            cores = np.asarray(self._cores, dtype=np.float64)
+            cflat, okc = self._centroids_flat()
 
-        self._cores = self._compute_cores_from_centroids()
-        cores = np.asarray(self._cores, dtype=np.float64)
-        if cores.ndim != 2:
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
+            do_move = True
+            if cores.ndim != 2:
+                do_move = False
+            else:
+                core_self = cores[rnk]
+                if not np.all(np.isfinite(core_self)):
+                    do_move = False
+                else:
+                    iface_mask, best_dest, best_dist, _best_delta = self._best_dest_by_core_from_deltas(
+                        mode, cores=cores, cflat=cflat, okc=okc, delta_max=None
+                    )
 
-        core_self = cores[rnk]
-        if not np.all(np.isfinite(core_self)):
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
+                    cand_flat = np.nonzero(iface_mask & okc & (best_dest >= 0))[0].astype(np.int64, copy=False)
+                    if cand_flat.size == 0:
+                        do_move = False
+                    else:
+                        c      = cflat[cand_flat, :]
+                        d_self = np.linalg.norm(c - core_self[None, :], axis=1)
+                        d_dest = best_dist[cand_flat]
+                        score  = d_self - d_dest  # >0 means improvement
 
-        cflat, okc = self._centroids_flat()
+                        m = score > float(margin)
+                        cand2 = cand_flat[m]
+                        if cand2.size == 0:
+                            do_move = False
+                        else:
+                            chosen_flat = self._select_top_fraction(
+                                cand2, score[m], frac=top, higher_is_better=True
+                            )
 
-        # Typically you do NOT delta-gate inliers, but you now can if desired:
-        iface_mask, best_dest, best_dist, _best_delta = self._best_dest_by_core_from_deltas(
-            mode, cores=cores, cflat=cflat, okc=okc, delta_max=None
-        )
+                            if chosen_flat.size == 0:
+                                do_move = False
+                            else:
+                                moved_local = self._move_by_best_rank(
+                                    chosen_flat, best_dest, move_spts_nodes=move_spts_nodes
+                                )
 
-        cand_flat = np.nonzero(iface_mask & okc & (best_dest >= 0))[0].astype(np.int64, copy=False)
-        if cand_flat.size == 0:
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
-
-        c      = cflat[cand_flat, :]
-        d_self = np.linalg.norm(c - core_self[None, :], axis=1)
-        d_dest = best_dist[cand_flat]
-        score  = d_self - d_dest  # >0 means improvement
-
-        m = score > float(margin)
-        cand2 = cand_flat[m]
-        if cand2.size == 0:
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
-            return 0
-
-        chosen_flat = self._select_top_fraction(cand2, score[m], frac=top, higher_is_better=True)
-        moved_local = self._move_by_best_rank(chosen_flat, best_dest, move_spts_nodes=move_spts_nodes)
+            if not do_move:
+                self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
 
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
         if verbose and rnk == root_w:
-            print(f"[addinliers] mode={mode} top={top} cand={int(cand2.size)} moved_glob={moved_glob}", flush=True)
+            print(f"[addinliers] mode={mode} top={top} moved_glob={moved_glob}", flush=True)
 
         return int(moved_local)
 
 
 class OfflineRepartitioner(_MetaMesh):
+    """Base wrapper that provides mesh/partition *construction* services common to all
+    partitioners (diffusion, SCOTCH, METIS, ...).
+
+    This class should stay small: it is the bridge between a PyFR mesh object and
+    the online partition representation (`_MetaMesh` + `PartitionState`).  It should
+    avoid policy decisions.
+
+    Responsibilities
+    ---------------
+    - Construct initial `PartitionState` from a PyFR mesh (or from vparts), including
+      global id conventions and connectivity arrays.
+    - Provide utilities needed by *all* partitioners:
+        * etype ordering, global counts/offsets,
+        * global gid <-> (etype,lid) conventions,
+        * basic validation and logging.
+    - Provide target computation (`calc_target_ecounts`) *only if* it is a pure
+      transformation of telemetry inputs; otherwise delegate to a cost-model mixin.
+
+    Public API (expected)
+    ---------------------
+    - `restart()` / `_reset_j_with_i()` to return to a clean staging state.
+    - `calc_target_ecounts(current_counts, telemetry...) -> targets`
+    - `to_mesh(eidxs)` / `from_mesh(mesh)` (possibly inherited from `_MetaMesh`).
+
+    Extensibility / inheritance
+    ---------------------------
+    If additional partitioners require extra data (graph caches, weights), attach it
+    in subclasses (e.g. OnlineSCOTCHPartitioner) but keep this base free of solver-
+    specific concerns.
     """
-        Does not use config file at all.
-    """
+
 
     def __init__(self, mesh, cfg=None):
         _MetaMesh.__init__(self, mesh, cfg)
 
-    def calc_target_ecounts(self, ecurrs, g1a=None, g1s=None, g1r=None):
+    def _to_world_targets(self, targets_comp, comp_ranks):
+        return targets_comp
+
+    def calc_target(self, weights):
         """
-        Builds target element counts.
-        If g1* are provided: use wait-split inferred costs.
-        If g1* are None: use uniform targets (mean of ecurrs over old compute ranks).
-
-        Returns integer per-rank targets in *world index space* (len = world size),
-        with 0 for ranks not in rankmap['newcompute'].
+            OfflineRepartitioner: 
+            compute target element counts for each rank 
+            using the current element counts and optional weights.
         """
-        if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
+        Ntot = self.i.nelems_g
+        targets_unscaled = weights * (Ntot / weights.sum())
+        targets_comp = self.int_round(targets_unscaled)      # length = len(rankmap['compute'])
+        return self._to_world_targets(targets_comp, rankmap['compute'])
 
-            # rankmap_old is a list of world ranks in old compute order
-            ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
-            Ntot = int(ecurrs_old.sum())
+class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRepartitioner):
+    """Online partitioning orchestrator that bridges:
+    - performance telemetry -> targets,
+    - partition decision (diffusion or global partitioner) -> ownership plan,
+    - ownership plan -> committed partition state.
 
-            if Ntot < 0:
-                raise RuntimeError("[get_target] negative Ntot (ecurrs invalid)")
+    This class is intended to be a thin façade used by the time integrator/controller.
+    It should *not* be a monolith: the cost model, rank reallocation policy, carving,
+    and the core mutation engine should be separable components.
 
-            have_g1 = (g1a is not None) and (g1s is not None) and (g1r is not None)
+    Responsibilities
+    ---------------
+    - Expose high-level operations needed by the controller:
+        * `calc_target_ecounts(...)` (telemetry -> targets)
+        * `apply_global_partition(vparts, ...)` (global partition -> new local state)
+        * optional `partition_scotch/partition_metis/...` wrappers producing vparts
+    - Maintain configuration handles relevant to online runs:
+        * `online_cfg` (desired ranklists), device lists/tags, tuning knobs.
+    - Provide low-level integrity operations:
+        * retagging `con_mpi` owners consistent with a `vparts` decision,
+          without O(global) maps when possible.
 
-            if have_g1:
-                def compute_cost(g1a, g1s, g1r):
-                    g1a_old = np.asarray(g1a, dtype=float)
-                    g1s_old = np.asarray(g1s, dtype=float)
-                    g1r_old = np.asarray(g1r, dtype=float)
+    Expected public surface
+    -----------------------
+    - `online_cfg` and helper to read `compute-ranklist` changes.
+    - `apply_global_partition(vparts, move_spts_nodes=True)` returning the per-rank
+      `eidxs_dest` (useful for diagnostics and interconnector construction).
+    - Diagnostics hooks for the controller: per-rank mismatch counts, bytes moved.
 
-                    s_out = g1s_old.sum(axis=1)
-                    r_in  = g1r_old.sum(axis=1)
-                    r_out = g1r_old.sum(axis=0)
+    Inheritance note
+    ----------------
+    Current multiple inheritance (`OnlinePartitioner` + diffusion/carver/reallocator)
+    creates a diamond with `_MetaMesh` and requires *explicit* initialisation.  A
+    cleaner target architecture is composition:
 
-                    return (g1a_old - r_in  * self.lb_cost_scale_g1r
-                                    - s_out * self.lb_cost_scale_g1s
-                                    + r_out * self.lb_cost_scale_g1rt)
+        OnlinePartitioner(
+            executor=_MetaMesh(...),
+            model=WaitsToTargetsModel(...),
+            reallocator=RankReallocator(...),
+            carver=Carver(...),
+        )
 
-                cost_old = compute_cost(g1a, g1s, g1r)
-
-                # Snapshot medians to CSV
-                self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
-
-                inv_cost = ecurrs_old / cost_old
-                s = float(np.sum(inv_cost))
-
-                if (not np.isfinite(s)) or s <= 0.0:
-                    raise RuntimeError(f"[get_target] inv_cost sum invalid: {s}")
-
-                N_star_old = Ntot * (inv_cost / s)
-
-            else:
-                # Offline/uniform: mean of ecurrs on old compute ranks
-                Pold = int(comm['compute'].size)
-                if Pold <= 0:
-                    raise RuntimeError("[get_target] compute size <= 0")
-
-                N_star_old = np.full(Pold, float(Ntot) / float(Pold), dtype=float)
-
-#            # --- Remap N_star_old from old->new using device groups (world space) ---
-#            if list(rankmap['compute']) != list(rankmap['newcompute']):
-#                N_star_new = self.remap_targets_by_ranklist(
-#                    N_star_old,
-#                    old_ranks=rankmap['compute'],
-#                    new_ranks=rankmap['newcompute'],
-#                    devices=self.devices,
-#                    tag="[lb-group]",
-#                )
-#            else:
-#                N_star_new = N_star_old.copy()
-
-#             pulse_idx = self._lb_next_cyclic_pulse_index(comm['newcompute'], root['newcompute'])
-#             N_star_new = self._lb_apply_single_rank_weight_bump(
-#                 N_star_new, pulse_idx, self._cyclic_jitter_fraction
-#             )
-
-#             if comm['newcompute'] != mpi.COMM_NULL and int(rank['newcompute']) == root['newcompute']:
-#                 print(f"[lb-jitter] {self._cyclic_jitter_fraction = } {pulse_idx = }", flush=True)
-
-            # --- Normalise and round to integer targets in newcompute order ---
-            N_int = self.normalise_and_round_targets(N_star_old, Ntot=Ntot, tag="[lb-round]")
-
-            #if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
-            #    print(f"[load-balance] N_int={N_int} (sum={int(N_int.sum())})")
-
-            targets_new = N_int.tolist()
-
-        else:
-            targets_new = None
-
-        # Broadcast to all world ranks so everyone agrees (root assumed world root)
-        targets_new = comm['world'].bcast(targets_new)
-
-        # Extend targets to world size using rankmap['newcompute'] (world ranks in newcompute order)
-        #targets_wr = [
-        #    targets_new[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
-        #    for i in range(comm['world'].size)
-        #]
-
-        return targets_new
-
-    
-    def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):
-        """
-        Rescale continuous targets N_star to sum to Ntot and round to integers.
-
-        Parameters
-        ----------
-        N_star : array-like of float
-            Continuous targets (new compute order).
-        Ntot : int
-            Total element count to preserve.
-        tag : str
-            Log prefix.
-
-        Returns
-        -------
-        np.ndarray of int
-            Integer targets summing to Ntot.
-        """
-        N_star = np.asarray(N_star, dtype=float)
-        sum_star = float(N_star.sum())
-
-        if sum_star <= 0.0:
-            raise ValueError(f"{tag} sum(N_star) <= 0 (got {sum_star})")
-
-        scale = float(Ntot) / sum_star
-        N_scaled = N_star * scale
-        N_floor = np.floor(N_scaled).astype(np.int64)
-
-        k = int(Ntot - N_floor.sum())
-
-        if k != 0:
-            frac = N_scaled - N_floor
-            order = np.argsort(frac)  # ascending
-
-            if k > 0:
-                idxs = order[-k:]   # bump largest fractions
-                N_floor[idxs] += 1
-            else:
-                idxs = order[:-k]   # k < 0 → drop smallest fractions
-                N_floor[idxs] -= 1
-
-        return N_floor
-
-
-class OnlinePartitioner(RankReallocatorMixin, WaitsToTargetsModelMixin, OfflineRepartitioner):
+    The docstrings in this file should be used as the refactoring contract.
     """
-        Wrapper around existing offline partitioners available in PyFR.
-    """
+
 
     def __init__(self, mesh, cfg):
         # Everything related to costs
         OfflineRepartitioner.__init__(self, mesh, cfg)
         WaitsToTargetsModelMixin.__init__(self, cfg)
-        RankReallocatorMixin.__init__(self, cfg)
+        RankAllocatorMixin.__init__(self, cfg)
 
     def _retag_con_owners_from_vparts(self, vparts):
         """
@@ -3455,12 +3628,50 @@ class OnlinePartitioner(RankReallocatorMixin, WaitsToTargetsModelMixin, OfflineR
 
         return eidxs_dest
 
+    def calc_target(self, g1a, g1s, g1r):
+        """
+            OnlinePartitioner
+            Uses parent class methods to get target distribution.
+        """
+        cost_old = execute['compute'](lambda: self.compute_cost(g1a, g1s, g1r), None)
+
+        if cost_old is not None:
+            target_int = super().calc_target(1/np.array(cost_old))
+        else:   
+            target_int = None
+
+        target_int = comm['world'].bcast(target_int)
+
+        return self.remap_targets_by_ranklist(target_int)
 
 class OnlineSCOTCHPartitioner(OnlinePartitioner):
+    """SCOTCH-backed global partitioner adapted for the online partition representation.
+
+    This class is responsible for producing a global partition vector `vparts` using
+    (PT-)SCOTCH and for exposing it in a form that `OnlinePartitioner.apply_global_partition`
+    can realise.
+
+    Responsibilities
+    ---------------
+    - Build and cache a SCOTCH graph consistent with PyFR's element ordering.
+    - Support optional vertex/edge weights derived from:
+        * device speeds,
+        * etype weights or preferences,
+        * communication costs (if encoded as edge weights).
+    - Sanitize and copy SCOTCH data structures safely (SCOTCH can be strict about
+      adjacency symmetry and indexing).
+    - Provide `partition(...) -> vparts` with a clear contract:
+        * input targets/weights,
+        * determinism controls (seed),
+        * imbalance tolerance (ufactor).
+
+    Separation of concerns
+    ----------------------
+    - This class should *not* perform online rank add/remove logic or carving; it
+      should only compute partitions.  Rank set management belongs in
+      `RankReallocatorMixin` and controller orchestration.
     """
-        Make generic to latch on to any existing partitioner
-    
-    """
+
 
     def __init__(self, mesh, cfg):
         super().__init__(mesh, cfg)

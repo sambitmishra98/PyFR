@@ -76,17 +76,17 @@ def construct_by_diffusion(mesh, part_wts, progress=NullProgressSequence):
     with progress.start('Initialise relocator'):
         mmesh = DiffusionRepartitioner.from_mesh(mesh)
         mmesh.i.info()
-        target_counts = mmesh.calc_target_ecounts(pw)
+        target = mmesh.calc_target(pw)
 
         if rank['compute'] == root['compute']:
-            print(f"{target_counts = }", flush=True)
+            print(f"{target = }", flush=True)
 
     with progress.start('Remove islands'):
         mmesh.remove_islands_till_convergence()
 
     with progress.start('Diffuse elements'):
         mmesh.i.info()
-        mmesh.diffuse_till_convergence(target_counts, max_iters=100)
+        mmesh.diffuse_till_convergence(target, max_iters=100)
 
     with progress.start('Create relocated mesh'):
         mesh = mmesh.to_mesh(mmesh.i.eidxs)
