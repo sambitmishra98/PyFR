@@ -2880,10 +2880,10 @@ class CarverMixin:
                 break
 
         # Optional one-shot summary (cheap)
-        stats_local = (nloc, nis, nrm, int(cluster_gids.size))
+        stats_local = (nis, int(cluster_gids.size))
         stats_all   = W.allgather(stats_local)
         if rnk == root_w:
-            print(f"[rmislands.aggr] done stats={stats_all}", flush=True)
+            print(f"[rmislands.aggr] DONE {stats_all}", flush=True)
 
 
         # Return remaining islands, nrm
@@ -3194,78 +3194,27 @@ class OfflineRepartitioner(_MetaMesh):
     def __init__(self, mesh, cfg=None):
         _MetaMesh.__init__(self, mesh, cfg)
 
-    def calc_target_ecounts(self, ecounts_ratio, g1a=None, g1s=None, g1r=None):
+    def calc_target_ecounts(self, ecurrs, g1a=None, g1s=None, g1r=None):
         """
-        Builds target element counts using MPI wait-split data.
-        Returns integer per-rank targets in *newcompute* comm
-            (world-rank list from rankmap_new).
+        Builds target element counts.
+        If g1* are provided: use wait-split inferred costs.
+        If g1* are None: use uniform targets (mean of ecurrs over old compute ranks).
+
+        Returns integer per-rank targets in *world index space* (len = world size),
+        with 0 for ranks not in rankmap['newcompute'].
         """
-        # --- Rankmaps for old and new compute comms ---
-        # New compute: communicator built from online.ini compute-ranklist
-
-        def _expand_ratio(ratio, nparts: int) -> np.ndarray:
-                """Return float weights of length nparts."""
-                if ratio is None:
-                    w = np.ones(nparts, dtype=float)
-                    return w
-
-                # String forms like "1*4:2*4:3*4" or "1:2:3"
-                if isinstance(ratio, str):
-                    w = []
-                    for tok in ratio.split(':'):
-                        tok = tok.strip()
-                        if not tok:
-                            continue
-                        if '*' in tok:
-                            a, b = tok.split('*', 1)
-                            a = float(a.strip())
-                            b = int(b.strip())
-                            w.extend([a] * b)
-                        else:
-                            w.append(float(tok))
-                    w = np.asarray(w, dtype=float)
-                else:
-                    w = np.asarray(ratio, dtype=float).ravel()
-
-                if w.size == 1:
-                    w = np.full(nparts, float(w[0]), dtype=float)
-
-                if w.size != nparts:
-                    raise RuntimeError(
-                        f"[get_target] ecounts_ratio expands to {w.size} weights, "
-                        f"but compute comm has {nparts} ranks"
-                    )
-
-                if not np.all(np.isfinite(w)):
-                    raise RuntimeError("[get_target] ecounts_ratio contains non-finite values")
-
-                if np.all(w == 0):
-                    raise RuntimeError("[get_target] ecounts_ratio is all zeros (no feasible targets)")
-
-                return w
-
-        # Gather current element counts per compute-rank
-        if comm['compute'] != mpi.COMM_NULL:
-            ecurrs_old_per_rank = int(self.i.nelems)
-            ecurrs_old = comm['compute'].gather(ecurrs_old_per_rank, root=root['compute'])
-        else:
-            ecurrs_old = None
-
         if comm['compute'] != mpi.COMM_NULL and rank['compute'] == root['compute']:
 
-            #ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
-            # Get from mmesh
-            ecurrs_old = np.asarray(ecurrs_old, dtype=np.int64)
-            Ntot = self.i.nelems_g
-            
-            if_online = g1a is not None
-             # Expand ratio into per-rank weights (compute-rank order)
-            w_ratio = _expand_ratio(ecounts_ratio, nparts=comm['compute'].size)
+            # rankmap_old is a list of world ranks in old compute order
+            ecurrs_old = np.asarray([ecurrs[wr] for wr in rankmap['compute']], dtype=np.int64)
+            Ntot = int(ecurrs_old.sum())
 
+            if Ntot < 0:
+                raise RuntimeError("[get_target] negative Ntot (ecurrs invalid)")
 
-            if if_online:
-                self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
+            have_g1 = (g1a is not None) and (g1s is not None) and (g1r is not None)
 
+            if have_g1:
                 def compute_cost(g1a, g1s, g1r):
                     g1a_old = np.asarray(g1a, dtype=float)
                     g1s_old = np.asarray(g1s, dtype=float)
@@ -3280,60 +3229,69 @@ class OfflineRepartitioner(_MetaMesh):
                                     + r_out * self.lb_cost_scale_g1rt)
 
                 cost_old = compute_cost(g1a, g1s, g1r)
-                # Online: inferred inv_cost times offline ratio prior
-                inv_cost = (ecurrs_old / cost_old) * w_ratio 
- 
+
+                # Snapshot medians to CSV
+                self.write_g1_median_csvs(g1a, g1s, g1r, g1idx=1)
+
+                inv_cost = ecurrs_old / cost_old
+                s = float(np.sum(inv_cost))
+
+                if (not np.isfinite(s)) or s <= 0.0:
+                    raise RuntimeError(f"[get_target] inv_cost sum invalid: {s}")
+
+                N_star_old = Ntot * (inv_cost / s)
+
             else:
-                inv_cost = w_ratio.astype(float, copy=False)
+                # Offline/uniform: mean of ecurrs on old compute ranks
+                Pold = int(comm['compute'].size)
+                if Pold <= 0:
+                    raise RuntimeError("[get_target] compute size <= 0")
 
-            # MOVE TO RANK REALLOCATOR MIXIN
+                N_star_old = np.full(Pold, float(Ntot) / float(Pold), dtype=float)
 
-            #if list(rankmap['compute']) != list(rankmap['newcompute']):
-            #    N_star_new = self.remap_targets_by_ranklist(N_star_old,
-            #        old_ranks=rankmap['compute'], new_ranks=rankmap['newcompute'],
-            #        devices=self.devices, tag="[lb-group]")
-            #else:
-            #    N_star_new = N_star_old.copy()
+#            # --- Remap N_star_old from old->new using device groups (world space) ---
+#            if list(rankmap['compute']) != list(rankmap['newcompute']):
+#                N_star_new = self.remap_targets_by_ranklist(
+#                    N_star_old,
+#                    old_ranks=rankmap['compute'],
+#                    new_ranks=rankmap['newcompute'],
+#                    devices=self.devices,
+#                    tag="[lb-group]",
+#                )
+#            else:
+#                N_star_new = N_star_old.copy()
 
-            # MOVE TO SOME OTHER MIXIN?
-            #if self._cyclic_jitter_fraction > 0.0:
-            #    pulse_idx = self._lb_next_cyclic_pulse_index(comm['newcompute'], root['newcompute'])
-            #    N_star_new = self._lb_apply_single_rank_weight_bump(N_star_new, pulse_idx, 
-            #                                            self._cyclic_jitter_fraction)
+#             pulse_idx = self._lb_next_cyclic_pulse_index(comm['newcompute'], root['newcompute'])
+#             N_star_new = self._lb_apply_single_rank_weight_bump(
+#                 N_star_new, pulse_idx, self._cyclic_jitter_fraction
+#             )
 
+#             if comm['newcompute'] != mpi.COMM_NULL and int(rank['newcompute']) == root['newcompute']:
+#                 print(f"[lb-jitter] {self._cyclic_jitter_fraction = } {pulse_idx = }", flush=True)
 
-            s = float(inv_cost.sum())
-            if s <= 0 or not np.isfinite(s):
-                raise RuntimeError("[get_target] inv_cost sum is non-positive or non-finite")
+            # --- Normalise and round to integer targets in newcompute order ---
+            N_int = self.normalise_and_round_targets(N_star_old, Ntot=Ntot, tag="[lb-round]")
 
-            N_star_old = Ntot * (inv_cost / s)
+            #if comm['newcompute'] != mpi.COMM_NULL and rank['newcompute'] == root['newcompute']:
+            #    print(f"[load-balance] N_int={N_int} (sum={int(N_int.sum())})")
 
-            N_int = self.normalise_and_round_targets(N_star_old, Ntot=Ntot, tag="[lb-round]",)
-
-            targets = N_int.tolist()
+            targets_new = N_int.tolist()
 
         else:
-            targets = None
+            targets_new = None
 
-        # Broadcast to all world ranks so everyone agrees
-        targets     = comm['world'].bcast(targets)
+        # Broadcast to all world ranks so everyone agrees (root assumed world root)
+        targets_new = comm['world'].bcast(targets_new)
 
-        # Extend targets to world size using rankmap['newcompute']
-
-
-        # MOVE TO RANK REALLOCATOR MIXIN
-        #targets = [
-        #    targets[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
+        # Extend targets to world size using rankmap['newcompute'] (world ranks in newcompute order)
+        #targets_wr = [
+        #    targets_new[rankmap['newcompute'].index(i)] if i in rankmap['newcompute'] else 0
         #    for i in range(comm['world'].size)
         #]
 
-        #if rank['world'] == root['world']:
-        #    print(f"{ecurrs  = }")
-        #    print(f"{targets = }")
-        # 
+        return targets_new
 
-        return targets
-
+    
     def normalise_and_round_targets(self, N_star, Ntot, tag="[lb-round]"):
         """
         Rescale continuous targets N_star to sum to Ntot and round to integers.

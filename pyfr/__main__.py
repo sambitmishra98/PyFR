@@ -986,7 +986,11 @@ def _process_common(args, soln, cfg):
 
     # Optional: if you want your original “clean up random” passes
     if startup_from_one:
-        target_counts = mmesh.calc_target_ecounts([1] * comm['compute'].size)
+        ne_loc = int(mmesh.i.nelems)
+        ecurrs_wr = comm['world'].allgather(ne_loc)   # length = comm['world'].size
+
+        # Offline / uniform targets (since g1* not provided)
+        target_counts = mmesh.calc_target_ecounts(ecurrs_wr, g1a=None, g1s=None, g1r=None)
 
         mmesh.i.info()
         mmesh.remove_islands_till_convergence()

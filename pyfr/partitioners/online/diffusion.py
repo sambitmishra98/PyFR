@@ -1084,18 +1084,30 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.diffuse_smoothing2(M0, threshold=thr, scale=flowmat_relax, score_by=score_by)
             self.smooth_until_stagnates(move_spts_nodes=True)
 
-    def diffuse_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, max_iters: int = 1):
-        for it in range(int(max_iters)):
+    def diffuse_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
+                                 max_iters: int = 1):
+        if rank["world"] == root['world']:
+            print(f"TARGET: {target_counts}")
+
+        iters = 0
+
+        while True:
+            if max_iters != -1 and iters >= max_iters:  
+                break   
+            iters += 1
+
+            cur0 = self._cur_counts_total
+            if rank["world"] == root['world']:
+                print(f"CURRENT: {cur0}")     
+
             self.iterate(target_counts, flowmat_relax=flowmat_relax)
 
-    def diffuse(
-        self,
-        *,
-        mode: str = "faces",
-        threshold: float = 0.0,
-        flow_matrix,
-        move_spts_nodes: bool = False,
-    ):
+            cur1 = self._cur_counts_total
+            if cur1 == cur0:
+                break
+
+    def diffuse(self, *, mode: str = "faces", threshold: float = 0.0,
+        flow_matrix, move_spts_nodes: bool = False):
         import numpy as np
 
         W   = comm["world"]
@@ -1198,6 +1210,9 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
             cur0 = self._cur_counts_total
             nrms = self.remove_small_islands_step()
+            #self.remove_outliers()
+            #self.add_inliers()
+
             self.smooth_until_stagnates(move_spts_nodes=True)
             #if not any(nrms[i] > 1.0 for i in range(comm['world'].size) if targets[i] > 0):
             #    break
