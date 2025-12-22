@@ -30,7 +30,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         * `smooth(...)` and `smooth_until_stagnates(...)` improve interface quality
           after a diffusion move without significantly affecting global counts.
     - Convergence drivers:
-        * `iterate(...)`, `diffuse_till_convergence(...)` orchestrate repeated passes.
+        * `iterate(...)`, `iterate_till_convergence(...)` orchestrate repeated passes.
 
     Contractual requirements
     ------------------------
@@ -1066,8 +1066,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if stop_all:
                 break
 
-    def diffuse_smoothing2(self, flow_matrix, *, threshold: float = 0.0,
-                                 scale: float = 0.5, score_by: str = "vertex",):
+    def diffuse_step(self, flow_matrix, threshold, scale, score_by):
 
         M = np.asarray(flow_matrix, dtype=np.int64)
 
@@ -1088,26 +1087,14 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return moved_glob, eidxs_diff
 
-    def iterate(self, target_counts: List[int], *, flowmat_relax: float = 0.5,
-                smooth=True) -> list[int]:
-        """
-        Debug controller (kept intentionally):
-        - for now executes ONE pass: (thr=6, score_by='vertex')
-        - prints key state for LEGACY parity debugging.
-        """
-        # Force the next debug step: one vertex-based iteration with thr=6
-        exec_order =(  [(6.0, "vertex")]
-                     #+ [(2.0, "face")]
-                     + [(0.0, "face")] * comm["world"].size
-                    )
-        # TEST WITH/WITHOUT ABOVE FACE MOVEMENTS !!!! 
-        # NO FACE MOVEMENTS GIVES BETTER ANSWER!!!!
+    def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
+        exec_order =(  [(6.0, "vertex")] #+ [(2.0, "face")]
+                     + [(0.0, "face")] * comm["world"].size)
 
         for thr, score_by in exec_order:
             M0 = self.element_flow_plan(target_counts)
-            self.diffuse_smoothing2(M0, threshold=thr, scale=flowmat_relax, score_by=score_by)
-            if smooth==True:
-                self.smooth_until_stagnates(move_spts_nodes=True)
+            self.diffuse_step(M0, thr, flowmat_relax, score_by)
+            if smooth==True: self.smooth_until_stagnates(move_spts_nodes=True)
 
     def diffuse(self, *, mode: str = "faces", threshold: float = 0.0,
         flow_matrix, move_spts_nodes: bool = False):
@@ -1202,10 +1189,10 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
         return moved_local, flow_used, eidxs_diff
 
-    def diffuse_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
+    def iterate_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
                                  max_iters: int = 1, smooth: bool = True):
-        if rank["world"] == root['world']:
-            print(f"TARGET: {target_counts}")
+
+        if rank["world"] == root['world']: print(f"TARGET: {target_counts}")
 
         iters = 0
 
@@ -1215,8 +1202,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             iters += 1
 
             cur0 = self._cur_counts_total
-            if rank["world"] == root['world']:
-                print(f"CURRENT: {cur0}")     
+            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
 
             self.iterate(target_counts, flowmat_relax=flowmat_relax, smooth=smooth)
 
@@ -1287,7 +1273,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.add_ranks(base_counts)
             self.add_inliers()
             #self.smooth_until_stagnates(move_spts_nodes=True)
-            self.diffuse_till_convergence(base_counts, flowmat_relax=0.5, 
+            self.iterate_till_convergence(base_counts, flowmat_relax=0.5, 
                                           max_iters=comm['world'].size, smooth=True)
 
             cur1 = self._cur_counts_total
@@ -1314,7 +1300,7 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
         * `calc_target_ecounts(...)`
         * rank add/remove primitives (`seed_rank`, `swap_partitions`, draining hooks)
         * carving (`remove_islands_*`, `remove_outliers`, `add_inliers`)
-        * diffusion refinement (`diffuse_till_convergence`, `smooth_*`)
+        * diffusion refinement (`iterate_till_convergence`, `smooth_*`)
         * export to PyFR mesh (`to_mesh(...)`)
     - Expose a *minimal*, stable surface area to the integrator, hiding internal
       caches and staging state.

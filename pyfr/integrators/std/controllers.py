@@ -1,13 +1,9 @@
 import math
-import gc
 
-from time import perf_counter_ns
 import numpy as np
 
 from pyfr.integrators.std.base import BaseStdIntegrator
-from pyfr.mpiutil import (mpi, initialise_new_comm, 
-                          comm, rank, root, rankmap, execute,
-                          promote_comm)
+from pyfr.mpiutil import (mpi, comm, execute)
 
 class BaseStdController(BaseStdIntegrator):
     def __init__(self, *args, **kwargs):
@@ -25,16 +21,6 @@ class BaseStdController(BaseStdIntegrator):
         # Fire off any event handlers if not restarting
         if not self.isrestart:
             self._run_plugins()
-
-        # Global union of etypes (keeps header complete)
-        ets_local = tuple(self.meshes['compute'].eidxs.keys())
-        etypes = sorted({et for ets in comm['world'].allgather(ets_local) for et in ets})
-        self._lb_etypes = etypes  # cache for rows
-
-        if rank['world'] == root['world']:
-            with open('lb_walltimes.csv', 'a') as f:
-                f.write('tcurr,others,iterate,reinit\n')
-                self.wallt_end = perf_counter_ns()
 
     def _accept_step(self, dt, idxcurr, err=None):
         self.tcurr += dt
@@ -65,104 +51,6 @@ class BaseStdController(BaseStdIntegrator):
         self.stepinfo.append((dt, 'reject', err))
 
         self._idxcurr = idxold
-
-    def load_balance(self):
-        # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
-        if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
-            if rank['world'] == root['world']: print('Switching, nacptsteps = ', self.nacptsteps)
-            wallt_start = perf_counter_ns()
-
-            mmesh = self.mmesh ; mmesh.restart()            
-            mmesh.i.info() ; mmesh.i.info_to_csv(tcurr=self.tcurr)
-
-            mmesh.recheck_online_file()
-
-            # Element counts per world rank
-            targets = mmesh.calc_target(*self.get_median_matrices())
-
-            mmesh.drain_till_convergence(targets)
-            mmesh.add_ranks(targets)
-            # If islands exist, then remove them
-            mmesh.remove_islands_till_convergence(target=targets)
-
-            
-            mmesh.diffuse_till_convergence(targets)
-
-            mmesh.rearrange_partitions()
-            mmesh.i.info()
-            
-            wallt_iterate = perf_counter_ns() - wallt_start
-
-            initialise_new_comm('newcompute', list(range(len(rankmap['newcompute']))))
-            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
-            promote_comm('newcompute', 'compute')
-
-            self.reinit_backend_and_system(self.meshes['compute'], soln)
-            wallt_reinit = perf_counter_ns() - wallt_start - wallt_iterate
-
-            # Write wall times
-            if rank['world'] == root['world']:
-                with open('lb_walltimes.csv', 'a') as f:
-                    f.write(f"{self.tcurr:.6f},"
-                            f"{(wallt_start - self.wallt_end)/1e9},"
-                            f"{wallt_iterate/1e9},{wallt_reinit/1e9}\n")
-
-            self.wallt_end = perf_counter_ns()
-
-    def reinit_mesh_soln(self, mesh, soln):
-        # New mesh lives under the 'newcompute' logical name while we migrate.
-        self.meshes['newcompute'] = mesh
-
-        # Build interconnector from old compute layout -> newcompute layout
-        self._newcompute_intercon = self.initialise_interconnector('compute', 'newcompute')
-        soln = self.relocate_ary(self._newcompute_intercon, soln,
-                                 edim=2, src_name='compute', dst_name='newcompute')
-
-        # Drop old compute mesh and plugin interconnector
-        del self.meshes['compute']
-        del self._plugins_intercon
-
-        # Promote newcompute mesh to be the canonical compute mesh
-        self.meshes['compute'] = self.meshes['newcompute']
-        # Optionally drop the extra key to avoid confusion
-        # del self.meshes['newcompute']
-
-        return soln
-
-    def reinit_backend_and_system(self, mesh, soln):
-        self._invalidate_caches()
-
-        del self.system
-
-        for attr in dir(self):
-           if attr.startswith('_memoize_cache@'):
-               delattr(self, attr) 
-
-        gc.collect()
-
-        comm['world'].barrier()
-
-        self.system = self._systemcls(self.backend, mesh, soln, 
-                                      nregs=self.nregs, cfg=self.cfg)
-
-        self.copy_to_empty_system()
-
-        self._idxcurr = 0
-
-        # Re-initialise plugin comm and interconnector
-        self.initialise_comm_and_partition(goal='plugins')
-        self._plugins_intercon = self.initialise_interconnector('compute', 'plugins')
-
-        self.plugins = self._reget_plugins()
-
-        #if comm['compute'] != mpi.COMM_NULL:
-        #    self.system.commit()
-        #    self.system.preproc(self.tcurr, self._idxcurr)
-
-        execute['compute'](lambda: self.system.commit())
-        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
-
-        comm['world'].barrier()
 
 
 class StdNoneController(BaseStdController):
@@ -317,4 +205,5 @@ class StdPIController(BaseStdController):
 
             # Compute the next time step
             self.dt_fallback = fac*self.dt
+
             self.load_balance()

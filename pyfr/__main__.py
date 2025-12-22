@@ -995,9 +995,8 @@ def _process_common(args, soln, cfg):
         mmesh.i.info()
         mmesh.remove_islands_till_convergence()
         mmesh.i.info()
-        mmesh.diffuse_till_convergence(target, max_iters=100)
+        mmesh.iterate_till_convergence(target, max_iters=100)
         mmesh.i.info()
-
 
     # If compute-ranklist differs from current communicator, reinitialise
     if len(part_ranklist) != len(rankmap['compute']):

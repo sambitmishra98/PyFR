@@ -2795,7 +2795,7 @@ class CarverMixin:
         Seed any rank with cur==0 and targets>0 by donating nseed elements.
 
         This does *not* try to reach targets; it just ensures ranks become non-empty.
-        Your subsequent diffuse_till_convergence(targets) does the heavy lifting.
+        Your subsequent iterate_till_convergence(targets) does the heavy lifting.
         """
         W = comm["world"]
         rnk = int(rank["world"])
@@ -2822,7 +2822,7 @@ class CarverMixin:
         if verbose and rnk == root_w:
             print(f"[add_ranks] moved_glob(seeds)={moved_glob}", flush=True)
 
-        self.diffuse_till_convergence(targets, smooth=False, max_iters=10)
+        self.iterate_till_convergence(targets, smooth=False, max_iters=10)
 
         return int(moved_local)
 
@@ -3628,6 +3628,15 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         WaitsToTargetsModelMixin.__init__(self, cfg)
         RankAllocatorMixin.__init__(self, cfg)
 
+        # Initially balance elements aggressively
+        self._init_aggr_iters = cfg.getint('partition',
+                                             'lb-init-aggressive-iters', 
+                                              comm['world'].size)
+
+        self.jitter = cfg.getfloat('partition', 'target-jitter', 0.0)
+        
+        self.jitter_rank = 0 
+
     def _retag_con_owners_from_vparts(self, vparts):
         """
         Retag con_mpi neighbor-rank fields using global partition vector vparts.
@@ -3647,6 +3656,21 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
             m = (eid >= 0) & (eid < vparts.size)
             if np.any(m):
                 nbr[m] = vparts[eid[m]]
+
+    def iterate_aggressively(self, target):
+
+        if rank["world"] == root['world']: print(f"TARGET: {target}")
+
+        if self._init_aggr_iters > 0:
+            for _ in range(self._init_aggr_iters): 
+                cur0 = self._cur_counts_total
+                if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+                self.iterate(target)
+            self._init_aggr_iters-=1
+        else:
+            cur0 = self._cur_counts_total
+            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+            self.iterate(target)
 
     def apply_global_partition(self, vparts, *, move_spts_nodes=True):
         """
@@ -3750,7 +3774,25 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
 
         target_int = comm['world'].bcast(target_int)
 
-        return self.remap_targets_by_ranklist(target_int)
+        target_world = self.remap_targets_by_ranklist(target_int)
+
+        target_world_with_jitter = self.add_jitter_to_targets(target_world)
+
+        return target_world_with_jitter
+
+    def add_jitter_to_targets(self, target):
+        """
+        Add +jitter cyclically to each rank
+        """
+        if self.jitter > 0.0:   
+            print(f"OLD: {target}")
+            target[self.jitter_rank] = target[self.jitter_rank]*(1+self.jitter)
+            self.jitter_rank = (self.jitter_rank + 1) % len(target)
+            target = self.int_round(target)
+            print(f"NEW: {target}")
+            
+        return target
+
 
 class OnlineSCOTCHPartitioner(OnlinePartitioner):
     """SCOTCH-backed global partitioner adapted for the online partition representation.

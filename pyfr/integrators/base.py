@@ -3,12 +3,13 @@ import itertools as it
 import re
 import sys
 import time
+import gc
 
 import numpy as np
 
 from pyfr.cache import memoize
 from pyfr.mpiutil import (initialise_new_comm, mpi, scal_coll,
-                          comm, rank, root, execute)
+                          comm, rank, root, rankmap, execute, promote_comm)
 from pyfr.plugins import get_plugin
 
 from pyfr.readers.native import NativeReader
@@ -19,7 +20,7 @@ from pyfr.partitioners.online.diffusion import OnlineDiffusionPartitioner
 def _common_plugin_prop(attr, *, edim):
     def wrapfn(fn):
         @property
-        def newfn(self):
+        def newfn(self: BaseIntegrator):
             if not (p := getattr(self, attr)):
                 t, c = time.time(), self._plugin_wtimes['common', None]
 
@@ -79,6 +80,11 @@ class BaseIntegrator:
         self._wstart = time.time()
         self.walltime_last = 0.
 
+        if rank['world'] == root['world']:
+            with open('lb_walltimes.csv', 'a') as f: f.write('tcurr,others,iterate,reinit\n')
+
+        self.wallt_end = time.perf_counter_ns()
+
         # Record the total amount of time spent in each plugin
         self._plugin_wtimes = defaultdict(lambda: 0)
 
@@ -88,9 +94,12 @@ class BaseIntegrator:
 
         self.called_plugin_dt = False
 
-        # Cost scales
         self.mmesh = OnlineDiffusionPartitioner(mmesh.mesh, cfg)
 
+        self.initialise_comm_and_partition(goal='plugins')
+        self._plugins_intercon = _MeshInterconnector(self.meshes['compute'].eidxs, 
+                                                     self.meshes['plugins'].eidxs)
+        
         # Smoothly step to target time in the last near_t steps
         self.aminf = self.cfg.getfloat('solver-time-integrator', 
                                           'dt-adjust-min-fact', 0.9)
@@ -163,11 +172,6 @@ class BaseIntegrator:
             reader = NativeReader(self.meshes['compute'].fname, pname,
                                 construct_con=True, comm_name=goal)
             self.meshes[goal] = reader.mesh
-
-
-    def initialise_interconnector(self, mname1, mname2):
-        return _MeshInterconnector(self.meshes[mname1].eidxs, 
-                                   self.meshes[mname2].eidxs)
 
     def relocate_ary(self, pintercon, ary, edim, *, src_name='compute', dst_name='plugins'):
         """
@@ -495,6 +499,104 @@ class BaseIntegrator:
             reason = self._abort_reason
             sys.exit(comm['world'].allreduce(reason, op=lambda x, y: x or y))
 
+
+    def load_balance(self):
+        # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
+        if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
+            if rank['world'] == root['world']: print('Switching, nacptsteps = ', self.nacptsteps)
+            wallt_start = time.perf_counter_ns()
+
+            mmesh = self.mmesh ; mmesh.restart()            
+            mmesh.i.info() ; mmesh.i.info_to_csv(tcurr=self.tcurr)
+
+            mmesh.recheck_online_file()
+
+            # Element counts per world rank
+            target = mmesh.calc_target(*self.get_median_matrices())
+
+            mmesh.drain_till_convergence(target)
+            mmesh.add_ranks(target)
+            mmesh.remove_islands_till_convergence(target=target)
+            mmesh.iterate_aggressively(target)
+            mmesh.rearrange_partitions()
+
+            mmesh.i.info()
+            
+            wallt_iterate = time.perf_counter_ns() - wallt_start
+
+            initialise_new_comm('newcompute', list(range(len(rankmap['newcompute']))))
+            soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
+            promote_comm('newcompute', 'compute')
+
+            self.reinit_backend_and_system(self.meshes['compute'], soln)
+            wallt_reinit = time.perf_counter_ns() - wallt_start - wallt_iterate
+
+            # Write wall times
+            if rank['world'] == root['world']:
+                with open('lb_walltimes.csv', 'a') as f:
+                    f.write(f"{self.tcurr:.6f},"
+                            f"{(wallt_start - self.wallt_end)/1e9},"
+                            f"{wallt_iterate/1e9},{wallt_reinit/1e9}\n")
+
+            self.wallt_end = time.perf_counter_ns()
+
+    def reinit_mesh_soln(self, mesh, soln):
+        # New mesh lives under the 'newcompute' logical name while we migrate.
+        self.meshes['newcompute'] = mesh
+
+        # Build interconnector from old compute layout -> newcompute layout
+        self._newcompute_intercon = _MeshInterconnector(self.meshes['compute'].eidxs, 
+                                                        self.meshes['newcompute'].eidxs)
+        
+        soln = self.relocate_ary(self._newcompute_intercon, soln,
+                                 edim=2, src_name='compute', dst_name='newcompute')
+
+        # Drop old compute mesh and plugin interconnector
+        del self.meshes['compute']
+        del self._plugins_intercon
+
+        # Promote newcompute mesh to be the canonical compute mesh
+        self.meshes['compute'] = self.meshes['newcompute']
+        # Optionally drop the extra key to avoid confusion
+        # del self.meshes['newcompute']
+
+        return soln
+
+    def reinit_backend_and_system(self, mesh, soln):
+        self._invalidate_caches()
+
+        del self.system
+
+        for attr in dir(self):
+           if attr.startswith('_memoize_cache@'):
+               delattr(self, attr) 
+
+        gc.collect()
+
+        comm['world'].barrier()
+
+        self.system = self._systemcls(self.backend, mesh, soln, 
+                                      nregs=self.nregs, cfg=self.cfg)
+
+        self.copy_to_empty_system()
+
+        self._idxcurr = 0
+
+        # Re-initialise plugin comm and interconnector
+        self.initialise_comm_and_partition(goal='plugins')
+        self._plugins_intercon = _MeshInterconnector(self.meshes['compute'].eidxs, 
+                                                     self.meshes['plugins'].eidxs)
+
+        self.plugins = self._reget_plugins()
+
+        #if comm['compute'] != mpi.COMM_NULL:
+        #    self.system.commit()
+        #    self.system.preproc(self.tcurr, self._idxcurr)
+
+        execute['compute'](lambda: self.system.commit())
+        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
+
+        comm['world'].barrier()
 
 class BaseCommon:
     def _get_gndofs(self):        

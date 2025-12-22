@@ -86,7 +86,7 @@ def construct_by_diffusion(mesh, part_wts, progress=NullProgressSequence):
 
     with progress.start('Diffuse elements'):
         mmesh.i.info()
-        mmesh.diffuse_till_convergence(target, max_iters=100)
+        mmesh.iterate_till_convergence(target, max_iters=100)
 
     with progress.start('Create relocated mesh'):
         mesh = mmesh.to_mesh(mmesh.i.eidxs)
