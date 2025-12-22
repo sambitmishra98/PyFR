@@ -1408,6 +1408,8 @@ class WaitsToTargetsModelMixin:
         self._cyclic_jitter_fraction = cfg.getfloat('partition', 'cyclic-jitter-fraction')
 
         self.lb_iters = cfg.getint('partition', 'lb-outeriterations')
+        
+        self.cost = None
 
     def write_g1_median_csvs(self, g1a, g1s, g1r, g1idx: int = 1):
         """
@@ -1421,6 +1423,10 @@ class WaitsToTargetsModelMixin:
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
         send_us = np.rint(g1s * 1e6).astype(np.int64)
         recv_us = np.rint(g1r * 1e6).astype(np.int64)
+
+        print(f"g1a: {all_us}")
+        print(f"g1s: \n {send_us}")
+        print(f"g1r: \n {recv_us}")
 
         def _append_csv_row(file_path: str, header_cols: list[str], values: list[int]):
             # TODO: Connect with pyfr.writers.csv.py
@@ -1527,9 +1533,11 @@ class WaitsToTargetsModelMixin:
         r_in  = g1r_old.sum(axis=1)
         r_out = g1r_old.sum(axis=0)
 
-        return (g1a_old - r_in  * self.lb_cost_scale_g1r
+        self.cost = (g1a_old - r_in  * self.lb_cost_scale_g1r
                         - s_out * self.lb_cost_scale_g1s
                         + r_out * self.lb_cost_scale_g1rt)
+
+        return self.cost
 
 
 class _MetaMeshInterconnector(AlltoallMixin):
@@ -3782,14 +3790,14 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
 
     def add_jitter_to_targets(self, target):
         """
-        Add +jitter cyclically to each rank
+        Cyclically add +jitter to each rank
         """
         if self.jitter > 0.0:   
-            print(f"OLD: {target}")
+            if rank["world"] == root['world']: print(f"JITTER OLD: {target}")
             target[self.jitter_rank] = target[self.jitter_rank]*(1+self.jitter)
             self.jitter_rank = (self.jitter_rank + 1) % len(target)
             target = self.int_round(target)
-            print(f"NEW: {target}")
+            if rank["world"] == root['world']: print(f"JITTER NEW: {target}")
             
         return target
 

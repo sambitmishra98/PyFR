@@ -1210,42 +1210,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if cur1 == cur0:
                 break
 
-    def drain_till_convergence(self, target: List[int], max_iters: int = 100):
-        drain_ranks = [i for i, (cnt, tgt) in enumerate(zip(self._cur_counts_total, target))
-                   if tgt == 0 and cnt > 0]
-
-        # Find all ranks that have elements to drain
-        curr0_to_drain = [i for i, cnt in enumerate(self._cur_counts_total) if cnt > 0]
-
-        # Check only those ranks and see if the have been drained
-        drained = all(self._cur_counts_total[i] == 0 for i in curr0_to_drain)
-        if drained:
-            return
-
-
-        if rank["world"] == root['world']:
-            print(f"TARGET: {target}")
-
-        iters = 0
-
-        while not drained:
-
-            cur = self._cur_counts_total
-            if all(cur[i] == 0 for i in drain_ranks):
-                break
-
-            drained = all(self._cur_counts_total[i] == 0 for i in curr0_to_drain)
-
-            if max_iters != -1 and iters >= max_iters:  
-                break   
-            iters += 1
-
-            self.iterate(target, flowmat_relax=1.0)
-
-            cur0 = self._cur_counts_total
-            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
-
-
     def remove_islands_till_convergence(self, max_iters=-1, target = None):
         iters = 0
         base_counts = self._cur_counts_total if target is None else target
@@ -1283,41 +1247,84 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if all(int(nis) <= 2 for nis in nis_all):
                 break
 
+    def drain_till_convergence(self, target: List[int], max_iters: int = 100):
+        drain_ranks = [i for i, (cnt, tgt) in enumerate(zip(self._cur_counts_total, target))
+                   if tgt == 0 and cnt > 0]
+
+        # Find all ranks that have elements to drain
+        curr0_to_drain = [i for i, cnt in enumerate(self._cur_counts_total) if cnt > 0]
+
+        # Check only those ranks and see if the have been drained
+        drained = all(self._cur_counts_total[i] == 0 for i in curr0_to_drain)
+        if drained:
+            return
+
+        if rank["world"] == root['world']:
+            print(f"TARGET: {target}")
+
+        iters = 0
+
+        while not drained:
+
+            cur = self._cur_counts_total
+            if all(cur[i] == 0 for i in drain_ranks):
+                break
+
+            drained = all(self._cur_counts_total[i] == 0 for i in curr0_to_drain)
+
+            if max_iters != -1 and iters >= max_iters:  
+                break   
+            iters += 1
+
+            self.iterate(target, flowmat_relax=1.0)
+
+            cur0 = self._cur_counts_total
+            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
 
 class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
-
-    """Convenience aggregation of the online orchestration layer with diffusion + carving.
-
-    Current implementation uses multiple inheritance:
-        OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner)
-
-    This is functional but creates a diamond-shaped dependency graph and makes
-    initialisation and method resolution order (MRO) fragile.
-
-    Ideal responsibilities
-    ----------------------
-    - Provide a single “mmesh object” to the controller that supports:
-        * `calc_target_ecounts(...)`
-        * rank add/remove primitives (`seed_rank`, `swap_partitions`, draining hooks)
-        * carving (`remove_islands_*`, `remove_outliers`, `add_inliers`)
-        * diffusion refinement (`iterate_till_convergence`, `smooth_*`)
-        * export to PyFR mesh (`to_mesh(...)`)
-    - Expose a *minimal*, stable surface area to the integrator, hiding internal
-      caches and staging state.
-
-    Refactoring direction
-    ---------------------
-    Move towards composition:
-    - Keep `_MetaMesh` as the executor/mutator.
-    - Make Diffusion/Carver/Reallocator “strategy objects” that operate on an
-      executor interface.
-    - Keep OnlinePartitioner as a façade that wires them together and owns config.
-
-    Until then, this class must:
-    - explicitly initialise every parent (`__init__` must call both bases),
-    - document which base owns which attributes to prevent accidental shadowing.
-    """
 
     def __init__(self, mesh, cfg):
         OnlinePartitioner.__init__(self, mesh, cfg)
         DiffusionRepartitioner.__init__(self, mesh, cfg)
+
+        self.last_max_cost = None
+        self.last_max_cost_iter = 0
+        self.cost_store = []
+        
+        self.shuffle_if_stagnant = cfg.getint('partition', 'shuffle-if-stagnant', 0)
+
+    def detect_stagnation(self):
+
+        if not self.shuffle_if_stagnant:
+            return None
+
+        patience = self.shuffle_if_stagnant
+
+        cost = np.asarray(self.cost, dtype=np.float64)
+        cmax = float(np.max(cost))
+
+        if rank['world'] == root['world']:
+            # init
+            if self.last_max_cost is None:
+                self.last_max_cost = cmax
+                self.last_max_cost_iter = 0
+                worst = None
+            else:
+                # “no improvement” => increment
+                improved = cmax < (self.last_max_cost)
+                if improved:
+                    self.last_max_cost = cmax
+                    self.last_max_cost_iter = 0
+                    worst = None
+                else:
+                    self.last_max_cost_iter += 1
+                    if self.last_max_cost_iter >= int(patience):
+                        # deterministic argmax tie-break: lowest rank id
+                        worst = int(np.argmax(cost))
+                    else:
+                        worst = None
+        else:
+            worst = None
+
+        worst = comm['world'].bcast(worst, root=root['world'])
+        return worst
