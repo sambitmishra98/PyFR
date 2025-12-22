@@ -1261,28 +1261,36 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
 
     def remove_islands_till_convergence(self, max_iters=-1):
-
         iters = 0
+        base_counts = self._cur_counts_total
 
         while True:
-            if max_iters != -1 and iters >= max_iters:  
-                break   
+            if max_iters != -1 and iters >= max_iters:
+                break
             iters += 1
 
             cur0 = self._cur_counts_total
-            nrms = self.remove_islands_step()
-            
-            self.remove_outliers()
-            self.add_inliers()
 
+            # 1) detect first
+            cluster_gids, nis_all = self.detect_islands()
+
+            # 2) If no islands left for all ranks, stop for sure
+            if all(int(nis) == 1 for nis in nis_all):
+                break
+
+            # 3) otherwise remove + do the rest
+            self.remove_islands(cluster_gids)
+
+            self.remove_outliers()
+            self.add_ranks(base_counts)
+            self.add_inliers()
             self.smooth_until_stagnates(move_spts_nodes=True)
-            #if not any(nrms[i] > 1.0 for i in range(comm['world'].size) if targets[i] > 0):
-            #    break
-            # If no element movements happen, then exit. So compare last with now
+
             cur1 = self._cur_counts_total
             if cur1 == cur0:
                 break
-            if all(nrms[i] <= 1.0 for i in range(comm['world'].size)):
+            # 2) If 0/1  islands left for all ranks, stop after trying a bit
+            if all(int(nis) <= 2 for nis in nis_all):
                 break
 
 

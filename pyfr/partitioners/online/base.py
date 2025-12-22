@@ -3100,6 +3100,114 @@ class CarverMixin:
         nrms = W.allgather(nrm)
         return nrms
 
+    def detect_islands(self):
+        """
+        Detect islands and select a subset to remove (based on island_remove_fraction).
+
+        Returns
+        -------
+        cluster_gids : np.ndarray[int64]
+            Local gids belonging to the selected-to-remove islands on *this* rank.
+        nis_all : list[int]
+            Allgathered number of islands per rank (so caller can decide to stop if all <= 1).
+        """
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
+
+        frac_remove = float(self.island_remove_fraction)
+
+        island_id, island_sizes = self.label_islands_faces()
+        nis  = int(island_sizes.size)
+        nloc = int(island_id.size)
+
+        # "How many islands exist" (per rank); this is what you want for the stop test
+        nis_all = W.allgather(nis)
+
+        # Trivial / empty local partition
+        if (nis <= 1) or (nloc == 0) or (frac_remove <= 0.0):
+            cluster_gids = np.empty(0, np.int64)
+            nrm_ids = 0
+        else:
+            # NOTE: island label 0 is assumed to be the main component; remove from 1..nis-1
+            cand_ids = np.arange(1, nis, dtype=np.int32)
+
+            # How many island-IDs to remove this round (fraction of non-main islands)
+            nrm_ids = int(np.ceil(frac_remove * cand_ids.size))
+            nrm_ids = max(1, min(nrm_ids, cand_ids.size))
+
+            # Remove the last nrm_ids (assuming ordering corresponds to increasing size or some policy)
+            ids_rm = cand_ids[-nrm_ids:]
+
+            cluster_flat0 = np.nonzero(np.isin(island_id, ids_rm))[0].astype(np.int64, copy=False)
+            cluster_gids  = np.asarray(self.i.eidxs_flat[cluster_flat0], dtype=np.int64)
+
+        if rnk == root_w:
+            # cheap summary; keep it small
+            print(f"[rmislands.detect] nis_all={nis_all}", flush=True)
+
+        return cluster_gids, nis_all
+
+
+    def remove_islands(self, cluster_gids, *, max_move: int | None = None,
+                    max_sweeps: int = 50, patience: int = 1) -> None:
+        """
+        Collective-safe aggressive eviction loop for the provided cluster_gids.
+
+        Parameters
+        ----------
+        cluster_gids : np.ndarray[int64]
+            Local gids that belong to the islands you want to evict from this rank.
+            (May be empty on some ranks; still collective-safe.)
+        """
+        W      = comm["world"]
+        rnk    = int(rank["world"])
+        root_w = int(root["world"])
+
+        cluster_gids = np.asarray(cluster_gids, dtype=np.int64)
+        budget_left = None if max_move is None else int(max_move)
+        stable = 0
+
+        for k in range(int(max_sweeps)):
+            if cluster_gids.size:
+                in_cluster   = np.isin(self.i.eidxs_flat, cluster_gids, assume_unique=False)
+                cluster_flat = np.nonzero(in_cluster)[0].astype(np.int64, copy=False)
+            else:
+                cluster_flat = np.empty(0, np.int64)
+
+            remaining_loc  = int(cluster_flat.size)
+            remaining_glob = int(W.allreduce(remaining_loc, op=mpi.SUM))
+
+            if remaining_glob == 0:
+                break
+
+            # Enforce max_move as a *total* budget across sweeps
+            if budget_left is not None:
+                if budget_left <= 0:
+                    moved_local = self.remove_cluster_step(np.empty(0, np.int64), budget=0)
+                else:
+                    moved_local = self.remove_cluster_step(cluster_flat, budget=budget_left)
+                budget_left -= int(moved_local)
+            else:
+                moved_local = self.remove_cluster_step(cluster_flat, budget=None)
+
+            moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
+
+            if rnk == root_w:
+                print(f"[rmislands.aggr] sweep={k+1} remaining_glob={remaining_glob} moved_glob={moved_glob}", flush=True)
+
+            if moved_glob == 0:
+                stable += 1
+            else:
+                stable = 0
+
+            if stable >= int(patience):
+                if rnk == root_w:
+                    print("[rmislands.aggr] STALL: moved_glob=0 while remaining_glob>0", flush=True)
+                break
+
+
+
     def _iface_from_deltas(self, mode: str, *, delta_max: int | None = None):
         st   = self.i
         nloc = int(st.eidxs_flat.size)
