@@ -1414,16 +1414,13 @@ class WaitsToTargetsModelMixin:
         Snapshot g1 medians to CSV in integer microseconds.
         Now always use world-size vectors/matrices and embed compute ranks.
         """
-        if g1a is None or g1s is None or g1r is None:
+        if rank['compute'] != root['compute']:
             return
 
         # Scale to microseconds and cast to int (compute index space)
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
         send_us = np.rint(g1s * 1e6).astype(np.int64)
         recv_us = np.rint(g1r * 1e6).astype(np.int64)
-
-        if rank['compute'] != root['compute']:
-            return
 
         def _append_csv_row(file_path: str, header_cols: list[str], values: list[int]):
             # TODO: Connect with pyfr.writers.csv.py
@@ -1435,8 +1432,6 @@ class WaitsToTargetsModelMixin:
             # Append row
             with open(file_path, 'a', newline='') as f:
                 f.write(','.join(str(int(v)) for v in values) + '\n')
-
-
 
         # ---- NEW: embed into world index space ----
         P_world   = comm['world'].size
@@ -1521,6 +1516,9 @@ class WaitsToTargetsModelMixin:
         return N
 
     def compute_cost(self, g1a, g1s, g1r):
+
+        self.write_g1_median_csvs(g1a, g1s, g1r)
+
         g1a_old = np.asarray(g1a, dtype=float)
         g1s_old = np.asarray(g1s, dtype=float)
         g1r_old = np.asarray(g1r, dtype=float)
@@ -3571,8 +3569,10 @@ class OfflineRepartitioner(_MetaMesh):
             compute target element counts for each rank 
             using the current element counts and optional weights.
         """
-        Ntot = self.i.nelems_g
-        targets_unscaled = weights * (Ntot / weights.sum())
+        Neach = self.i.nelems
+        Nall = comm['compute'].allgather(np.asarray(Neach, dtype=np.int64))
+        weights = np.asarray(weights, dtype=np.float64)
+        targets_unscaled = weights * Nall
         targets_comp = self.int_round(targets_unscaled)      # length = len(rankmap['compute'])
         return self._to_world_targets(targets_comp, rankmap['compute'])
 

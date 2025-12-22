@@ -83,19 +83,20 @@ class BaseStdController(BaseStdIntegrator):
             mmesh.drain_till_convergence(targets)
             mmesh.add_ranks(targets)
             # If islands exist, then remove them
-            mmesh.remove_islands_till_convergence()
+            mmesh.remove_islands_till_convergence(target=targets)
 
             
             mmesh.diffuse_till_convergence(targets)
 
             mmesh.rearrange_partitions()
             mmesh.i.info()
+            
+            wallt_iterate = perf_counter_ns() - wallt_start
 
             initialise_new_comm('newcompute', list(range(len(rankmap['newcompute']))))
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
             promote_comm('newcompute', 'compute')
 
-            wallt_iterate = perf_counter_ns() - wallt_start
             self.reinit_backend_and_system(self.meshes['compute'], soln)
             wallt_reinit = perf_counter_ns() - wallt_start - wallt_iterate
 

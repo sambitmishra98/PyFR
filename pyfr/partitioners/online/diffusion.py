@@ -1082,7 +1082,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         moved_local, flow_used, eidxs_diff = self.diffuse(mode=mode,
                                                           threshold=threshold,
                                                           flow_matrix=M_eff,
-                                        move_spts_nodes=(mode == "vertices"),)
+                                        move_spts_nodes=True,)#(mode == "vertices"),)
 
         moved_glob = int(comm["world"].allreduce(int(moved_local), op=mpi.SUM))
 
@@ -1098,7 +1098,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         # Force the next debug step: one vertex-based iteration with thr=6
         exec_order =(  [(6.0, "vertex")]
                      #+ [(2.0, "face")]
-                     #+ [(0.0, "face")] * comm["world"].size
+                     + [(0.0, "face")] * comm["world"].size
                     )
         # TEST WITH/WITHOUT ABOVE FACE MOVEMENTS !!!! 
         # NO FACE MOVEMENTS GIVES BETTER ANSWER!!!!
@@ -1260,9 +1260,11 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
 
 
-    def remove_islands_till_convergence(self, max_iters=-1):
+    def remove_islands_till_convergence(self, max_iters=-1, target = None):
         iters = 0
-        base_counts = self._cur_counts_total
+        base_counts = self._cur_counts_total if target is None else target
+
+        self.remove_outliers()
 
         while True:
             if max_iters != -1 and iters >= max_iters:
@@ -1284,7 +1286,9 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.remove_outliers()
             self.add_ranks(base_counts)
             self.add_inliers()
-            self.smooth_until_stagnates(move_spts_nodes=True)
+            #self.smooth_until_stagnates(move_spts_nodes=True)
+            self.diffuse_till_convergence(base_counts, flowmat_relax=0.5, 
+                                          max_iters=comm['world'].size, smooth=True)
 
             cur1 = self._cur_counts_total
             if cur1 == cur0:
