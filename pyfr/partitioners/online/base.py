@@ -1404,10 +1404,7 @@ class WaitsToTargetsModelMixin:
         self.lb_cost_scale_g1s  = cfg.getfloat('partition', 'lb-cost-scale-g1s',  1.0)
         self.lb_cost_scale_g1rt = cfg.getfloat('partition', 'lb-cost-scale-g1rt', 1.0)
 
-        # Setup jitter
-        self._cyclic_jitter_fraction = cfg.getfloat('partition', 'cyclic-jitter-fraction')
-
-        self.lb_iters = cfg.getint('partition', 'lb-outeriterations')
+        self.lb_iters = cfg.getint('partition', 'lb-outeriterations', 1)
         
         self.cost = None
 
