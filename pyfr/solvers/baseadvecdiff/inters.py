@@ -42,10 +42,10 @@ class BaseAdvectionDiffusionMPIInters(BaseAdvectionMPIInters):
         rhsprank = rhsrank
 
         # Generate second set of view matrices
-        self._vect_lhs = self._vect_xchg_view(lhs, 'get_vect_fpts_for_inter')
-        self._vect_rhs = be.xchg_matrix_for_view(self._vect_lhs)
-        self._comm_lhs = self._scal_xchg_view(lhs, 'get_comm_fpts_for_inter')
-        self._comm_rhs = be.xchg_matrix_for_view(self._comm_lhs)
+        self._vect_lhs = self._vect_xchg_view(lhs, 'get_vect_fpts_for_inter', tags={f'peer={rhsrank}'})
+        self._vect_rhs = be.xchg_matrix_for_view(self._vect_lhs, tags={f'peer={rhsrank}'})
+        self._comm_lhs = self._scal_xchg_view(lhs, 'get_comm_fpts_for_inter', tags={f'peer={rhsrank}'})
+        self._comm_rhs = be.xchg_matrix_for_view(self._comm_lhs, tags={f'peer={rhsrank}'})
 
         # Additional kernel constants
         self.c |= cfg.items_as('solver-interfaces', float)

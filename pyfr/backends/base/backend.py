@@ -201,8 +201,8 @@ class BaseBackend:
         return self.view_cls(self, matmap, rmap, cmap, rstridemap, vshape,
                              tags)
 
-    def xchg_view(self, matmap, rmap, cmap, rstridemap=None, vshape=(),
-                  tags=set()):
+    def xchg_view(self, matmap, rmap, cmap, rstridemap=None, vshape=(), tags=None):
+        tags=set(tags or ())
         return self.xchg_view_cls(self, matmap, rmap, cmap, rstridemap,
                                   vshape, tags)
 

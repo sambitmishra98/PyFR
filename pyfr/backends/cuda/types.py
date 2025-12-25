@@ -1,3 +1,6 @@
+import os
+from pyfr.mpiutil import comm
+
 from functools import cached_property
 
 import numpy as np
@@ -60,8 +63,50 @@ class CUDAXchgMatrix(CUDAMatrix, base.XchgMatrix):
         super().__init__(backend, dtype, ioshape, initval, extent, aliases,
                          tags)
 
-        # If MPI is CUDA-aware then we can elide copies to/from a host buffer
-        self.elide_copy = backend.mpitype == 'cuda-aware'
+        def _peer_from_tags(tags):
+            for t in tags:
+                if isinstance(t, str) and t.startswith('peer='):
+                    try:
+                        return int(t.split('=', 1)[1])
+                    except ValueError:
+                        return None
+            return None
+
+        def _force_host_peers():
+            v = os.environ.get('PYFR_FORCE_HOST_PEERS', '').strip()
+            if not v:
+                return None
+            if v.lower() in ('all', '*'):
+                return 'all'
+            out = set()
+            for x in v.replace(';', ',').split(','):
+                x = x.strip()
+                if x:
+                    out.add(int(x))
+            return out
+
+
+        peer = _peer_from_tags(tags)
+
+        force_all = os.environ.get('PYFR_FORCE_HOST_XAWARE', '0') not in ('0', '', 'false', 'False')
+        fhpeers = _force_host_peers()
+
+        force_host = force_all or (fhpeers == 'all') or (peer is not None and isinstance(fhpeers, set) and peer in fhpeers)
+
+        # Per-peer: elide only if cuda-aware AND not forced-host for this peer
+        self.elide_copy = (backend.mpitype == 'cuda-aware') and not force_host
+
+        # One log line per (rank, peer)
+        from pyfr.mpiutil import comm
+        if not hasattr(backend, '_xaware_logged_peers'):
+            backend._xaware_logged_peers = set()
+
+        key = (comm['compute'].rank, peer)
+        if key not in backend._xaware_logged_peers:
+            print(f"[xaware] rank={comm['compute'].rank} backend=cuda mpitype={backend.mpitype} "
+                f"peer={peer} force_host={int(force_host)} elide_copy={int(self.elide_copy)}")
+            backend._xaware_logged_peers.add(key)
+
         if self.elide_copy:
             class HostData:
                 __array_interface__ = {
