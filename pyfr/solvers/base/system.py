@@ -22,15 +22,15 @@ class BaseSystem:
     # Nonce sequence
     _nonce_seq = it.count()
 
-    def __init__(self, backend, mesh, initsoln, nregs, cfg):
+    def __init__(self, backend, mmesh, initsoln, nregs, cfg):
         self.backend = backend
-        self.mesh = mesh
+        self.mesh = mmesh.mesh
         self.cfg = cfg
         self.nregs = nregs
 
         # Conservative and physical variable names
-        convars = self.elementscls.convars(mesh.ndims, cfg)
-        privars = self.elementscls.privars(mesh.ndims, cfg)
+        convars = self.elementscls.convars(mmesh.mesh.ndims, cfg)
+        privars = self.elementscls.privars(mmesh.mesh.ndims, cfg)
 
         # Validate the constants block
         for c in cfg.items('constants'):
@@ -38,14 +38,14 @@ class BaseSystem:
                 raise ValueError(f'Invalid variable "{c}" in [constants]')
 
         # Save the number of dimensions and field variables
-        self.ndims = mesh.ndims
+        self.ndims = mmesh.mesh.ndims
         self.nvars = len(convars)
 
         # Obtain a nonce to uniquely identify this system
         nonce = str(next(self._nonce_seq))
 
         # Load the elements
-        eles, elemap = self._load_eles(mesh, initsoln, nregs, nonce)
+        eles, elemap = self._load_eles(mmesh.mesh, initsoln, nregs, nonce)
         backend.commit()
 
         # Retain the element map; this may be deleted by clients
@@ -70,9 +70,9 @@ class BaseSystem:
                 self.eles_entmin_int = [e.entmin_int for e in eles]
 
             # Load the interfaces
-            self._int_inters = self._load_int_inters(mesh, elemap)
-            self._mpi_inters = self._load_mpi_inters(mesh, elemap)
-            self._bc_inters, self._bc_prefns = self._load_bc_inters(mesh, elemap)
+            self._int_inters = self._load_int_inters(mmesh.mesh, elemap)
+            self._mpi_inters = self._load_mpi_inters(mmesh.mesh, elemap)
+            self._bc_inters, self._bc_prefns = self._load_bc_inters(mmesh.mesh, elemap)
         backend.commit()
 
     def commit(self):

@@ -1,4 +1,3 @@
-from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import os
