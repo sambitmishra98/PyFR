@@ -12,6 +12,7 @@ from tabulate import tabulate
 from pyfr.inifile import Inifile
 from pyfr.nputil import iter_struct
 from pyfr.partitioners.base import BasePartitioner
+from pyfr.partitioners.metis import METISPartitioner
 from pyfr.partitioners.scotch import SCOTCHPartitioner
 from pyfr.mpiutil import comm, rank, root, mpi, AlltoallMixin, rankmap, get_comm_info, execute, initialise_new_comm
 from pyfr.shapes import BaseShape
@@ -3582,50 +3583,7 @@ class OfflineRepartitioner(_MetaMesh):
         return self._to_world_targets(targets_comp, rankmap['compute'])
 
 class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRepartitioner):
-    """Online partitioning orchestrator that bridges:
-    - performance telemetry -> targets,
-    - partition decision (diffusion or global partitioner) -> ownership plan,
-    - ownership plan -> committed partition state.
-
-    This class is intended to be a thin façade used by the time integrator/controller.
-    It should *not* be a monolith: the cost model, rank reallocation policy, carving,
-    and the core mutation engine should be separable components.
-
-    Responsibilities
-    ---------------
-    - Expose high-level operations needed by the controller:
-        * `calc_target_ecounts(...)` (telemetry -> targets)
-        * `apply_global_partition(vparts, ...)` (global partition -> new local state)
-        * optional `partition_scotch/partition_metis/...` wrappers producing vparts
-    - Maintain configuration handles relevant to online runs:
-        * `online_cfg` (desired ranklists), device lists/tags, tuning knobs.
-    - Provide low-level integrity operations:
-        * retagging `con_mpi` owners consistent with a `vparts` decision,
-          without O(global) maps when possible.
-
-    Expected public surface
-    -----------------------
-    - `online_cfg` and helper to read `compute-ranklist` changes.
-    - `apply_global_partition(vparts, move_spts_nodes=True)` returning the per-rank
-      `eidxs_dest` (useful for diagnostics and interconnector construction).
-    - Diagnostics hooks for the controller: per-rank mismatch counts, bytes moved.
-
-    Inheritance note
-    ----------------
-    Current multiple inheritance (`OnlinePartitioner` + diffusion/carver/reallocator)
-    creates a diamond with `_MetaMesh` and requires *explicit* initialisation.  A
-    cleaner target architecture is composition:
-
-        OnlinePartitioner(
-            executor=_MetaMesh(...),
-            model=WaitsToTargetsModel(...),
-            reallocator=RankReallocator(...),
-            carver=Carver(...),
-        )
-
-    The docstrings in this file should be used as the refactoring contract.
-    """
-
+    shuffle_if_stagnant = 0
 
     def __init__(self, mesh, cfg):
         # Everything related to costs
@@ -3639,28 +3597,7 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
                                               comm['world'].size)
 
         self.jitter = cfg.getfloat('partition', 'target-jitter', 0.0)
-        
         self.jitter_rank = 0 
-
-    def _retag_con_owners_from_vparts(self, vparts):
-        """
-        Retag con_mpi neighbor-rank fields using global partition vector vparts.
-        Assumes con_idx stores global flat element ids (same eid space as vparts).
-        """
-        vparts = np.asarray(vparts, dtype=np.int32)
-
-        for et in self.i.etypes:
-            con_idx = self.i.con_idx[et]
-            con_mpi = self.i.con_mpi[et]
-            if con_idx.size == 0 or con_mpi.size == 0:
-                continue
-
-            eid = con_idx.reshape(-1)
-            nbr = con_mpi.reshape(-1)
-
-            m = (eid >= 0) & (eid < vparts.size)
-            if np.any(m):
-                nbr[m] = vparts[eid[m]]
 
     def iterate_aggressively(self, target):
 
@@ -3676,94 +3613,6 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
             cur0 = self._cur_counts_total
             if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
             self.iterate(target)
-
-    def apply_global_partition(self, vparts, *, move_spts_nodes=True):
-        """
-        Apply a PyFR-ordered global partition vector to this MetaMesh.
-
-        Parameters
-        ----------
-        vparts : array-like, shape (nelems_g,)
-            Partition id for every global element in PyFR ordering:
-            concatenate over etypes (sorted), within each etype order by global gid.
-            This is the same ordering your construct_by_diffusion() builds.
-        move_spts_nodes : bool
-            Whether to relocate spts_nodes.
-        """
-        vparts = np.asarray(vparts, dtype=np.int32)
-
-        if vparts.ndim != 1:
-            raise ValueError("vparts must be 1D")
-
-        nelems_g = int(self.i.nelems_g)
-        if vparts.size != nelems_g:
-            raise ValueError(f"vparts has size {vparts.size}, expected {nelems_g}")
-
-        # Optional strict sanity
-        if vparts.size and (vparts.min() < 0 or vparts.max() >= comm['world'].size):
-            raise ValueError("vparts contains invalid partition ids")
-
-
-        me = int(rank['world'])
-
-        # How many of my currently-owned elements does SCOTCH want to move away?
-        # (Uses global IDs: self.i.eidxs_flat contains my owned global element numbers.)
-        mine = self.i.eidxs_flat
-        mis_local = int(np.count_nonzero(vparts[mine] != me))
-
-        mis_all = comm['world'].allgather(mis_local)
-        if rank['world'] == root['world']:
-            print(f"[apply.pre] mis_per_rank={mis_all} total_mis={sum(mis_all)}", flush=True)
-
-        # Counts BEFORE
-        nloc0 = int(self.i.nelems_total)
-        all0 = comm['world'].allgather(nloc0)
-        if rank['world'] == root['world']:
-            print(f"[apply.pre] nelems_per_rank={all0} sum={sum(all0)}", flush=True)
-
-
-
-        # Build destination eidxs for *this* world rank by slicing vparts per etype
-        eidxs_dest = {}
-        me = rank['world']
-
-        for et in self.i.etypes:
-            s = int(self.i.edisps[et])
-            n = int(self.i.ecnts_g[et])
-            sl = slice(s, s + n)
-            blk = vparts[s:s+n]
-            gids = np.flatnonzero(blk == me).astype(np.int64, copy=False)
-            eidxs_dest[et] = gids
-
-        # fast path using mesh-global flat indexing from State
-        fast_conn = _MetaMeshInterconnector(etypes = self.etypes,
-                                            eidxs_src  = self.i.eidxs,
-                                            eidxs_dest = eidxs_dest,
-                                            eidxs_flat_src   = self.i.eidxs_flat,
-                                            etype_slices_src = self.i.etype_slices,
-        )
-
-        self.j = PartitionState(eidxs=eidxs_dest,
-                           con_mpi=fast_conn.relocate_cons(self.i.con_mpi),
-                           con_idx=fast_conn.relocate_cons(self.i.con_idx),
-                       spts_nodes=(fast_conn.relocate_cons(self.i.spts_nodes)
-                          if move_spts_nodes else self.i.spts_nodes))
-
-
-        # Swap current/next
-        self.i, self.j = self.j, self.i
-        self._retag_con_owners_from_vparts(vparts)  # O(local faces), SCOTCH path
-
-        if not move_spts_nodes:
-            self._spts_nodes_valid = False
-
-        # Counts AFTER
-        nloc1 = int(self.i.nelems_total)
-        all1 = comm['world'].allgather(nloc1)
-        if rank['world'] == root['world']:
-            print(f"[apply.post] nelems_per_rank={all1} sum={sum(all1)}", flush=True)
-
-        return eidxs_dest
 
     def calc_target(self, g1a, g1s, g1r):
         """
@@ -3798,181 +3647,367 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
             
         return target
 
+    def detect_stagnation(self):
 
-class OnlineSCOTCHPartitioner(OnlinePartitioner):
-    """SCOTCH-backed global partitioner adapted for the online partition representation.
+        if not self.shuffle_if_stagnant:
+            return None
 
-    This class is responsible for producing a global partition vector `vparts` using
-    (PT-)SCOTCH and for exposing it in a form that `OnlinePartitioner.apply_global_partition`
-    can realise.
+        patience = self.shuffle_if_stagnant
 
-    Responsibilities
-    ---------------
-    - Build and cache a SCOTCH graph consistent with PyFR's element ordering.
-    - Support optional vertex/edge weights derived from:
-        * device speeds,
-        * etype weights or preferences,
-        * communication costs (if encoded as edge weights).
-    - Sanitize and copy SCOTCH data structures safely (SCOTCH can be strict about
-      adjacency symmetry and indexing).
-    - Provide `partition(...) -> vparts` with a clear contract:
-        * input targets/weights,
-        * determinism controls (seed),
-        * imbalance tolerance (ufactor).
+        cost = np.asarray(self.cost, dtype=np.float64)
+        cmax = float(np.max(cost))
 
-    Separation of concerns
-    ----------------------
-    - This class should *not* perform online rank add/remove logic or carving; it
-      should only compute partitions.  Rank set management belongs in
-      `RankReallocatorMixin` and controller orchestration.
-    """
+        if rank['world'] == root['world']:
+            # init
+            if self.last_max_cost is None:
+                self.last_max_cost = cmax
+                self.last_max_cost_iter = 0
+                worst = None
+            else:
+                # “no improvement” => increment
+                improved = cmax < (self.last_max_cost)
+                if improved:
+                    self.last_max_cost = cmax
+                    self.last_max_cost_iter = 0
+                    worst = None
+                else:
+                    self.last_max_cost_iter += 1
+                    if self.last_max_cost_iter >= int(patience):
+                        # deterministic argmax tie-break: lowest rank id
+                        worst = int(np.argmax(cost))
+                    else:
+                        worst = None
+        else:
+            worst = None
 
+        worst = comm['world'].bcast(worst, root=root['world'])
+        return worst
+
+class OnlineGlobalPartitioner(OnlinePartitioner):
+    _backend_cls = None          # METISPartitioner or SCOTCHPartitioner
+    _backend_name = "backend"
+    _backend_strat = None        # SCOTCH only; e.g. "quality"
+    name = None
 
     def __init__(self, mesh, cfg):
         super().__init__(mesh, cfg)
+        self._root_cache = None
 
-        # Initial partition details
-        self.initial_partitioner      = cfg.get(       'partition', 'initial-partition', 'random').lower()
-        self.initial_partitioner_opts = cfg.getliteral('partition', 'initial-partition-opts', {})
+    def _backend_opts(self, *, ufactor: int | None = None, seed: int | None = None):
+        """
+        Build backend opts by reusing PyFR's existing partitioner option parsing.
 
-    def _build_cache(self, *, ufactor: int):
-        if hasattr(self, "_cache"):
+        Precedence (highest wins):
+        1) explicit args ufactor/seed passed to partition(...)
+        2) per-backend online opts in cfg, e.g. scotch-opts / metis-opts
+        3) global online opts in cfg: online-partitioner-opts
+        4) backend class defaults (handled inside BasePartitioner)
+        """
+        # 1) Global opts applied to any online partitioner backend
+        base = self.cfg.getliteral('partition', 'online-partitioner-opts', {})
+
+        # 2) Backend-specific opts: scotch-opts / metis-opts
+        per = self.cfg.getliteral('partition', f'{self.name}-opts', {})
+
+        if not isinstance(base, dict) or not isinstance(per, dict):
+            raise ValueError("[partition] online-partitioner-opts and <name>-opts must be dict literals")
+
+        # Merge (per-backend overrides global)
+        opts = dict(base)
+        opts.update(per)
+
+        # Apply call-time overrides last
+        if ufactor is not None:
+            opts['ufactor'] = int(ufactor)
+        if seed is not None:
+            opts['seed'] = int(seed)
+
+        # SCOTCH: allow either 'strat' via cfg, or fall back to class attribute if set
+        if self._backend_name == "scotch" and 'strat' not in opts and self._backend_strat is not None:
+            opts['strat'] = self._backend_strat
+
+        return opts
+
+    @staticmethod
+    def _as_i64_con(con):
+        con = np.asarray(con, dtype=np.int64)
+        return np.ascontiguousarray(con.reshape(-1, 2))
+
+    def _canonicalize_con(self, con, *, label: str, nelems_g: int):
+        """
+        Canonicalize an undirected edge list in global element-id space:
+          - ensure l <= r
+          - drop self-loops
+          - unique pairs
+        """
+        con0 = self._as_i64_con(con)
+        n0 = int(con0.shape[0])
+
+        if n0 == 0:
+            if rank['world'] == root['world']:
+                print(f"[globcache.con] {label} edges=0 selfloops=0 dups_removed=0 edges_final=0", flush=True)
+            return con0
+
+        # Ensure l <= r (canonical undirected form)
+        con0.sort(axis=1)
+
+        # Drop self-loops introduced by periodic merging
+        selfloops = int(np.count_nonzero(con0[:, 0] == con0[:, 1]))
+        con1 = con0[con0[:, 0] != con0[:, 1]]
+
+        # Unique pairs (structured view trick)
+        cdtype = np.dtype([('l', np.int64), ('r', np.int64)])
+        cu = np.unique(con1.view(cdtype).squeeze())
+        con2 = cu.view(np.int64).reshape(-1, 2)
+
+        dups_removed = int(con1.shape[0] - con2.shape[0])
+
+        # Range check (important to catch corrupted IDs early)
+        if con2.size:
+            mn = int(con2.min())
+            mx = int(con2.max())
+            if mn < 0 or mx >= int(nelems_g):
+                raise RuntimeError(f"[globcache.con] {label} out-of-range ids: min={mn} max={mx} nelems_g={nelems_g}")
+
+        if rank['world'] == root['world']:
+            print(f"[globcache.con] {label} edges={n0} selfloops={selfloops} "
+                  f"dups_removed={dups_removed} edges_final={int(con2.shape[0])}", flush=True)
+
+        return con2
+
+    def _validate_graph_buffers(self, graph):
+        """
+        Pure-Python structural checks that catch most SCOTCH-killers deterministically.
+        """
+        vtab = np.asarray(graph.vtab)
+        etab = np.asarray(graph.etab)
+
+        if vtab.ndim != 1 or etab.ndim != 1:
+            raise RuntimeError("[globcache.graph] vtab/etab must be 1D")
+
+        if int(vtab[0]) != 0:
+            raise RuntimeError(f"[globcache.graph] vtab[0]={int(vtab[0])} != 0")
+
+        if int(vtab[-1]) != int(etab.size):
+            raise RuntimeError(f"[globcache.graph] vtab[-1]={int(vtab[-1])} != etab.size={int(etab.size)}")
+
+        if np.any(vtab[1:] < vtab[:-1]):
+            raise RuntimeError("[globcache.graph] vtab not nondecreasing")
+
+        nverts = int(vtab.size - 1)
+        if etab.size:
+            mn = int(etab.min())
+            mx = int(etab.max())
+            if mn < 0 or mx >= nverts:
+                raise RuntimeError(f"[globcache.graph] etab out of range: min={mn} max={mx} nverts={nverts}")
+
+    def _sanitize_graph(self, graph):
+        """
+        Ensure numpy buffers are owned, contiguous, and stable for ctypes backends.
+        """
+        def as_i32_c(a):
+            return np.ascontiguousarray(np.asarray(a, dtype=np.int32))
+
+        g2 = graph._replace(
+            vtab=as_i32_c(graph.vtab),
+            etab=as_i32_c(graph.etab),
+            vwts=as_i32_c(graph.vwts),
+            ewts=as_i32_c(graph.ewts),
+        )
+
+        self._validate_graph_buffers(g2)
+        return g2
+
+    def _build_root_cache(self):
+        if self._root_cache is not None:
             return
 
         if rank['world'] != root['world']:
-            self._cache = None
+            self._root_cache = None
             return
 
-        # You need the mesh file path you are running from.
-        # Use whatever your code already has (args.mesh, self.mesh_src.fname, etc.)
         mesh_path = self.mesh_src.fname
 
-        with h5py.File(mesh_path, "r") as mesh:
-            con, ecurved, edisps, cdisps = BasePartitioner.construct_global_con(mesh)
+        with h5py.File(mesh_path, "r") as meshf:
+            con, ecurved, edisps, cdisps = BasePartitioner.construct_global_con(meshf)
 
-            # Sanity: global element count should match your State
-            nelems_g = int(len(ecurved))
-            if nelems_g != int(self.i.nelems_g):
-                raise RuntimeError(f"nelems mismatch: file={nelems_g} state={self.i.nelems_g}")
+            nelems_file = int(len(ecurved))
+            nelems_state = int(self.i.nelems_g)
+            if nelems_file != nelems_state:
+                raise RuntimeError(f"[globcache] nelems mismatch file={nelems_file} state={nelems_state}")
 
-            # Element weights (match your CLI -e...:1 usage)
+            # Equal etype weights
             elewts = {et: 1 for et in edisps.keys()}
 
-            # Dummy partwts for building elewts_fn (actual partwts are passed later)
-            dummy_partwts = [1]*comm['world'].size
-            part = SCOTCHPartitioner(dummy_partwts, elewts=elewts, 
-                                     opts={"ufactor": ufactor})
-            elewts_fn = part._get_elewts_fn(edisps)
+            _elewts = np.array([elewts[etype] for etype in edisps], dtype=np.int64)
+            _edisps = np.array(list(edisps.values()), dtype=np.int64)
 
-            # This is the critical periodic grouping step you are missing
-            pmcon, exwts, pmerge = BasePartitioner._group_periodic_eles(mesh, con, cdisps, elewts_fn)
+            def elewts_fn(e):
+                return _elewts[np.searchsorted(_edisps, e, side='right') - 1]
+
+            # Periodic grouping (offline routine)
+            pmcon, exwts, pmerge = BasePartitioner._group_periodic_eles(meshf, con, cdisps, elewts_fn)
+
+        # ---- Online-only “fix” for BasePartitioner periodic merge side-effects ----
+        pmcon = self._canonicalize_con(pmcon, label="pmcon", nelems_g=nelems_state)
+        # ------------------------------------------------------------------------
 
         graph, vemap = BasePartitioner._construct_graph(pmcon, elewts_fn, exwts=exwts)
         graph = self._sanitize_graph(graph)
 
-        print(f"[scotch.cache] nverts={graph.vwts.shape[0]} nnz={graph.etab.size} "
-            f"(nelems_g={nelems_g})", flush=True)
+        print(f"[globcache] built backend={self._backend_name} nverts={graph.vwts.shape[0]} nnz={graph.etab.size} "
+              f"merged={len(pmerge)} nelems_g={nelems_state}", flush=True)
 
-        self._cache = (graph, vemap, pmerge, nelems_g, edisps)
+        self._root_cache = (graph, vemap, pmerge, edisps, nelems_state)
 
-    def _sanitize_graph(self, graph):
-        """
-        Return a new graph with SCOTCH-safe buffers:
-        - dtype int32 (SCOTCH_numSizeof == 4)
-        - C-contiguous
-        - owned memory (no views/temporaries)
-        Works for PyFR's namedtuple graph objects (uses _replace).
-        """
-        import numpy as np
-
-        def as_i32_c(a):
-            if a is None:
-                return None
-            return np.ascontiguousarray(np.asarray(a, dtype=np.int32))
-
-        # Build replacement fields
-        repl = {}
-        for name in ("vtab", "etab", "vwts", "ewts"):
-            if hasattr(graph, name):
-                repl[name] = as_i32_c(getattr(graph, name))
-
-        # Namedtuple path (PyFR)
-        if hasattr(graph, "_replace"):
-            g2 = graph._replace(**repl)
-        else:
-            # Fallback: try best-effort setattr on a mutable object
-            g2 = graph
-            for k, v in repl.items():
-                setattr(g2, k, v)
-
-        # Cheap invariants (catch corruption early)
-        vtab = g2.vtab
-        etab = g2.etab
-        assert vtab.ndim == 1 and etab.ndim == 1
-        assert int(vtab[0]) == 0
-        assert int(vtab[-1]) == etab.size
-
-        nverts = vtab.size - 1
-        if etab.size:
-            mn = int(etab.min())
-            mx = int(etab.max())
-            assert mn >= 0
-            assert mx < nverts
-
-        return g2
-
-    def _copy_graph(self, graph):
-        """
-        Deep-copy numpy buffers of a (likely namedtuple) graph object.
-        """
-        import numpy as np
-
-        repl = {}
-        for name in ("vtab", "etab", "vwts", "ewts"):
-            if hasattr(graph, name):
-                a = getattr(graph, name)
-                repl[name] = None if a is None else np.ascontiguousarray(np.asarray(a).copy())
-
-        return graph._replace(**repl) if hasattr(graph, "_replace") else graph
-
-    def partition(self, partwts, *, ufactor: int = 10, seed: int = 2079):
-        self._build_cache(ufactor=ufactor)
+    def partition(self, partwts, *, ufactor = None, seed = None):
+        self._build_root_cache()
         nelems_g = int(self.i.nelems_g)
 
         if rank['world'] == root['world']:
-            graph, vemap, pmerge, nelems_file, edisps_file = self._cache
-            assert nelems_file == nelems_g
+            graph, vemap, pmerge, edisps, nelems_state = self._root_cache
+            assert nelems_state == nelems_g
 
-            # Handle rank-removal (zero targets) here, so you can delete partition()
             partwts = np.asarray(partwts, dtype=np.int64)
+
+            # Allow “rank removal” (zero target) by partitioning active subset only
             active = np.flatnonzero(partwts > 0).astype(int).tolist()
             if not active:
                 raise ValueError("all partwts are zero")
 
+            # METIS + SCOTCH both accept part weights → keep them
             partwts_active = partwts[active].tolist()
 
-            elewts = {et: 1 for et in edisps_file.keys()}
-            part = SCOTCHPartitioner(partwts_active, elewts=elewts,
-                                    opts={"ufactor": ufactor, "seed": seed,
-                                          "strat": "quality"})
+            elewts = {et: 1 for et in edisps.keys()}
+            opts = self._backend_opts(ufactor=ufactor, seed=seed)
 
-            print(f"[scotch.map] begin nverts={graph.vwts.shape[0]} nnz={graph.etab.size} "
-                f"nparts_active={len(active)} ufactor={ufactor} seed={seed}", flush=True)
+            if rank['world'] == root['world']:
+                print(f"[globpart.{self._backend_name}] opts={opts}", flush=True)
 
-            # Debug-only: deep-copy to eliminate “ctypes sees stale pointer” hypotheses
-            graph_use = self._copy_graph(graph)  # comment this out once stable
+            part = self._backend_cls(partwts_active, elewts=elewts, opts=opts)
 
-            vparts_merged = part._partition_graph(graph_use, partwts_active).astype(np.int32, copy=False)
+            print(f"[globpart.{self._backend_name}] begin nverts={graph.vwts.shape[0]} nnz={graph.etab.size} "
+                  f"nparts_active={len(active)} ufactor={ufactor} seed={seed}", flush=True)
 
-            # Undo periodic merge
+            vparts_merged = part._partition_graph(graph, partwts_active).astype(np.int32, copy=False)
+
+            # Sanity: partition ids must be within active part range
+            if vparts_merged.size:
+                pmin = int(vparts_merged.min())
+                pmax = int(vparts_merged.max())
+                if pmin < 0 or pmax >= len(active):
+                    raise RuntimeError(f"[globpart.{self._backend_name}] invalid partition ids: "
+                                       f"min={pmin} max={pmax} nparts_active={len(active)}")
+
             vparts = BasePartitioner._ungroup_periodic_eles(pmerge, vemap, vparts_merged)
 
-            # Map active-part ids -> world ranks
+            # Map active-part ids → world ranks
             parts_g = np.asarray([active[p] for p in vparts], dtype=np.int32)
 
-            print("[scotch.map] end", flush=True)
+            print(f"[globpart.{self._backend_name}] end", flush=True)
         else:
             parts_g = np.empty(nelems_g, dtype=np.int32)
 
         comm['world'].Bcast(parts_g, root=root['world'])
         return parts_g
+
+    def _retag_con_owners_from_vparts(self, vparts):
+        vparts = np.asarray(vparts, dtype=np.int32)
+
+        for et in self.i.etypes:
+            con_idx = self.i.con_idx[et]
+            con_mpi = self.i.con_mpi[et]
+            if con_idx.size == 0 or con_mpi.size == 0:
+                continue
+
+            eid = con_idx.reshape(-1)
+            nbr = con_mpi.reshape(-1)
+
+            m = (eid >= 0) & (eid < vparts.size)
+            if np.any(m):
+                nbr[m] = vparts[eid[m]]
+
+    def apply_global_partition(self, vparts, *, move_spts_nodes=True):
+        vparts = np.asarray(vparts, dtype=np.int32)
+
+        if vparts.ndim != 1:
+            raise ValueError("vparts must be 1D")
+
+        nelems_g = int(self.i.nelems_g)
+        if vparts.size != nelems_g:
+            raise ValueError(f"vparts has size {vparts.size}, expected {nelems_g}")
+
+        if vparts.size and (vparts.min() < 0 or vparts.max() >= comm['world'].size):
+            raise ValueError("vparts contains invalid partition ids")
+
+        me = int(rank['world'])
+
+        # Misplacements (diagnostic)
+        mine = self.i.eidxs_flat
+        mis_local = int(np.count_nonzero(vparts[mine] != me))
+        mis_all = comm['world'].allgather(mis_local)
+        if rank['world'] == root['world']:
+            print(f"[apply.pre] mis_per_rank={mis_all} total_mis={sum(mis_all)}", flush=True)
+
+        # Counts BEFORE
+        nloc0 = int(self.i.nelems_total)
+        all0 = comm['world'].allgather(nloc0)
+        if rank['world'] == root['world']:
+            print(f"[apply.pre] nelems_per_rank={all0} sum={sum(all0)}", flush=True)
+
+        # Build destination eidxs for this world rank
+        eidxs_dest = {}
+        for et in self.i.etypes:
+            s = int(self.i.edisps[et])
+            n = int(self.i.ecnts_g[et])
+            blk = vparts[s:s + n]
+            gids = np.flatnonzero(blk == me).astype(np.int64, copy=False)
+            eidxs_dest[et] = gids
+
+        # Interconnector (use State etypes; safer than self.etypes)
+        fast_conn = _MetaMeshInterconnector(
+            etypes=self.i.etypes,
+            eidxs_src=self.i.eidxs,
+            eidxs_dest=eidxs_dest,
+            eidxs_flat_src=self.i.eidxs_flat,
+            etype_slices_src=self.i.etype_slices,
+        )
+
+        self.j = PartitionState(
+            eidxs=eidxs_dest,
+            con_mpi=fast_conn.relocate_cons(self.i.con_mpi),
+            con_idx=fast_conn.relocate_cons(self.i.con_idx),
+            spts_nodes=(fast_conn.relocate_cons(self.i.spts_nodes)
+                        if move_spts_nodes else self.i.spts_nodes)
+        )
+
+        # Swap current/next and retag owners
+        self.i, self.j = self.j, self.i
+        self._retag_con_owners_from_vparts(vparts)
+
+        if not move_spts_nodes:
+            self._spts_nodes_valid = False
+
+        # Counts AFTER
+        nloc1 = int(self.i.nelems_total)
+        all1 = comm['world'].allgather(nloc1)
+        if rank['world'] == root['world']:
+            print(f"[apply.post] nelems_per_rank={all1} sum={sum(all1)}", flush=True)
+
+        return eidxs_dest
+
+    def intg_repartition(self, target):
+        parts_g = self.partition(target)
+        self.apply_global_partition(parts_g)
+
+class OnlineMETISPartitioner(OnlineGlobalPartitioner):
+    name = "metis"
+    _backend_cls = METISPartitioner
+    _backend_name = "metis"
+
+
+class OnlineSCOTCHPartitioner(OnlineGlobalPartitioner):
+    name = "scotch"
+    _backend_cls = SCOTCHPartitioner
+    _backend_name = "scotch"
+    _backend_strat = "quality"

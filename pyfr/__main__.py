@@ -25,8 +25,11 @@ from pyfr.progress import (NullProgressSequence, ProgressBar,
                            ProgressSequenceAction)
 from pyfr.readers import BaseReader, get_reader_by_name, get_reader_by_extn
 from pyfr.readers.native import NativeReader
-from pyfr.partitioners.online.base import _MetaMesh, _MeshInterconnector
-from pyfr.partitioners.online.diffusion import DiffusionRepartitioner
+from pyfr.partitioners.online.base import (_MeshInterconnector, 
+                                           OnlineMETISPartitioner,
+                                           OnlineSCOTCHPartitioner)
+                                           
+from pyfr.partitioners.online.diffusion import OnlineDiffusionPartitioner
 from pyfr.readers.stl import read_stl
 from pyfr.resamplers import (BaseInterpolator, NativeCloudResampler,
                              get_interpolator)
@@ -982,21 +985,31 @@ def _process_common(args, soln, cfg):
     # Close reader (good hygiene)
     reader.close()
 
-    mmesh = DiffusionRepartitioner(mesh, cfg)
+    partitioner = cfg.get('partition', 'partitioner')
+    if partitioner == 'metis':
+            mmesh = OnlineMETISPartitioner(mesh, cfg)
+    elif partitioner == 'scotch':
+            mmesh = OnlineSCOTCHPartitioner(mesh, cfg)
+    elif partitioner == 'diffusion':
+            mmesh = OnlineDiffusionPartitioner(mesh, cfg)
+    else:
+        raise NotImplementedError(f"Unknown partitioner: {partitioner}")
 
     # Optional: if you want your original “clean up random” passes
     if startup_from_one:
         ne_loc = int(mmesh.i.nelems)
-        ecurrs_wr = comm['world'].allgather(ne_loc)   # length = comm['world'].size
-
-        # Offline / uniform targets (since g1* not provided)
+        ecurrs_wr = comm['world'].allgather(ne_loc)
         target = mmesh.calc_target(ecurrs_wr)
 
-        mmesh.i.info()
-        mmesh.remove_islands_till_convergence()
-        mmesh.i.info()
-        mmesh.iterate_till_convergence(target, max_iters=100)
-        mmesh.i.info()
+        if partitioner == 'diffusion':
+            mmesh.i.info()
+            mmesh.remove_islands_till_convergence()
+            mmesh.i.info()
+            mmesh.iterate_till_convergence(target, max_iters=100)
+            mmesh.i.info()
+        else:
+            mmesh.intg_repartition(target)
+            mmesh.i.info()
 
     # If compute-ranklist differs from current communicator, reinitialise
     if len(part_ranklist) != len(rankmap['compute']):

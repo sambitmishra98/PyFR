@@ -1290,41 +1290,29 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
         self.last_max_cost = None
         self.last_max_cost_iter = 0
         self.cost_store = []
-        
         self.shuffle_if_stagnant = cfg.getint('partition', 'shuffle-if-stagnant', 0)
 
-    def detect_stagnation(self):
+    def intg_repartition(self, target):
 
-        if not self.shuffle_if_stagnant:
-            return None
+        worst  = self.detect_stagnation()
 
-        patience = self.shuffle_if_stagnant
+        drain_target = target.copy()
 
-        cost = np.asarray(self.cost, dtype=np.float64)
-        cmax = float(np.max(cost))
+        if worst is not None:
+            cur = np.asarray(self._cur_counts_total, dtype=np.int64)  # world-sized
+            # Choose a sink rank that is active and not worst
+            cost = np.asarray(self.cost, dtype=np.float64)
+            active = np.nonzero((target > 0) & (np.arange(target.size) != worst))[0]
+            sink = int(active[np.argmin(cost[active])]) if active.size else None
 
-        if rank['world'] == root['world']:
-            # init
-            if self.last_max_cost is None:
-                self.last_max_cost = cmax
-                self.last_max_cost_iter = 0
-                worst = None
-            else:
-                # “no improvement” => increment
-                improved = cmax < (self.last_max_cost)
-                if improved:
-                    self.last_max_cost = cmax
-                    self.last_max_cost_iter = 0
-                    worst = None
-                else:
-                    self.last_max_cost_iter += 1
-                    if self.last_max_cost_iter >= int(patience):
-                        # deterministic argmax tie-break: lowest rank id
-                        worst = int(np.argmax(cost))
-                    else:
-                        worst = None
-        else:
-            worst = None
+            # Evacuate current mass from worst into sink to keep sum consistent
+            moved_mass = int(cur[worst])
+            drain_target[worst] = 0
+            if sink is not None:
+                drain_target[sink] += moved_mass
 
-        worst = comm['world'].bcast(worst, root=root['world'])
-        return worst
+        self.drain_till_convergence(drain_target)
+        self.add_ranks(target)
+        self.remove_islands_till_convergence(target=target)
+        self.iterate_aggressively(target)
+        self.rearrange_partitions()

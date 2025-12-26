@@ -94,7 +94,7 @@ class BaseIntegrator:
 
         self.called_plugin_dt = False
 
-        self.mmesh = OnlineDiffusionPartitioner(mmesh.mesh, cfg)
+        self.mmesh = mmesh
 
         self.initialise_comm_and_partition(goal='plugins')
         self._plugins_intercon = _MeshInterconnector(self.meshes['compute'].eidxs, 
@@ -514,27 +514,7 @@ class BaseIntegrator:
             # Element counts per world rank
             target = mmesh.calc_target(*self.get_median_matrices())
 
-            worst  = mmesh.detect_stagnation()
-            drain_target = target.copy()
-
-            if worst is not None:
-                cur = np.asarray(mmesh._cur_counts_total, dtype=np.int64)  # world-sized
-                # Choose a sink rank that is active and not worst
-                cost = np.asarray(mmesh.cost, dtype=np.float64)
-                active = np.nonzero((target > 0) & (np.arange(target.size) != worst))[0]
-                sink = int(active[np.argmin(cost[active])]) if active.size else None
-
-                # Evacuate current mass from worst into sink to keep sum consistent
-                moved_mass = int(cur[worst])
-                drain_target[worst] = 0
-                if sink is not None:
-                    drain_target[sink] += moved_mass
-
-            mmesh.drain_till_convergence(drain_target)
-            mmesh.add_ranks(target)
-            mmesh.remove_islands_till_convergence(target=target)
-            mmesh.iterate_aggressively(target)
-            mmesh.rearrange_partitions()
+            self.mmesh.intg_repartition(target)
 
             mmesh.i.info()
             
