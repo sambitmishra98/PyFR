@@ -427,7 +427,7 @@ class PartitionState:
         wranks, etypes, cnt, iface_out, nfaces_total, npairs = ps
         R, _ = cnt.shape
 
-        headers = (["etype"] + [f"w{wr}" for wr in wranks] + ["sum"])
+        headers = (["etype"] + [f"R-{wr}" for wr in wranks] + ["SUM"])
         rows = []
 
         for j, et in enumerate(etypes):
@@ -435,11 +435,11 @@ class PartitionState:
             rows.append([et] + [f"{x:,}" for x in v] + [f"{int(v.sum()):,}"])
 
         tot = cnt.sum(axis=1).astype(int)
-        rows.append(["total_elems"] + [f"{x:,}" for x in tot] + [f"{int(tot.sum()):,}"])
+        rows.append(["nelems"] + [f"{x:,}" for x in tot] + [f"{int(tot.sum()):,}"])
 
-        rows.append(["mpi_faces_out"] + [f"{int(x):,}" for x in iface_out] + [f"{int(iface_out.sum()):,}"])
-        rows.append(["mpi_faces_total"] + [""] * R + [f"{nfaces_total:,}"])
-        rows.append(["mpi_pairs"]       + [""] * R + [f"{npairs:,}"])
+        rows.append(["mpi-o"] + [f"{int(x):,}" for x in iface_out] + [f"{int(iface_out.sum()):,}"])
+        rows.append(["mpi-t"] + [""] * R + [f"{nfaces_total:,}"])
+        rows.append(["pairs"]       + [""] * R + [f"{npairs:,}"])
 
         print(tabulate(rows, headers=headers, tablefmt="github",
                        colalign=("left", *("right",) * (len(headers) - 1))))
@@ -1393,21 +1393,33 @@ class WaitsToTargetsModelMixin:
     def __init__(self, cfg):
 
         # Cost scales
-        self.lb_cost_scale_g1r  = cfg.getfloat('partition', 'lb-cost-scale-g1r',  1.0)
-        self.lb_cost_scale_g1s  = cfg.getfloat('partition', 'lb-cost-scale-g1s',  1.0)
-        self.lb_cost_scale_g1rt = cfg.getfloat('partition', 'lb-cost-scale-g1rt', 1.0)
+        self.cost_g1a    = cfg.getfloat('partition', 'cost-coeff-g1a',  1.0)
+        self.cost_g1r    = cfg.getfloat('partition', 'cost-coeff-g1r', -1.0)
+        self.cost_g1s    = cfg.getfloat('partition', 'cost-coeff-g1s', -1.0)
+        self.cost_g1rt   = cfg.getfloat('partition', 'cost-coeff-g1rt', 1.0)
+
+        self.cost_g1a_e  = cfg.getfloat('partition', 'cost-exp-g1a',    1.0)
+        self.cost_g1r_e  = cfg.getfloat('partition', 'cost-exp-g1r',    1.0)
+        self.cost_g1s_e  = cfg.getfloat('partition', 'cost-exp-g1s',    1.0)
+        self.cost_g1rt_e = cfg.getfloat('partition', 'cost-exp-g1rt',   1.0)
+
+        # Print the cost function expression
+        if rank['world'] == root['world']:
+            print(f"Cost function: "
+                f"g1r^{self.cost_g1r_e} * {self.cost_g1r} + "
+                f"g1s^{self.cost_g1s_e} * {self.cost_g1s} + "
+                f"g1rt^{self.cost_g1rt_e} * {self.cost_g1rt}")
+
 
         self.lb_iters = cfg.getint('partition', 'lb-outeriterations', 1)
         
         self.cost = None
 
-    def write_g1_median_csvs(self, g1a, g1s, g1r, g1idx: int = 1):
+    def write_g1_median_csvs(self, g1a, g1s, g1r):
         """
         Snapshot g1 medians to CSV in integer microseconds.
-        Now always use world-size vectors/matrices and embed compute ranks.
         """
-        if rank['compute'] != root['compute']:
-            return
+        if rank['compute'] != root['compute']: return
 
         # Scale to microseconds and cast to int (compute index space)
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
@@ -1419,7 +1431,7 @@ class WaitsToTargetsModelMixin:
         print(f"g1r: \n {recv_us}")
 
         def _append_csv_row(file_path: str, header_cols: list[str], values: list[int]):
-            # TODO: Connect with pyfr.writers.csv.py
+            # TODO: Connect with pyfr/writers/csv.py
 
             if not os.path.exists(file_path):
                 with open(file_path, 'w', newline='') as f:
@@ -1460,75 +1472,26 @@ class WaitsToTargetsModelMixin:
         _append_csv_row('g1-send-median-ms.csv', mcols, [int(send_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
         _append_csv_row('g1-recv-median-ms.csv', mcols, [int(recv_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
 
-    def _lb_next_cyclic_pulse_index(self, comm_nc, root_nc: int) -> int:
-        """
-        Deterministically choose a pulse rank index in the *newcompute* ordering.
-        Advances a module-level counter on root_nc and broadcasts the chosen index.
-        """
-
-        if comm_nc == mpi.COMM_NULL:
-            return -1
-
-        if int(comm_nc.rank) == int(root_nc):
-            idx = int(self._LB_CYCLIC_JITTER_CTR % int(comm_nc.size))
-            self._LB_CYCLIC_JITTER_CTR += 1
-        else:
-            idx = None
-
-        idx = comm_nc.bcast(idx, root=int(root_nc))
-        return int(idx)
-
-    def _lb_apply_single_rank_weight_bump(self, 
-        N_star: np.ndarray,
-        pulse_idx: int,
-        frac: float,
-        *,
-        pattern: str = "single",     # "single" | "alternate"
-        parity: int = 0,             # used only when pattern="alternate"
-    ) -> np.ndarray:
-        """
-        - pattern="single": bump one rank = pulse_idx
-        - pattern="alternate": bump half the ranks (even or odd), toggled by 'parity'
-        NOTE: pulse_idx is ignored for selection in this mode.
-        """
-        frac = float(frac)
-        if frac <= 0.0:
-            return N_star
-
-        N = np.asarray(N_star, dtype=np.float64, copy=True)
-        if N.size <= 1:
-            return N
-
-        pat = str(pattern).lower()
-        if pat == "single":
-            j = np.array([int(pulse_idx) % int(N.size)], dtype=np.int64)
-        elif pat == "alternate":
-            p = int(parity) & 1
-            j = np.arange(p, int(N.size), 2, dtype=np.int64)  # half ranks: p,p+2,...
-        else:
-            raise ValueError(f"Unknown jitter {pattern = }")
-
-        N[j] *= (1.0 + frac)
-        return N
-
     def compute_cost(self, g1a, g1s, g1r):
 
         self.write_g1_median_csvs(g1a, g1s, g1r)
 
-        g1a_old = np.asarray(g1a, dtype=float)
-        g1s_old = np.asarray(g1s, dtype=float)
-        g1r_old = np.asarray(g1r, dtype=float)
+        g1a = np.asarray(g1a, dtype=float)
+        g1s = np.asarray(g1s, dtype=float)
+        g1r = np.asarray(g1r, dtype=float)
 
-        s_out = g1s_old.sum(axis=1)
-        r_in  = g1r_old.sum(axis=1)
-        r_out = g1r_old.sum(axis=0)
+        s_out = g1s.sum(axis=1)
+        r_in  = g1r.sum(axis=1)
+        r_out = g1r.sum(axis=0)
 
-        self.cost = (g1a_old - r_in  * self.lb_cost_scale_g1r
-                        - s_out * self.lb_cost_scale_g1s
-                        + r_out * self.lb_cost_scale_g1rt)
+        # Use exponent properly
+
+        self.cost = (  self.cost_g1a  * g1a **self.cost_g1a_e
+                     - self.cost_g1r  * r_in**self.cost_g1r_e
+                     - self.cost_g1s  * s_out**self.cost_g1s_e
+                     + self.cost_g1rt * r_out**self.cost_g1rt_e)
 
         return self.cost
-
 
 class _MetaMeshInterconnector(AlltoallMixin):
     """Pure index-space interconnector for *in-rank* relocation of mesh-attached arrays
@@ -1561,7 +1524,6 @@ class _MetaMeshInterconnector(AlltoallMixin):
     - Must not touch MPI collectives; correctness is local-only.
     """
 
-
     def __init__(self, etypes,
                  eidxs_src: Dict[str, np.ndarray],
                  eidxs_dest: Dict[str, np.ndarray],
@@ -1571,27 +1533,18 @@ class _MetaMeshInterconnector(AlltoallMixin):
         self.eidxs_dest = eidxs_dest
         self.etypes     = list(etypes)
 
-        W   = comm['world']
-        rnk = int(rank['world'])
-
         # All-gather per-etype GID lists: same as before
-        self.src_all  = {
-            et: W.allgather(np.asarray(eidxs_src.get(et, ()), dtype=np.int64))
-            for et in self.etypes
-        }
-        self.dest_all = {
-            et: W.allgather(np.asarray(eidxs_dest.get(et, ()), dtype=np.int64))
-            for et in self.etypes
-        }
+        self.src_all  = {et: comm['world'].allgather(np.asarray(eidxs_src.get(et,  ()), dtype=np.int64)) for et in self.etypes }
+        self.dest_all = {et: comm['world'].allgather(np.asarray(eidxs_dest.get(et, ()), dtype=np.int64)) for et in self.etypes }
 
         # Storage for per-etype traffic pattern
-        self.send_idxs: Dict[str, np.ndarray] = {}
-        self.scount:    Dict[str, np.ndarray] = {}
-        self.sdisp:     Dict[str, np.ndarray] = {}
-        self.rcount:    Dict[str, np.ndarray] = {}
-        self.rdisp:     Dict[str, np.ndarray] = {}
+        self.send_idxs:    Dict[str, np.ndarray] = {}
+        self.scount:       Dict[str, np.ndarray] = {}
+        self.sdisp:        Dict[str, np.ndarray] = {}
+        self.rcount:       Dict[str, np.ndarray] = {}
+        self.rdisp:        Dict[str, np.ndarray] = {}
         self.recv_to_dest: Dict[str, np.ndarray] = {}
-        self.n_dest:      Dict[str, int] = {}
+        self.n_dest:       Dict[str, int]        = {}
 
         # ---- NEW: mesh-global flat indexing exactly as in State ----
         # Source side: either reuse from State or recompute.
@@ -1627,53 +1580,12 @@ class _MetaMeshInterconnector(AlltoallMixin):
             self._src_flat_sorted = np.empty(0, np.int64)
             self._src_flat_idx    = np.empty(0, np.int64)
 
-        # NEW: cached local src gids and sorted mapping
-        self._src_local: Dict[str, np.ndarray]   = {}
+        self._src_local:    Dict[str, np.ndarray] = {}
         self._src_g_sorted: Dict[str, np.ndarray] = {}
         self._src_i_sorted: Dict[str, np.ndarray] = {}
+        self._send_rows:    Dict[str, np.ndarray] = {}
 
-        # NEW: cached mapping from send-gids to src-row indices
-        self._send_rows:      dict[str, np.ndarray] = {}
-
-        # Build per-etype comm pattern (same logic as your _build_plan_simple)
         self._build_plan_simple()
-
-    def _flatten_eidxs_dict(
-        self,
-        eidxs: Dict[str, np.ndarray],
-    ) -> tuple[np.ndarray, Dict[str, slice]]:
-        """
-        Canonical flattening of per-etype eidxs into a 1D array of GIDs.
-
-        The ordering matches the canonical etype order in self.etypes.
-
-        Returns
-        -------
-        flat : np.ndarray
-            (Ne_flat_local,) int64 global element IDs on THIS rank.
-        slices : Dict[str, slice]
-            Per-etype slices back into flat.
-        """
-        pieces: list[np.ndarray] = []
-        slices: Dict[str, slice] = {}
-
-        start = 0
-        for et in self.etypes:
-            arr = np.asarray(eidxs.get(et, ()), dtype=np.int64)
-            n = int(arr.size)
-            if n:
-                pieces.append(arr)
-                slices[et] = slice(start, start + n)
-                start += n
-            else:
-                slices[et] = slice(start, start)
-
-        if pieces:
-            flat = np.concatenate(pieces)
-        else:
-            flat = np.empty(0, dtype=np.int64)
-
-        return flat, slices
 
     def _build_plan_simple(self) -> None:
         W    = comm['world']
@@ -1780,10 +1692,6 @@ class _MetaMeshInterconnector(AlltoallMixin):
 
             self._send_rows[et] = rows
 
-
-    # ------------------------------------------------------------------
-    # Data relocation: con_idx only (axis 0 = element index)
-    # ------------------------------------------------------------------
     def relocate_cons(self, cons_src: Dict[str, np.ndarray]
                          ) -> Dict[str, np.ndarray]:
         W   = comm['world']
@@ -1934,10 +1842,7 @@ class _MeshInterconnector(AlltoallMixin):
     def _as64(self, a):
         return np.asarray(a if a is not None else (), dtype=np.int64)
 
-    def _flatten_eidxs_dict(
-        self,
-        eidxs: dict[str, np.ndarray],
-    ) -> tuple[np.ndarray, dict[str, slice]]:
+    def _flatten_eidxs_dict(self, eidxs: dict[str, np.ndarray]) -> tuple[np.ndarray, dict[str, slice]]:
         """
         Canonical flattening of per-etype eidxs into a 1D array of GIDs.
 

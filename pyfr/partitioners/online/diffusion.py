@@ -1,5 +1,3 @@
-from collections import deque
-from shutil import move
 from typing import List, Optional
 
 import numpy as np
@@ -8,72 +6,24 @@ from pyfr.mpiutil import comm, rank, root, mpi
 from pyfr.partitioners.online.base import OnlinePartitioner, CarverMixin, OfflineRepartitioner
 
 class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
-    """Local, iterative diffusion-based repartitioner operating on a `_MetaMesh` state.
-
-    This partitioner implements *online-friendly* refinement steps that move elements
-    along existing MPI interfaces to approach a target load vector while attempting
-    to minimise edge-cut and preserve contiguity.
-
-    Core algorithmic pieces
-    -----------------------
-    - Flow planning:
-        * `element_flow_plan(targets, ...) -> M` computes an integer flow matrix
-          prescribing how many elements each rank should send to each neighbour.
-          The plan must respect the current MPI adjacency graph (faces) and any
-          additional masks (active rank sets, direction constraints).
-    - Candidate scoring:
-        * `_compute_deltas(mode)` produces per-neighbour candidate lists scored by
-          a “tie strength” metric (faces- or vertices-based).
-        * `diffuse(mode, threshold, flow_matrix, ...)` realises a single flow plan by
-          greedily selecting candidates under caps.
-    - Seam smoothing / regularisation:
-        * `smooth(...)` and `smooth_until_stagnates(...)` improve interface quality
-          after a diffusion move without significantly affecting global counts.
-    - Convergence drivers:
-        * `iterate(...)`, `iterate_till_convergence(...)` orchestrate repeated passes.
-
-    Contractual requirements
-    ------------------------
-    - Every diffusion/smoothing/carving step must call the collective commit gate
-      (`_apply_plan_and_commit`) exactly once per sweep, even if no moves occur.
-    - Deterministic tie-breaks are mandatory (delta, gid, neighbour id, etype order).
-    - Vertex-based modes require `spts_nodes` to be kept consistent across moves.
-
-    Extensibility
-    -------------
-    The diffusion engine should accept pluggable scoring and flow planners so you can:
-    - experiment with vertex vs face metrics,
-    - introduce device/etype biases,
-    - constrain moves for rank draining/seeding scenarios.
-    """
-
     def __init__(self, mesh, cfg):
         OfflineRepartitioner.__init__(self, mesh, cfg)
         CarverMixin.__init__(self, cfg)
 
-    @classmethod
-    def from_vparts(cls, vparts, cfg):
-
-        # Create a mesh object with dummy data just to satisfy the base class
-        mesh = cls._mesh_from_vparts(vparts, cfg)
-        mmesh = cls(mesh, cfg)
-        return mmesh
-
     @property
     def twoway_mask(self) -> np.ndarray:
         """
-        Boolean R×R adjacency matrix: entry (i, j) is True iff there is at
-        least one MPI face between rank i and j, based purely on con_mpi.
+        A boolean adjacency matrix for determining element flow
+        FUTURE DIRECTIONS: 
+            - Use self.i details directly, not self._mpi_faces_by_neighbor()
+            - Simplify, make concise. 
         """
         R    = comm['world'].size
         r    = comm['world'].rank
 
-        # Local 0/1 adjacency
         M_loc = np.zeros((R, R), dtype=np.uint8)
 
-        # Use con_mpi to find neighbors
-        # This helper already walks self.i.con_mpi[et] and owners:
-        for nbr, faces in self._mpi_faces_by_neighbor().items():
+        for nbr in self._mpi_faces_by_neighbor():
             j = int(nbr)
             if j == r:
                 continue
@@ -366,36 +316,26 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         return M_full
 
     # ----------------- Delta computations -----------------------
-    def _compute_affinity(self, mode: str):
-        m = str(mode).lower()
-        if m in ("face", "faces", "edge", "edges"):
-            return self._calc_mpi_faces_affinity()
-        elif m in ("vertex", "vertices"):
-            return self._calc_mpi_vertices_affinity()
-        else:
-            raise ValueError(f"_compute_affinity: invalid mode {mode!r}")
+    def _compute_affinity(self, mode):
+        if   mode in ("faces"):    return self._calc_mpi_face_affinity()
+        elif mode in ("vertices"): return self._calc_mpi_vertex_affinity()
+        else: raise ValueError(f"Invalid {mode = }")
 
-    def _compute_deltas(self, score_by: str) -> dict[int, dict[str, np.ndarray]]:
-        sb = str(score_by).lower()
-        if sb in ("edge", "edges", "face", "faces"):
-            return self._calc_mpi_faces_deltas()      # your con_mpi-based integer deltas
-        elif sb in ("vertex", "vertices"):
-            return self.compute_mpi_face_delta_from_vertices()
-        else:
-            raise ValueError(f"_compute_deltas: unknown score_by={score_by!r}")
+    def _compute_deltas(self, mode):
+        if   mode in ("faces"):    return self._calc_mpi_face_delta()
+        elif mode in ("vertices"): return self._calc_mpi_vertex_delta()
+        else: raise ValueError(f"Unknown {mode = }")
 
-    def compute_mpi_face_delta_from_vertices(self) -> dict[int, dict[str, "np.ndarray"]]:
+    def _calc_mpi_vertex_delta(self) -> dict[int, dict[str, "np.ndarray"]]:
         """
-        Vertex deltas (legacy parity).
-
+        Vertex deltas.
         Returns {nbr: {et: (N,2) int64 [[lid, delta], ...] sorted by (delta, lid)}}
         delta = c_int - c_n
         c_n   = #corner-vertices of element in nbr's MPI-vertex set
         c_int = #corner-vertices of element NOT in union of all MPI-face vertices
-        Only MPI-face interface elements to nbr are eligible (lids via _iface_lids_by_neighbor_faces()).
+        Only MPI-face interface elements to nbr are eligible 
+        (lids via _iface_lids_by_neighbor_faces()).
         """
-        import numpy as np
-
         st = self.i
         iface = self._iface_lids_by_neighbor_faces()
         if not iface:
@@ -488,7 +428,11 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return per_nbr
 
-    def _calc_mpi_faces_affinity(self) -> dict[int, dict[str, np.ndarray]]:
+    def _calc_mpi_face_affinity(self) -> dict[int, dict[str, np.ndarray]]:
+        """
+            per-neighbour per-etype MPI face affinity.
+        """
+
         myr = int(rank['world'])
         empty = np.empty((0, 3), dtype=np.int64)
 
@@ -555,7 +499,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return out
 
-    def _calc_mpi_faces_deltas(self) -> dict[int, dict[str, np.ndarray]]:
+    def _calc_mpi_face_delta(self) -> dict[int, dict[str, np.ndarray]]:
         """
         Compute per-neighbour per-etype (lid, delta) matrices using the
         owner column stored in con_mpi and neighbour eid in con_idx.
@@ -753,7 +697,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         """
         {nbr: sorted unique global vertex-node IDs that lie on MPI faces to nbr}
         """
-        import numpy as np
 
         if not getattr(self, "_spts_valid", True):
             raise RuntimeError("spts_nodes are stale")
@@ -807,7 +750,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         else:
             raise ValueError(f"Unknown metric {metric!r}; expected 'delta' or 'ratio'")
 
-    def _calc_mpi_vertices_affinity(self) -> dict[int, dict[str, np.ndarray]]:
+    def _calc_mpi_vertex_affinity(self) -> dict[int, dict[str, np.ndarray]]:
         """
         Vertex-based affinity for MPI-face interface elements only.
         Returns {nbr: {et: (N,3) [lid, cnt_int, cnt_nbr]}}.
@@ -886,12 +829,10 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
     def _iface_lids_by_neighbor_faces(self) -> dict[int, dict[str, "np.ndarray"]]:
         """
-        Canonical interface definition (parity anchor).
         {nbr: {et: unique_sorted_lids_on_MPI_faces_to_nbr}}
         """
-        import numpy as np
 
-        per_nbr_faces = self._mpi_faces_by_neighbor()  # {nbr: [(et,lid,fidx), ...]}
+        per_nbr_faces = self._mpi_faces_by_neighbor()
         out: dict[int, dict[str, np.ndarray]] = {}
 
         for nbr in sorted(int(k) for k in per_nbr_faces.keys()):
@@ -916,7 +857,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         """
         Cached vertex-column indices within spts_nodes[et].
         """
-        import numpy as np
 
         et = str(et).lower()
         cache = getattr(self, "_vcols_by_et", None)
@@ -1075,8 +1015,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         return moved_glob, eidxs_diff
 
     def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
-        exec_order =(  [(6.0, "vertex")] #+ [(2.0, "face")]
-                     + [(0.0, "face")] * comm['world'].size)
+        exec_order =(  [(6.0, "vertices")] #+ [(2.0, "face")]
+                     + [(0.0, "faces")] * comm['world'].size)
 
         for thr, score_by in exec_order:
             M0 = self.element_flow_plan(target_counts)
