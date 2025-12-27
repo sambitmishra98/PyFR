@@ -108,6 +108,26 @@ class BaseIntegrator:
         self.dt_fallback = cfg.getfloat('solver-time-integrator', 'dt')
         self.dt_near = None
 
+    def copy_to_empty_system(self):
+
+        # If already copied, do nothing
+        if hasattr(self, 'convars'):
+            return
+       
+        if comm['compute'] != mpi.COMM_NULL:
+            convars = list(first(self.system.ele_map.values()).convars)
+        else:
+            convars = []
+
+        convars = execute['compute'](lambda: list(first(self.system.ele_map.values()).convars),
+                          default = [])
+
+        # Ensure the empty systems have what plugins expect.
+        convars = comm['world'].allgather(convars)
+        self.convars = list(first(c for c in convars if c))
+
+
+
     def adjust_dt(self, t):
         # Time difference to traverse 
         t_diff = t - self.tcurr
@@ -547,18 +567,22 @@ class BaseIntegrator:
         soln = self.relocate_ary(self._newcompute_intercon, soln,
                                  edim=2, src_name='compute', dst_name='newcompute')
 
-        # If the dtau_upts attribute exists, relocate that too.
-        dtaus = [dtau.get() for dtau in self.pseudointegrator.dtau_upts]
-        
-        new_dtaus = self.relocate_ary(self._newcompute_intercon, dtaus,
-                                        edim=2, src_name='compute', dst_name='newcompute')
+        # Check fi has attribute dtau
+        if hasattr(self, 'pseudointegrator'):
+            if hasattr(self.pseudointegrator, 'dtau_upts'):
 
-        # Get shapes of the new dtau_upts
-        shapes = [dtau.shape for dtau in new_dtaus]
+                # If the dtau_upts attribute exists, relocate that too.
+                dtaus = [dtau.get() for dtau in self.pseudointegrator.dtau_upts]
+                
+                new_dtaus = self.relocate_ary(self._newcompute_intercon, dtaus,
+                                                edim=2, src_name='compute', dst_name='newcompute')
 
-        # Create new dtau_upts
-        self.pseudointegrator.dtau_upts = [self.backend.matrix(shape, new_dtau, tags={'align'})
-                            for shape, new_dtau in zip(shapes, new_dtaus)]
+                # Get shapes of the new dtau_upts
+                shapes = [dtau.shape for dtau in new_dtaus]
+
+                # Create new dtau_upts
+                self.pseudointegrator.dtau_upts = [self.backend.matrix(shape, new_dtau, tags={'align'})
+                                    for shape, new_dtau in zip(shapes, new_dtaus)]
 
         # Drop old compute mesh and plugin interconnector
         del self.meshes['compute']

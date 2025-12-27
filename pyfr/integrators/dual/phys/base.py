@@ -53,25 +53,6 @@ class BaseDualIntegrator(BaseIntegrator):
 
         return p
 
-    def copy_to_empty_system(self):
-
-        # If already copied, do nothing
-        if hasattr(self, 'convars'):
-            return
-       
-        if comm['compute'] != mpi.COMM_NULL:
-            convars = list(first(self.system.ele_map.values()).convars)
-        else:
-            convars = []
-
-        convars = execute['compute'](lambda: list(first(self.system.ele_map.values()).convars),
-                          default = [])
-
-        # Ensure the empty systems have what plugins expect.
-        convars = comm['world'].allgather(convars)
-        self.convars = list(first(c for c in convars if c))
-
-
     def reinit_backend_and_system(self, mesh, soln):
 
         # Carefully switch all work into pseudointegrator
