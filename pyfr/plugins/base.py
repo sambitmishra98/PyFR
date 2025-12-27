@@ -206,7 +206,6 @@ class RegionMixin:
     def __init__(self, intg, *args, **kwargs):
         super().__init__(intg, *args, **kwargs)
 
-        # Shorthand for the mesh
         pmesh = intg.meshes['plugins']
 
         # If partition name given for the plugin, use this partitioning instead

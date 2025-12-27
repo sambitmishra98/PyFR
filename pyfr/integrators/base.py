@@ -15,7 +15,7 @@ from pyfr.plugins import get_plugin
 from pyfr.readers.native import NativeReader
 
 from pyfr.partitioners.online.base import _MeshInterconnector
-from pyfr.partitioners.online.diffusion import OnlineDiffusionPartitioner
+from pyfr.util import first
 
 def _common_plugin_prop(attr, *, edim):
     def wrapfn(fn):
@@ -547,6 +547,19 @@ class BaseIntegrator:
         soln = self.relocate_ary(self._newcompute_intercon, soln,
                                  edim=2, src_name='compute', dst_name='newcompute')
 
+        # If the dtau_upts attribute exists, relocate that too.
+        dtaus = [dtau.get() for dtau in self.pseudointegrator.dtau_upts]
+        
+        new_dtaus = self.relocate_ary(self._newcompute_intercon, dtaus,
+                                        edim=2, src_name='compute', dst_name='newcompute')
+
+        # Get shapes of the new dtau_upts
+        shapes = [dtau.shape for dtau in new_dtaus]
+
+        # Create new dtau_upts
+        self.pseudointegrator.dtau_upts = [self.backend.matrix(shape, new_dtau, tags={'align'})
+                            for shape, new_dtau in zip(shapes, new_dtaus)]
+
         # Drop old compute mesh and plugin interconnector
         del self.meshes['compute']
         del self._plugins_intercon
@@ -557,42 +570,6 @@ class BaseIntegrator:
         # del self.meshes['newcompute']
 
         return soln
-
-    def reinit_backend_and_system(self, mesh, soln):
-        self._invalidate_caches()
-
-        del self.system
-
-        for attr in dir(self):
-           if attr.startswith('_memoize_cache@'):
-               delattr(self, attr) 
-
-        gc.collect()
-
-        comm['world'].barrier()
-
-        self.system = self._systemcls(self.backend, mesh, soln, 
-                                      nregs=self.nregs, cfg=self.cfg)
-
-        self.copy_to_empty_system()
-
-        self._idxcurr = 0
-
-        # Re-initialise plugin comm and interconnector
-        self.initialise_comm_and_partition(goal='plugins')
-        self._plugins_intercon = _MeshInterconnector(self.meshes['compute'].eidxs, 
-                                                     self.meshes['plugins'].eidxs)
-
-        self.plugins = self._reget_plugins()
-
-        #if comm['compute'] != mpi.COMM_NULL:
-        #    self.system.commit()
-        #    self.system.preproc(self.tcurr, self._idxcurr)
-
-        execute['compute'](lambda: self.system.commit())
-        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
-
-        comm['world'].barrier()
 
 class BaseCommon:
     def _get_gndofs(self):        
@@ -616,6 +593,8 @@ class BaseCommon:
 
         kerns = []
         for em, dtaum in it.zip_longest(self.system.ele_banks, dtau_mats):
+            print(f"DEBUGGIN: shape of dtau_mats={[dtau.ioshape for dtau in dtau_mats]}")
+
             kerns.append(self.backend.kernel('reduction', *[em[r] for r in rs],
                                              dt_mat=dtaum, **kwargs))
 

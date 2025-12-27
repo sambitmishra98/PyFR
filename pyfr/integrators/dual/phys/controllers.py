@@ -50,3 +50,5 @@ class DualNoneController(BaseDualController):
 
             # We are not adaptive, so accept every step
             self._accept_step(self.dt, self.pseudointegrator._idxcurr)
+
+            self.load_balance()

@@ -1,3 +1,8 @@
+import gc
+
+from pyfr.mpiutil import execute, comm, mpi
+from pyfr.partitioners.online.base import _MeshInterconnector
+
 from collections import defaultdict
 from configparser import NoOptionError
 
@@ -9,7 +14,7 @@ class BaseDualPseudoIntegrator(BaseCommon):
     formulation = 'dual'
     aux_nregs = 0
 
-    def __init__(self, backend, systemcls, mesh, initsoln, cfg, stepper_nregs,
+    def __init__(self, backend, systemcls, mmesh, initsoln, cfg, stepper_nregs,
                  stage_nregs, dt):
         self.backend = backend
         self.isrestart = initsoln is not None
@@ -46,8 +51,10 @@ class BaseDualPseudoIntegrator(BaseCommon):
                       self.stage_nregs + source_nregs + self.aux_nregs)
 
         # Construct the relevant system
-        self.system = systemcls(backend, mesh, initsoln, nregs=self.nregs,
+        self.system = systemcls(backend, mmesh.mesh, initsoln, nregs=self.nregs,
                                 cfg=cfg)
+
+        self._systemcls = systemcls
 
         # Register index list and current index
         self._regidx = list(range(self.nregs))
@@ -76,6 +83,23 @@ class BaseDualPseudoIntegrator(BaseCommon):
 
         # Pseudo-step counter
         self.npseudosteps = 0
+
+    def reinit_backend_and_system(self, mesh, soln=None):
+
+        for attr in dir(self):
+           if attr.startswith('_memoize_cache@'):
+               delattr(self, attr) 
+
+        del self.system
+        self.system = self._systemcls(self.backend, mesh, soln, nregs=self.nregs, 
+                                      cfg=self.cfg)
+        self._idxcurr = 0
+
+        execute['compute'](lambda: self.system.commit())
+        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
+
+        gc.collect()
+        comm['world'].barrier()
 
     @property
     def _pseudo_stepper_regidx(self):

@@ -151,7 +151,12 @@ class _IntegratorAdapter:
         return region_data(self.acfg, self.cfgsect, self.intg.meshes['plugins'])
 
     def soln_op_vpts(self, ename, divisor):
-        eles = self.intg.ele_map_plugins[ename]
+        # If exists
+        if self.acfg.hasopt('partition', 'plugins-pname'):
+            eles = self.intg.ele_map_plugins[ename]
+        else:
+            eles = self.intg.system.ele_map[ename]
+
         shapecls = subclass_where(BaseShape, name=ename)
         shape = shapecls(eles.nspts, self.scfg)
 

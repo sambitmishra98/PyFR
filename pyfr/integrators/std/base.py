@@ -1,8 +1,9 @@
+import gc
+
 from pyfr.integrators.base import BaseIntegrator, _common_plugin_prop
 from pyfr.integrators.base import BaseCommon
-from pyfr.util import first
-
-from pyfr.mpiutil import mpi, comm, execute
+from pyfr.mpiutil import execute, comm
+from pyfr.partitioners.online.base import _MeshInterconnector
 
 class BaseStdIntegrator(BaseCommon, BaseIntegrator):
     formulation = 'std'
@@ -41,19 +42,37 @@ class BaseStdIntegrator(BaseCommon, BaseIntegrator):
         # Global degree of freedom count
         self._gndofs = self._get_gndofs()
 
-    def copy_to_empty_system(self):
-        
-        if comm['compute'] != mpi.COMM_NULL:
-            convars = list(first(self.system.ele_map.values()).convars)
-        else:
-            convars = []
+    def reinit_backend_and_system(self, mesh, soln):
+        self._invalidate_caches()
 
-        convars = execute['compute'](lambda: list(first(self.system.ele_map.values()).convars),
-                          default = [])
+        del self.system
 
-        # Ensure the empty systems have what plugins expect.
-        convars = comm['world'].allgather(convars)
-        self.convars = list(first(c for c in convars if c))
+        for attr in dir(self):
+           if attr.startswith('_memoize_cache@'):
+               delattr(self, attr) 
+
+        gc.collect()
+
+        comm['world'].barrier()
+
+        self.system = self._systemcls(self.backend, mesh, soln, 
+                                      nregs=self.nregs, cfg=self.cfg)
+
+        self.copy_to_empty_system()
+
+        self._idxcurr = 0
+
+        # Re-initialise plugin comm and interconnector
+        self.initialise_comm_and_partition(goal='plugins')
+        self._plugins_intercon = _MeshInterconnector(self.meshes['compute'].eidxs, 
+                                                     self.meshes['plugins'].eidxs)
+
+        self.plugins = self._reget_plugins()
+
+        execute['compute'](lambda: self.system.commit())
+        execute['compute'](lambda: self.system.preproc(self.tcurr, self._idxcurr))
+
+        comm['world'].barrier()
 
     @_common_plugin_prop('_curr_soln', edim=2)
     def soln(self):

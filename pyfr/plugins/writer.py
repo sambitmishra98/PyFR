@@ -4,7 +4,6 @@ from pyfr.inifile import Inifile
 from pyfr.mpiutil import get_comm_rank_root
 from pyfr.plugins.base import BaseSolnPlugin, PostactionMixin, RegionMixin
 from pyfr.writers.native import NativeWriter
-from pyfr.util import first
 
 
 class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):

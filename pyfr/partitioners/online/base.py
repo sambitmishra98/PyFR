@@ -614,7 +614,7 @@ class _MetaMesh:
 
     @property
     def mesh(self):
-        return self.mesh_dest if self.mesh_dest is not None else self.mesh_src
+        return self.mesh_dest # if self.mesh_dest is not None else self.mesh_src
 
     @classmethod
     def from_mesh(cls, mesh) -> "_MetaMesh":
@@ -2179,7 +2179,7 @@ class _MeshInterconnector(AlltoallMixin):
                     raise ValueError(f"[pre] r={rank['world']} et={et} invalid edim={edim} shape={a.shape}")
                 a0 = np.moveaxis(a, edim, 0) if edim else a
                 if a0.shape[0] != Ne:
-                    raise ValueError(f"[pre] r={rank['world']} et={et} rows={a0.shape[0]} vs Ne_src={Ne}")
+                    raise ValueError(f"[pre] r={rank['world']} et={et} incoming-rows={a0.shape[0]} vs Ne_src={Ne}")
                 edict0[et] = np.ascontiguousarray(a0)
                 specs[et] = (str(a0.dtype), a0.shape[1:])
             else:
@@ -3692,7 +3692,17 @@ class OnlineGlobalPartitioner(OnlinePartitioner):
         super().__init__(mesh, cfg)
         self._root_cache = None
 
-    def _backend_opts(self, *, ufactor: int | None = None, seed: int | None = None):
+        # 1) Global opts applied to any online partitioner backend
+        self.base = cfg.getliteral('partition', 'online-partitioner-opts', {})
+
+        # 2) Backend-specific opts: scotch-opts / metis-opts
+        self.per = cfg.getliteral('partition', f'{self.name}-opts', {})
+
+        if not isinstance(self.base, dict) or not isinstance(self.per, dict):
+            raise ValueError("[partition] online-partitioner-opts and <name>-opts must be dict literals")
+
+
+    def _backend_opts(self, *, ufactor = None, seed = None):
         """
         Build backend opts by reusing PyFR's existing partitioner option parsing.
 
@@ -3702,18 +3712,10 @@ class OnlineGlobalPartitioner(OnlinePartitioner):
         3) global online opts in cfg: online-partitioner-opts
         4) backend class defaults (handled inside BasePartitioner)
         """
-        # 1) Global opts applied to any online partitioner backend
-        base = self.cfg.getliteral('partition', 'online-partitioner-opts', {})
-
-        # 2) Backend-specific opts: scotch-opts / metis-opts
-        per = self.cfg.getliteral('partition', f'{self.name}-opts', {})
-
-        if not isinstance(base, dict) or not isinstance(per, dict):
-            raise ValueError("[partition] online-partitioner-opts and <name>-opts must be dict literals")
 
         # Merge (per-backend overrides global)
-        opts = dict(base)
-        opts.update(per)
+        opts = dict(self.base)
+        opts.update(self.per)
 
         # Apply call-time overrides last
         if ufactor is not None:

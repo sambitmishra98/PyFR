@@ -20,11 +20,11 @@ def get_pseudo_stepper_cls(name, porder):
     return subclass_where(BaseDualPseudoStepper, pseudo_stepper_name=name)
 
 
-def get_pseudo_integrator(backend, systemcls, mesh, initsoln, cfg, stepnregs,
+def get_pseudo_integrator(backend, systemcls, mmesh, initsoln, cfg, stepnregs,
                           stagenregs, dt):
     # A new type of integrator allowing multip convergence acceleration
     if 'solver-dual-time-integrator-multip' in cfg.sections():
-        return DualMultiPIntegrator(backend, systemcls, mesh, initsoln, cfg,
+        return DualMultiPIntegrator(backend, systemcls, mmesh, initsoln, cfg,
                                     stepnregs, stagenregs, dt)
     else:
         cn = cfg.get('solver-time-integrator', 'pseudo-controller')
@@ -42,5 +42,5 @@ def get_pseudo_integrator(backend, systemcls, mesh, initsoln, cfg, stepnregs,
         pseudointegrator = type(name, (cc, pc), dict(name=name))
 
         # Construct and return an instance of this new integrator class
-        return pseudointegrator(backend, systemcls, mesh, initsoln, cfg,
+        return pseudointegrator(backend, systemcls, mmesh, initsoln, cfg,
                                 stepnregs, stagenregs, dt)

@@ -12,9 +12,13 @@ from pyfr.integrators.dual.pseudo.pseudocontrollers import (
 )
 from pyfr.util import subclass_where
 
+from pyfr.mpiutil import execute, comm
+
+import gc
+
 
 class DualMultiPIntegrator(BaseDualPseudoIntegrator):
-    def __init__(self, backend, systemcls, mesh, initsoln, cfg, stepper_nregs,
+    def __init__(self, backend, systemcls, mmesh, initsoln, cfg, stepper_nregs,
                  stage_nregs, dt):
         self.backend = backend
 
@@ -110,9 +114,11 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
             stg_nregs = stage_nregs if l == self._order else 0
 
             self.pintgs[l] = lpsint(
-                backend, systemcls, mesh, initsoln, mcfg, stp_nregs, stg_nregs,
+                backend, systemcls, mmesh, initsoln, mcfg, stp_nregs, stg_nregs,
                 dt
             )
+
+            self._systemcls = systemcls
 
         # Get the highest p system from plugins
         self.system = self.pintgs[self._order].system
@@ -126,6 +132,20 @@ class DualMultiPIntegrator(BaseDualPseudoIntegrator):
     def commit(self):
         for s in self.pintgs.values():
             s.system.commit()
+
+    def reinit_backend_and_system(self, mesh, soln):
+        for i, s in self.pintgs.items():
+
+            if i == self._order:
+                s.reinit_backend_and_system(mesh, soln)
+            else:
+                s.reinit_backend_and_system(mesh)
+
+        # Get the highest p system from plugins
+        self.system = self.pintgs[self._order].system
+# 
+#         # DO WE NEED THIS?!?!??!
+#         self._init_proj_mats()
 
     @property
     def _idxcurr(self):
