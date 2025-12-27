@@ -972,8 +972,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return int(chosen_flat.size)
 
-    def smooth_until_stagnates(self, max_iters = 20,
-                               move_spts_nodes=False) -> list[int]:
+    def smooth_until_stagnates(self, max_iters = 20, move_spts_nodes=False):
         stable = 0
         last: Optional[int] = None
 
