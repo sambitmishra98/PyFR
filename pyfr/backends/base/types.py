@@ -492,8 +492,6 @@ class Graph:
     def commit(self):
         mreqs, mdeps = self.mpi_reqs, self.mpi_req_deps
 
-        from collections import defaultdict
-
         # byte volume *per peer* for this graph (one graph == one tag)
         npeer            = comm['compute'].size
 

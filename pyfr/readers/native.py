@@ -6,7 +6,7 @@ import numpy as np
 
 from pyfr.inifile import Inifile
 from pyfr.mpiutil import (Scatterer, SparseScatterer, autofree, mpi, 
-                          comm, rank, root)
+                          comm, rank, root, rankmap)
 from pyfr.nputil import iter_struct
 
 # -----------------------------------------------------------------------------
@@ -370,4 +370,4 @@ class NativeReader:
                 nncon.append((etype, glmap[etidx][off], fidx))
 
             # Add the connectivity to the mesh
-            self.mesh.con_p[nrank] = nncon
+            self.mesh.con_p[rankmap[self.comm_name][nrank]] = nncon

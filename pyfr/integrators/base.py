@@ -540,7 +540,6 @@ class BaseIntegrator:
             
             wallt_iterate = time.perf_counter_ns() - wallt_start
 
-            initialise_new_comm('newcompute', list(range(len(rankmap['newcompute']))))
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
             promote_comm('newcompute', 'compute')
 
@@ -617,8 +616,6 @@ class BaseCommon:
 
         kerns = []
         for em, dtaum in it.zip_longest(self.system.ele_banks, dtau_mats):
-            print(f"DEBUGGIN: shape of dtau_mats={[dtau.ioshape for dtau in dtau_mats]}")
-
             kerns.append(self.backend.kernel('reduction', *[em[r] for r in rs],
                                              dt_mat=dtaum, **kwargs))
 

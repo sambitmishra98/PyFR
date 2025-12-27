@@ -8,7 +8,7 @@ import numpy as np
 
 from pyfr.backends.base import NullKernel
 from pyfr.cache import memoize
-from pyfr.mpiutil import autofree, mpi, comm
+from pyfr.mpiutil import autofree, mpi, comm, rankmap
 from pyfr.shapes import BaseShape
 from pyfr.util import subclasses
 
@@ -61,8 +61,7 @@ class BaseSystem:
         # Get all the solution point locations for the elements
         self.ele_ploc_upts = [e.ploc_at_np('upts') for e in eles]
 
-        if comm['compute'] != mpi.COMM_NULL:
-
+        if comm['compute'] != mpi.COMM_NULL and eles:
             if hasattr(eles[0], '_grad_upts'):
                 self.eles_vect_upts = [e._grad_upts for e in eles]
 
@@ -155,7 +154,8 @@ class BaseSystem:
     def _load_mpi_inters(self, mesh, elemap):
         mpi_inters = []
         for p, con in mesh.con_p.items():
-            mpiiface = self.mpiinterscls(self.backend, con, p, elemap,
+            mpiiface = self.mpiinterscls(self.backend, con, 
+                                         rankmap['compute'].index(p), elemap,
                                          self.cfg)
             mpi_inters.append(mpiiface)
 

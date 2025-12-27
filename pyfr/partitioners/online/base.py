@@ -444,13 +444,7 @@ class PartitionState:
         print(tabulate(rows, headers=headers, tablefmt="github",
                        colalign=("left", *("right",) * (len(headers) - 1))))
 
-    def info_to_csv(
-        self,
-        *,
-        tcurr: float,
-        comm_name: str = "compute",
-        csv_path: str = "lb_elem_dist.csv",
-    ) -> None:
+    def info_to_csv(self, *, tcurr, csv_path = "lb_elem_dist.csv"):
         """
         Append one row with:
         - per-rank per-etype counts (restricted to rankmap[comm_name])
@@ -466,8 +460,7 @@ class PartitionState:
         wranks, etypes, cnt, iface_out, nfaces_total, npairs = ps
 
         # Only world-root writes
-        if int(rank["world"]) != int(root["world"]):
-            return
+        if rank['world'] != root['world']: return
 
         # ---- header (stable ordering) ----
         cols = ["tcurr"]
@@ -747,7 +740,7 @@ class _MetaMesh:
                                     resid[efcidx, eidxs[etype][j]] = (cidx, off)
                 except Exception as e:
                     print(
-                        f"[_reconstruct_con_conp_bcon] ERROR on rank={rank['world']} "
+                        f"[_reconstruct_con_conp_bcon] ERROR on rank={rank['compute']} "
                         f"etype={etype}: {e.__class__.__name__}: {e}",
                         flush=True
                     )
@@ -2060,7 +2053,7 @@ class _MeshInterconnector(AlltoallMixin):
         )
 
         # Rank-0 global summary
-        if rank['world'] == 0:
+        if rank['compute'] == root['compute']:
             print(
                 f"[MeshInter/{label}-global] "
                 f"Ne_src_total={Ne_src_total} Ne_dest_total={Ne_dest_total} "
@@ -2152,7 +2145,7 @@ class _MeshInterconnector(AlltoallMixin):
             if (pr < 0).any() and dest_local.size:
                 # This happens only if dest asks for a GID nobody sent -> mapping bug
                 bad = [int(g) for g, p in zip(dest_local.tolist(), pr.tolist()) if p < 0][:8]
-                raise ValueError(f"[plan] r={rank['world']} et={et} dest GIDs missing from recv: {bad}")
+                raise ValueError(f"[plan] r={rank['compute']} et={et} dest GIDs missing from recv: {bad}")
 
             # Book-keeping
             self.recv_to_dest[et] = pr
@@ -2341,147 +2334,53 @@ class RankAllocatorMixin:
         if self.online_cfg_file is not None:
             self.online_cfg = Inifile.load(self.online_cfg_file)
 
-        part_ranklist = self.online_cfg.getliteral('partition', 'compute-ranklist')
+        initialise_new_comm('newcompute', 
+                            self.online_cfg.getliteral('partition', 
+                                                       'compute-ranklist'))
 
-        if len(part_ranklist) != len(rankmap['compute']):
-            initialise_new_comm('newcompute', part_ranklist)
-        else:
-            initialise_new_comm('newcompute', list(range(len(part_ranklist))))
-
-    def swap_partitions(self, r0: int, r1: int) -> None:
-        """
-        Swap the per-rank mesh partition (State `i`) between two *world* ranks.
-
-        Intended usage:
-          - After a 'to-remove-rank' iterate, when some rank r0 is empty and
-            you want to bubble that empty partition to the end (r1 = size - 1).
-          - Once swapped, your existing "remove last rank" logic can safely
-            drop the final rank without touching the MetaMesh internals.
-
-        This:
-          * exchanges `self.i` between ranks r0 and r1 via sendrecv,
-          * recomputes the gid->owner maps,
-          * retags con_i[..., 0] = owner_rank consistently,
-          * invalidates topology-dependent caches.
-        """
-
-        commw = comm['world']
-        myr   = int(rank['world'])
-        nr    = commw.size
-
-        # Normalise & validate inputs
-        r0 = int(r0)
-        r1 = int(r1)
-
-        if r0 == r1:
-            if myr == root['world']:
-                print(f"[mm.swap] noop swap_partitions r0=r1={r0}", flush=True)
-            return
-
-        if not (0 <= r0 < nr and 0 <= r1 < nr):
-            raise ValueError(
-                f"swap_partitions: ranks out of range: r0={r0} r1={r1} size={nr}"
-            )
-
-        # Local bookkeeping: element count before swap
-        before_local = self._local_count
-
-        # Only the two ranks participate in the sendrecv; others are spectators
-        if myr == r0 or myr == r1:
-            partner    = r1 if myr == r0 else r0
+    def __swap_partitions(self, r0, r1) -> None:
+        if rank['world'] == r0 or rank['world'] == r1:
+            partner    = r1 if rank['world'] == r0 else r0
             send_state = self.i
             # Send our State, receive partner's State (pickled Python object)
-            recv_state = commw.sendrecv(send_state, dest=partner, source=partner)
+            recv_state = comm['world'].sendrecv(send_state, dest=partner, source=partner)
             # Overwrite local State
             self.i = recv_state
 
-        after_local = self._local_count
+            print(f"Swapped: {r0=} {r1=} ", flush=True)
 
-        # Collect before/after counts for a sanity log (all ranks participate)
-        before_all = commw.allgather(before_local)
-        after_all  = commw.allgather(after_local)
-
-        if myr == root['world']: print(f"Swapped: {r0=} {r1=} ", flush=True)
-
-        # Ownership tags in con_i have to be updated to reflect the new
-        # gid->owner distribution. Do this once per rank.
         self._retag_con_owners()
-
-        # Invalidate topology-dependent caches (owners_map, nei_gid_sets, ...)
         self._invalidate_topology()
 
-    def rearrange_partitions(self) -> None:
+    def remap_to_world(self, N_star_old):
         """
-        Bubble all 0-element partitions to the end using repeated swap_partitions.
+        Map targets defined on the *old* compute layout onto the *new* ranklist,
+        returning a WORLD-sized integer vector.
 
-        Policy (minimal):
-        - Pick the first i from the front with count[i] == 0
-        - Pick the last j from the back with count[j] > 0
-        - Swap i <-> j
-        - Repeat until no such i exists
+        Accepts compute-order targets (len == len(rankmap['compute']))
         """
-        commw  = comm["world"]
-        myr    = int(rank["world"])
-        root_w = int(root["world"])
-        nr     = int(commw.size)
+        old_ranks = list(rankmap['compute'])      # world ranks, in old compute order
+        new_ranks = list(rankmap['newcompute'])   # world ranks, in new compute order
 
-        while True:
-            # Everyone contributes their current local element count
-            counts = commw.allgather(int(self._local_count))
+        N_star_old = np.asarray(N_star_old, dtype=float)
 
-            swap = None
-            if myr == root_w:
-                # Find last non-zero (ignore trailing zeros already "at the end")
-                j = nr - 1
-                while j >= 0 and counts[j] == 0:
-                    j -= 1
+        if N_star_old.size == len(old_ranks):
+            old_mass = dict(zip(old_ranks, map(float, N_star_old)))
+        else:
+            raise ValueError(f"Unexpected {len(old_ranks) = } ≠ {N_star_old.size = }; ")
 
-                # Find first zero before j
-                i = 0
-                while i <= j and i < nr:
-                    if counts[i] == 0:
-                        # If i == j, it's already in the "end zone" effectively
-                        swap = (i, j) if i < j else None
-                        break
-                    i += 1
-
-                if swap is not None:
-                    print(f"[mm.rearrange] swap {swap[0]} <-> {swap[1]} counts={counts}", flush=True)
-                else:
-                    print(f"[mm.rearrange] done counts={counts}", flush=True)
-
-            # All ranks follow the same swap schedule
-            swap = commw.bcast(swap, root=root_w)
-
-            if swap is None:
-                break
-
-            self.swap_partitions(int(swap[0]), int(swap[1]))
-
-    def _to_world_targets(self, targets_comp, comp_ranks):
-        world = np.zeros(comm['world'].size, dtype=np.int64)
-        for i, wr in enumerate(map(int, comp_ranks)):
-            world[wr] = int(targets_comp[i])
-        return world
-
-    def remap_targets_by_ranklist(self, N_star_old):
-        """
-        Old compute-order targets -> WORLD-sized targets for the NEW ranklist.
-        Policy:
-        - Persisting ranks keep old mass
-        - Added ranks get mean_new = Ntot / len(new_ranks)
-        - Final int_round enforces sum == Ntot (over new_ranks only)
-        - Ranks not in new_ranks get 0 in the returned world vector
-        """
-        old_ranks = list(map(int, rankmap['compute']))
-        new_ranks = list(map(int, rankmap['newcompute']))
-
-        old_mass = dict(zip(old_ranks, map(float, N_star_old)))
         mean_new = float(self.i.nelems_g) / float(len(new_ranks))
 
-        # Newcompute-order float masses
         N_star_new = np.asarray([old_mass.get(wr, mean_new) for wr in new_ranks], dtype=float)
-        return self._to_world_targets(self.int_round(N_star_new), new_ranks)
+        tgt_new = self.int_round(N_star_new)
+
+        # Scatter into WORLD-sized vector (0 for ranks not in new_ranks)
+        world = np.zeros(comm['world'].size, dtype=np.int64)
+        for wr, m in zip(new_ranks, tgt_new):
+            world[int(wr)] = int(m)
+
+        return world
+
 
     # ----------------- Carving partitions to look better ----------------------
 
@@ -2733,10 +2632,6 @@ class CarverMixin:
         IMPORTANT: Always calls _apply_plan_and_commit (even if no moves) so all ranks
         participate consistently.
         """
-        W = comm["world"]
-        rnk = int(rank["world"])
-
-        st = self.i
         cluster_flat = np.asarray(cluster_flat, dtype=np.int64)
 
         # Always start from i->j, like diffuse()
@@ -2762,7 +2657,7 @@ class CarverMixin:
             return 0
 
         # Deterministic priority: highest MPI-face contact first; tie-break by global gid
-        gids = st.eidxs_flat[cand]
+        gids = self.i.eidxs_flat[cand]
         keys0 = -best_cnt[cand].astype(np.int32)   # descending contact
         keys1 = gids.astype(np.int64)              # ascending gid
         order = np.lexsort((keys1, keys0))
@@ -2777,7 +2672,7 @@ class CarverMixin:
         chosen_nbrs = best_nbr[chosen_flat].astype(np.int64, copy=False)
 
         # Build & apply relocation plan
-        eidxs_diff = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbrs, st)
+        eidxs_diff = self._build_eidxs_diff_from_flat(chosen_flat, chosen_nbrs, self.i)
 
         moved_local = 0
         for _nbr, per_et in eidxs_diff.items():
@@ -2785,7 +2680,7 @@ class CarverMixin:
 
         # If chosen_flat non-empty but moved_local==0, something is inconsistent
         # (most likely _build_eidxs_diff_from_flat expects a different "flat" view).
-        if chosen_flat.size and moved_local == 0 and rnk == int(root["world"]):
+        if chosen_flat.size and moved_local == 0 and rank['world'] == int(root['world']):
             print(
                 f"[rmcluster.warn] chosen_flat={int(chosen_flat.size)} but moved_local=0; "
                 "check _build_eidxs_diff_from_flat input expectations",
@@ -2802,9 +2697,9 @@ class CarverMixin:
         This does *not* try to reach targets; it just ensures ranks become non-empty.
         Your subsequent iterate_till_convergence(targets) does the heavy lifting.
         """
-        W = comm["world"]
-        rnk = int(rank["world"])
-        root_w = int(root["world"])
+        W = comm['world']
+        rnk = int(rank['world'])
+        root_w = int(root['world'])
 
         targets = np.asarray(targets, dtype=np.int64)
         cur = np.asarray(self._cur_counts_total, dtype=np.int64)
@@ -2819,7 +2714,7 @@ class CarverMixin:
         # Collective-safe no-op
         if not new_ranks:
             self._apply_plan_and_commit({}, move_spts_nodes=True)
-            return 0
+            return
 
         moved_local = self.seed_new_ranks(new_ranks, targets, nseed=nseed, verbose=verbose)
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
@@ -2827,9 +2722,7 @@ class CarverMixin:
         if verbose and rnk == root_w:
             print(f"[add_ranks] moved_glob(seeds)={moved_glob}", flush=True)
 
-        self.iterate_till_convergence(targets, smooth=False, max_iters=10)
-
-        return int(moved_local)
+        self.iterate_till_convergence(targets, smooth=False, max_iters=5)
 
     def seed_new_ranks(self, rank_ids, targets, *, nseed: int = 1, verbose: bool = True) -> int:
         """
@@ -2838,10 +2731,10 @@ class CarverMixin:
         Output: applies relocation via _apply_plan_and_commit.
         Deterministic and collective-safe.
         """
-        W = comm["world"]
+        W = comm['world']
         P = int(W.size)
-        rnk = int(rank["world"])
-        root_w = int(root["world"])
+        rnk = int(rank['world'])
+        root_w = int(root['world'])
 
         rank_ids = sorted({int(r) for r in rank_ids})
         targets = np.asarray(targets, dtype=np.int64)
@@ -2938,7 +2831,7 @@ class CarverMixin:
         2) If all surplus <= 0, choose rank with max cur.
         3) Tie-break: smallest rank id.
         """
-        W = comm["world"]
+        W = comm['world']
         P = int(W.size)
 
         new_rank = int(new_rank)
@@ -2953,7 +2846,7 @@ class CarverMixin:
 
         if not candidates:
             # Degenerate: nobody has elements; return root (caller will fail to seed anyway)
-            return int(root["world"])
+            return int(root['world'])
 
         surplus = {r: int(cur[r] - targets[r]) for r in candidates}
         max_sur = max(surplus.values()) if surplus else None
@@ -3025,9 +2918,9 @@ class CarverMixin:
     def remove_islands_step(self, *, max_move: int | None = None,
                                            max_sweeps: int = 50,
                                            patience: int = 1) -> None:
-        W = comm["world"]
-        rnk = int(rank["world"])
-        root_w = int(root["world"])
+        W = comm['world']
+        rnk = int(rank['world'])
+        root_w = int(root['world'])
 
         frac_remove = self.island_remove_fraction
 
@@ -3114,9 +3007,9 @@ class CarverMixin:
         nis_all : list[int]
             Allgathered number of islands per rank (so caller can decide to stop if all <= 1).
         """
-        W      = comm["world"]
-        rnk    = int(rank["world"])
-        root_w = int(root["world"])
+        W      = comm['world']
+        rnk    = int(rank['world'])
+        root_w = int(root['world'])
 
         frac_remove = float(self.island_remove_fraction)
 
@@ -3163,9 +3056,9 @@ class CarverMixin:
             Local gids that belong to the islands you want to evict from this rank.
             (May be empty on some ranks; still collective-safe.)
         """
-        W      = comm["world"]
-        rnk    = int(rank["world"])
-        root_w = int(root["world"])
+        W      = comm['world']
+        rnk    = int(rank['world'])
+        root_w = int(root['world'])
 
         cluster_gids = np.asarray(cluster_gids, dtype=np.int64)
         budget_left = None if max_move is None else int(max_move)
@@ -3325,9 +3218,9 @@ class CarverMixin:
         top  = float(self.outlier_removal_fraction)
         mode = str(self.outlier_removal_mode).lower()
 
-        W      = comm["world"]
-        rnk    = int(rank["world"])
-        root_w = int(root["world"])
+        W      = comm['world']
+        rnk    = int(rank['world'])
+        root_w = int(root['world'])
 
         self._reset_j_with_i()
 
@@ -3467,9 +3360,9 @@ class CarverMixin:
         top  = float(self.inlier_addition_fraction)
         mode = str(self.inlier_addition_mode).lower()
 
-        W      = comm["world"]
-        rnk    = int(rank["world"])
-        root_w = int(root["world"])
+        W      = comm['world']
+        rnk    = int(rank['world'])
+        root_w = int(root['world'])
 
         self._reset_j_with_i()
 
@@ -3530,38 +3423,6 @@ class CarverMixin:
 
 
 class OfflineRepartitioner(_MetaMesh):
-    """Base wrapper that provides mesh/partition *construction* services common to all
-    partitioners (diffusion, SCOTCH, METIS, ...).
-
-    This class should stay small: it is the bridge between a PyFR mesh object and
-    the online partition representation (`_MetaMesh` + `PartitionState`).  It should
-    avoid policy decisions.
-
-    Responsibilities
-    ---------------
-    - Construct initial `PartitionState` from a PyFR mesh (or from vparts), including
-      global id conventions and connectivity arrays.
-    - Provide utilities needed by *all* partitioners:
-        * etype ordering, global counts/offsets,
-        * global gid <-> (etype,lid) conventions,
-        * basic validation and logging.
-    - Provide target computation (`calc_target_ecounts`) *only if* it is a pure
-      transformation of telemetry inputs; otherwise delegate to a cost-model mixin.
-
-    Public API (expected)
-    ---------------------
-    - `restart()` / `_reset_j_with_i()` to return to a clean staging state.
-    - `calc_target_ecounts(current_counts, telemetry...) -> targets`
-    - `to_mesh(eidxs)` / `from_mesh(mesh)` (possibly inherited from `_MetaMesh`).
-
-    Extensibility / inheritance
-    ---------------------------
-    If additional partitioners require extra data (graph caches, weights), attach it
-    in subclasses (e.g. OnlineSCOTCHPartitioner) but keep this base free of solver-
-    specific concerns.
-    """
-
-
     def __init__(self, mesh, cfg=None):
         _MetaMesh.__init__(self, mesh, cfg)
 
@@ -3600,17 +3461,17 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
 
     def iterate_aggressively(self, target):
 
-        if rank["world"] == root['world']: print(f"TARGET: {target}")
+        if rank['world'] == root['world']: print(f"TARGET: {target}")
 
         if self._init_aggr_iters > 0:
             for _ in range(self._init_aggr_iters): 
                 cur0 = self._cur_counts_total
-                if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+                if rank['world'] == root['world']: print(f"CURRENT: {cur0}")     
                 self.iterate(target)
             self._init_aggr_iters-=1
         else:
             cur0 = self._cur_counts_total
-            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+            if rank['world'] == root['world']: print(f"CURRENT: {cur0}")     
             self.iterate(target)
 
     def calc_target(self, g1a, g1s, g1r):
@@ -3625,9 +3486,9 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         else:   
             target_int = None
 
-        target_int = comm['world'].bcast(target_int)
+        target_int = comm['world'].bcast(target_int, root=rankmap['compute'][0])
 
-        target_world = self.remap_targets_by_ranklist(target_int)
+        target_world = self.remap_to_world(target_int)
 
         target_world_with_jitter = self.add_jitter_to_targets(target_world)
 
@@ -3638,11 +3499,11 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         Cyclically add +jitter to each rank
         """
         if self.jitter > 0.0:   
-            if rank["world"] == root['world']: print(f"JITTER OLD: {target}")
+            if rank['world'] == root['world']: print(f"JITTER OLD: {target}")
             target[self.jitter_rank] = target[self.jitter_rank]*(1+self.jitter)
             self.jitter_rank = (self.jitter_rank + 1) % len(target)
             target = self.int_round(target)
-            if rank["world"] == root['world']: print(f"JITTER NEW: {target}")
+            if rank['world'] == root['world']: print(f"JITTER NEW: {target}")
             
         return target
 

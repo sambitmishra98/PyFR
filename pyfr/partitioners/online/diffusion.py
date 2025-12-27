@@ -363,17 +363,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             M_full = np.rint(M_full.astype(np.float64) * factor).astype(np.int64)
             M_full[M_full < 0] = 0
 
-
-        #if int(rank['world']) == 0:
-        #    print("[elec_plan.v2] active indices =", active, flush=True)
-        #    print("[elec_plan.v2] F_active =")
-        #    print(F, flush=True)
-        #    print("[elec_plan.v2] mask_active (0/1) =")
-        #    print(maskb.astype(np.int64), flush=True)
-        #    print("[elec_plan.v2] M_full (final flow plan) =")
-        #    print(M_full, flush=True)
-
-
         return M_full
 
     # ----------------- Delta computations -----------------------
@@ -473,7 +462,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         {nbr: [(etype, lid, fidx), ...]} for MPI faces only.
         Deterministic: neighbour keys sorted when iterated later.
         """
-        myr = int(rank["world"])
         per_nbr: dict[int, list[tuple[str, int, int]]] = {}
 
         for et in self.etypes:
@@ -482,7 +470,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if owners.size == 0 or eids.size == 0:
                 continue
 
-            mpi_mask = (eids >= 0) & (owners >= 0) & (owners != myr)
+            mpi_mask = (eids >= 0) & (owners >= 0) & (owners != rank['world'])
             if not np.any(mpi_mask):
                 continue
 
@@ -492,7 +480,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             # group; keep payload
             for nbr in np.unique(nbrs):
                 nbr = int(nbr)
-                if nbr == myr:
+                if nbr == rank['world']:
                     continue
                 sel = (nbrs == nbr)
                 lst = per_nbr.setdefault(nbr, [])
@@ -585,7 +573,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             ]
         sorted by (delta, lid).
         """
-        my_rank = int(rank['world'])
         empty = np.empty((0, 2), dtype=np.int64)
 
         # meta per etype: (boundary_lids, c_me_bound, owners_eff_bound)
@@ -607,7 +594,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             valid = (eids >= 0) & (owners >= 0)
 
             # Elements that see at least one MPI neighbour (owner != my_rank)
-            mpi_face_mask = valid & (owners != my_rank)
+            mpi_face_mask = valid & (owners != rank['world'])
             has_mpi_face  = np.any(mpi_face_mask, axis=1)
 
             if not np.any(has_mpi_face):
@@ -626,12 +613,12 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
             # Neighbours seen anywhere on these boundary elements
             uniq = np.unique(owners_eff_bnd)
-            uniq = uniq[(uniq >= 0) & (uniq != my_rank)]
+            uniq = uniq[(uniq >= 0) & (uniq != rank['world'])]
             for r in uniq:
                 neighbor_ids.add(int(r))
 
             # Count faces attached to *this* rank for each boundary element
-            c_me_bnd = np.sum(owners_eff_bnd == my_rank,
+            c_me_bnd = np.sum(owners_eff_bnd == rank['world'],
                             axis=1).astype(np.int16, copy=False)
 
             per_et_meta[et] = (lids_bnd, c_me_bnd, owners_eff_bnd)
@@ -1052,7 +1039,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         for _ in range(int(max_iters)):
             moved_local = self.smooth(metric="delta", move_spts_nodes=move_spts_nodes)
-            moved_glob = int(comm["world"].allreduce(int(moved_local), op=mpi.SUM))
+            moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
 
             if last is not None and abs(moved_glob - last) <= 0:
                 stable += 1
@@ -1061,7 +1048,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             last = moved_glob
 
             stop = (moved_glob == 0) or (stable >= 1)
-            stop_all = int(comm["world"].allreduce(1 if stop else 0, op=mpi.MAX))
+            stop_all = int(comm['world'].allreduce(1 if stop else 0, op=mpi.MAX))
 
             if stop_all:
                 break
@@ -1083,13 +1070,13 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                                                           flow_matrix=M_eff,
                                         move_spts_nodes=True,)#(mode == "vertices"),)
 
-        moved_glob = int(comm["world"].allreduce(int(moved_local), op=mpi.SUM))
+        moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
 
         return moved_glob, eidxs_diff
 
     def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
         exec_order =(  [(6.0, "vertex")] #+ [(2.0, "face")]
-                     + [(0.0, "face")] * comm["world"].size)
+                     + [(0.0, "face")] * comm['world'].size)
 
         for thr, score_by in exec_order:
             M0 = self.element_flow_plan(target_counts)
@@ -1098,12 +1085,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
     def diffuse(self, *, mode: str = "faces", threshold: float = 0.0,
         flow_matrix, move_spts_nodes: bool = False):
-        import numpy as np
-
-        W   = comm["world"]
-        rnk = int(rank["world"])
-        P   = int(W.size)
-
+        
         mode = str(mode).lower()
         mode = "vertices" if mode.startswith("v") else "faces"
 
@@ -1114,8 +1096,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             move_spts_nodes = True
 
         M = np.asarray(flow_matrix, dtype=np.int64)
-        if M.ndim != 2 or M.shape[0] != M.shape[1] or int(M.shape[0]) != P:
-            raise ValueError(f"diffuse: bad flow_matrix shape {M.shape}, comm size {P}")
+        if M.ndim != 2 or M.shape[0] != M.shape[1] or int(M.shape[0]) != comm['world'].size:
+            raise ValueError(f"diffuse: bad flow_matrix shape {M.shape}, comm size {comm['world'].size}")
 
         # Always start from i -> j (collective safety relies on everyone committing)
         self._reset_j_with_i()
@@ -1129,9 +1111,9 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
         flow_used = np.zeros_like(M, dtype=np.int64)
 
-        for nbr in range(P):
-            cap = int(M[rnk, nbr])
-            if cap <= 0 or nbr == rnk:
+        for nbr in range(comm['world'].size):
+            cap = int(M[rank['world'], nbr])
+            if cap <= 0 or nbr == rank['world']:
                 continue
 
             per_et = deltas_by_rank.get(int(nbr), {})
@@ -1183,7 +1165,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
             if out_per:
                 eidxs_diff[int(nbr)] = out_per
-                flow_used[rnk, int(nbr)] = int(sum(len(v) for v in out_per.values()))
+                flow_used[rank['world'], int(nbr)] = int(sum(len(v) for v in out_per.values()))
 
         moved_local = int(sum(len(g) for per in eidxs_diff.values() for g in per.values()))
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
@@ -1192,7 +1174,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
     def iterate_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
                                  max_iters: int = 1, smooth: bool = True):
 
-        if rank["world"] == root['world']: print(f"TARGET: {target_counts}")
+        if rank['compute'] == root['compute']: print(f"TARGET: {target_counts}")
 
         iters = 0
 
@@ -1202,7 +1184,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             iters += 1
 
             cur0 = self._cur_counts_total
-            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+            if rank['compute'] == root['compute']: print(f"CURRENT: {cur0}")     
 
             self.iterate(target_counts, flowmat_relax=flowmat_relax, smooth=smooth)
 
@@ -1235,6 +1217,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
             self.remove_outliers()
             self.add_ranks(base_counts)
+            
             self.add_inliers()
             #self.smooth_until_stagnates(move_spts_nodes=True)
             self.iterate_till_convergence(base_counts, flowmat_relax=0.5, 
@@ -1247,7 +1230,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if all(int(nis) <= 2 for nis in nis_all):
                 break
 
-    def drain_till_convergence(self, target: List[int], max_iters: int = 100):
+    def drain_till_convergence(self, target: List[int], max_iters: int = 100,
+                               smooth=True):
         drain_ranks = [i for i, (cnt, tgt) in enumerate(zip(self._cur_counts_total, target))
                    if tgt == 0 and cnt > 0]
 
@@ -1259,7 +1243,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         if drained:
             return
 
-        if rank["world"] == root['world']:
+        if rank['compute'] == root['compute']:
             print(f"TARGET: {target}")
 
         iters = 0
@@ -1276,10 +1260,10 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                 break   
             iters += 1
 
-            self.iterate(target, flowmat_relax=1.0)
+            self.iterate(target, flowmat_relax=1.0, smooth=smooth)
 
             cur0 = self._cur_counts_total
-            if rank["world"] == root['world']: print(f"CURRENT: {cur0}")     
+            if rank['compute'] == root['compute']: print(f"CURRENT: {cur0}")     
 
 class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
 
@@ -1299,20 +1283,17 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
         drain_target = target.copy()
 
         if worst is not None:
-            cur = np.asarray(self._cur_counts_total, dtype=np.int64)  # world-sized
-            # Choose a sink rank that is active and not worst
+            cur = np.asarray(self._cur_counts_total, dtype=np.int64)
             cost = np.asarray(self.cost, dtype=np.float64)
             active = np.nonzero((target > 0) & (np.arange(target.size) != worst))[0]
             sink = int(active[np.argmin(cost[active])]) if active.size else None
 
-            # Evacuate current mass from worst into sink to keep sum consistent
             moved_mass = int(cur[worst])
             drain_target[worst] = 0
             if sink is not None:
                 drain_target[sink] += moved_mass
 
-        self.drain_till_convergence(drain_target)
         self.add_ranks(target)
+        self.drain_till_convergence(drain_target, smooth=False)
         self.remove_islands_till_convergence(target=target)
         self.iterate_aggressively(target)
-        self.rearrange_partitions()
