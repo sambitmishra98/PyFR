@@ -243,6 +243,55 @@ class PartitionState:
         # PyFR partitioner language: “global element numbers”
         return self.eidxs_flat
 
+
+    def get_lndofs(self, order: int, *, nvars: int = 1) -> int:
+        """
+        Local degrees-of-freedom for this rank, from element counts only.
+
+        Parameters
+        ----------
+        order : int
+            Polynomial order p.
+        nvars : int
+            Multiply by number of PDE state variables if you want "unknowns".
+            (e.g. compressible NS in 3D => 5; scalar advection => 1)
+        """
+        p = int(order)
+        if p < 0:
+            raise ValueError(f"order must be nonnegative, got {p}")
+        nv = int(nvars)
+        if nv <= 0:
+            raise ValueError(f"nvars must be positive, got {nv}")
+
+        def nspts(et: str) -> int:
+            q = p + 1
+            if et == "hex":
+                return q * q * q
+            elif et == "tet":
+                return q * (p + 2) * (p + 3) // 6
+            elif et == "pri":
+                return q * q * (p + 2) // 2
+            elif et == "pyr":
+                return q * (p + 2) * (2 * p + 3) // 6
+            elif et == "tri":
+                return q * (p + 2) // 2
+            elif et == "quad":
+                return q * q
+            elif et == "line":
+                return q
+            else:
+                raise KeyError(f"Unsupported etype '{et}' in get_lndofs()")
+
+        dofs = 0
+        for et in self.etypes:
+            ne = int(self.eidxs[et].size)
+            if ne:
+                dofs += ne * nspts(et)
+
+        return int(dofs * nv)
+
+
+
     @staticmethod
     def _clone_no_mpi(src: "PartitionState") -> "PartitionState":
         new = PartitionState.__new__(PartitionState)  # bypass __init__/__post_init__
@@ -3363,6 +3412,108 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
 
         self.jitter = cfg.getfloat('partition', 'target-jitter', 0.0)
         self.jitter_rank = 0 
+        
+        # Get solver order from cfg
+        self.order = cfg.getint('solver', 'order')
+        
+        from collections import deque
+
+        self.shuffle_if_stagnant = cfg.getint('partition', 'shuffle-if-stagnant', 1)
+        self.last_max_cost = None
+        self.last_max_cost_iter = 0
+
+        perfwin = cfg.getint('partition', 'perf-window', 20)
+        self.cost_store   = deque(maxlen=perfwin)  # float: local COST_i samples
+        self.nfevals_store = deque(maxlen=perfwin) # int
+        self.dofs_store   = deque(maxlen=perfwin)  # int: local DoF_i at sample time
+
+    def record_perf_sample(self, *, nfevals, nvars: int = 1):
+        """
+        Record one performance sample for THIS rank only.
+
+        cost_world : array-like[float], shape (nranks,)
+            Per-rank effective time (COST) for this sample.
+        nfevals : int
+            Number of RHS evals performed over the same interval.
+        nvars : int
+            Optional multiplier for state variables (leave 1 if you want geometric DoF).
+        """
+        c = np.asarray(self.cost, dtype=np.float64)
+        wi = int(rank['world'])
+        ci = float(c[wi])
+
+        dofs_i = int(self.i.get_lndofs(self.order, nvars=nvars))
+
+        self.cost_store.append(ci)
+        self.nfevals_store.append(int(nfevals))
+        self.dofs_store.append(dofs_i)
+
+    def dofs_per_sec_local(self, *, window=None):
+        """
+        Local DoF/s over a window of recorded samples (median over samples).
+
+        Returns float. If this rank currently has 0 DoF in all samples -> +inf.
+        """
+        if not self.cost_store:
+            raise RuntimeError("No perf samples recorded (cost_store empty).")
+
+        if window is None:
+            window = len(self.cost_store)
+        window = int(window)
+
+        costs = list(self.cost_store)[-window:]
+        nevs  = list(self.nfevals_store)[-window:]
+        dofs  = list(self.dofs_store)[-window:]
+
+        thr = []
+        for ci, nf, di in zip(costs, nevs, dofs):
+            if di <= 0:
+                thr.append(np.inf)
+            else:
+                thr.append((float(di) * float(nf)) / max(float(ci), 1.0e-15))
+
+        return float(np.median(np.asarray(thr, dtype=np.float64)))
+
+
+    def worst_rank_by_dofs_per_sec(self, *, window=None, active_mask=None):
+        """
+        Allgather local DoF/s and return the worst (min DoF/s) among active ranks.
+        Deterministic tie-break: lowest rank id.
+        """
+        thr_i = self.dofs_per_sec_local(window=window)
+
+        thr_all = comm['world'].allgather(thr_i)
+        thr = np.asarray(thr_all, dtype=np.float64)
+
+        nr = thr.size
+        rids = np.arange(nr, dtype=np.int64)
+
+        if active_mask is None:
+            active_mask = np.ones(nr, dtype=bool)
+        else:
+            active_mask = np.asarray(active_mask, dtype=bool)
+
+        # Inactive ranks are never selected as worst
+        thr_eff = thr.copy()
+        thr_eff[~active_mask] = np.inf
+
+        if np.all(~np.isfinite(thr_eff)) or np.all(thr_eff == np.inf):
+            worst = None
+        else:
+            tmin = float(np.min(thr_eff))
+            worst_candidates = rids[thr_eff == tmin]
+            worst = int(np.min(worst_candidates))
+
+        if rank['world'] == root['world']:
+            act = rids[active_mask]
+            order = act[np.argsort(thr[active_mask], kind='stable')]  # worst->best
+            pairs = " ".join([f"R{int(r)}:{float(thr[int(r)]):.1e}" for r in order.size])
+            print(f"[perf] window={window if window is not None else len(self.cost_store)} "
+                f"worst={worst} thr_min={float(thr_eff[worst]) if worst is not None else float('nan'):.6e}")
+            print(f"[perf] worst->best: {pairs}")
+
+        worst = comm['world'].bcast(worst, root=root['world'])
+        return worst
 
     def iterate_aggressively(self, target):
 
@@ -3413,40 +3564,35 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         return target
 
     def detect_stagnation(self):
-
         if not self.shuffle_if_stagnant:
-            return None
+            return False
 
-        patience = self.shuffle_if_stagnant
-
+        patience = int(self.shuffle_if_stagnant)
         cost = np.asarray(self.cost, dtype=np.float64)
         cmax = float(np.max(cost))
 
         if rank['world'] == root['world']:
-            # init
             if self.last_max_cost is None:
                 self.last_max_cost = cmax
                 self.last_max_cost_iter = 0
-                worst = None
+                stagnated = False
             else:
-                # “no improvement” => increment
-                improved = cmax < (self.last_max_cost)
+                improved = cmax < self.last_max_cost
                 if improved:
                     self.last_max_cost = cmax
                     self.last_max_cost_iter = 0
-                    worst = None
+                    stagnated = False
                 else:
                     self.last_max_cost_iter += 1
-                    if self.last_max_cost_iter >= int(patience):
-                        # deterministic argmax tie-break: lowest rank id
-                        worst = int(np.argmax(cost))
-                    else:
-                        worst = None
+                    stagnated = (self.last_max_cost_iter >= patience)
+                    if stagnated:
+                        # disarm so we don't fire every step
+                        self.last_max_cost_iter = 0
         else:
-            worst = None
+            stagnated = False
 
-        worst = comm['world'].bcast(worst, root=root['world'])
-        return worst
+        return bool(comm['world'].bcast(stagnated, root=root['world']))
+
 
 class OnlineGlobalPartitioner(OnlinePartitioner):
     _backend_cls = None          # METISPartitioner or SCOTCHPartitioner

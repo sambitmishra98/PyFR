@@ -1370,7 +1370,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         M_eff[M_eff < 0] = 0
         np.fill_diagonal(M_eff, 0)
 
-        moved_local, flow_used, eidxs_diff = self.diffuse2(mode=mode,
+        moved_local, flow_used, eidxs_diff = self.diffuse(mode=mode,
                                                           threshold=threshold,
                                                           flow_matrix=M_eff,
                                         move_spts_nodes=True,)#(mode == 'vertices'),)
@@ -1490,14 +1490,16 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
         OnlinePartitioner.__init__(self, mesh, cfg)
         DiffusionRepartitioner.__init__(self, mesh, cfg)
 
-        self.last_max_cost = None
-        self.last_max_cost_iter = 0
-        self.cost_store = []
-        self.shuffle_if_stagnant = cfg.getint('partition', 'shuffle-if-stagnant', 0)
-
     def intg_repartition(self, target):
 
-        worst  = self.detect_stagnation()
+        self.record_perf_sample(nfevals = 10, nvars = 5)
+        stagnated = self.detect_stagnation()
+        worst = None
+        if stagnated:
+            # active_mask: exclude ranks you refuse to drain (e.g., GPU rank 0)
+            active_mask = (target > 0)
+            worst = self.worst_rank_by_dofs_per_sec(window=None,
+                                                    active_mask=active_mask)
 
         drain_target = target.copy()
 
@@ -1511,6 +1513,9 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
             drain_target[worst] = 0
             if sink is not None:
                 drain_target[sink] += moved_mass
+
+            # Re-normalise by ...int... the cost after moving the mass
+            drain_target = self.int_round(drain_target)
 
         self.add_ranks(target)
         self.drain_till_convergence(drain_target, smooth=False)
