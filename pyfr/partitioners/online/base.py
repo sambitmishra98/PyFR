@@ -1406,10 +1406,10 @@ class WaitsToTargetsModelMixin:
         # Print the cost function expression
         if rank['world'] == root['world']:
             print(f"Cost function: "
-                f"A^{self.cost_g1a_e} * {self.cost_g1a} + "
-                f"R^{self.cost_g1r_e} * {self.cost_g1r} + "
-                f"S^{self.cost_g1s_e} * {self.cost_g1s} + "
-                f"Rᵀ^{self.cost_g1rt_e} * {self.cost_g1rt}")
+                 f"{self.cost_g1a} x A^{self.cost_g1a_e} + "
+                 f"{self.cost_g1r} x R^{self.cost_g1r_e} + "
+                 f"{self.cost_g1s} x S^{self.cost_g1s_e} + "
+                f"{self.cost_g1rt} x Rᵀ^{self.cost_g1rt_e}")
 
         self.lb_iters = cfg.getint('partition', 'lb-outeriterations', 1)
         
@@ -1486,8 +1486,8 @@ class WaitsToTargetsModelMixin:
 
         # Use exponent properly
 
-        self.cost = (  self.cost_g1a  * g1a **self.cost_g1a_e
-                     + self.cost_g1r  * r_in**self.cost_g1r_e
+        self.cost = (  self.cost_g1a  * g1a  **self.cost_g1a_e
+                     + self.cost_g1r  * r_in **self.cost_g1r_e
                      + self.cost_g1s  * s_out**self.cost_g1s_e
                      + self.cost_g1rt * r_out**self.cost_g1rt_e)
 

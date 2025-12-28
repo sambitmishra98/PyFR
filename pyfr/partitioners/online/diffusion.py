@@ -317,13 +317,13 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
     # ----------------- Delta computations -----------------------
     def _compute_affinity(self, mode):
-        if   mode in ('faces'):    return self._calc_mpi_face_affinity()
-        elif mode in ('vertices'): return self._calc_mpi_vertex_affinity()
+        if   mode in ['faces',]:    return self._calc_mpi_face_affinity()
+        elif mode in ['vertices',]: return self._calc_mpi_vertex_affinity()
         else: raise ValueError(f"Invalid {mode = }")
 
     def _compute_deltas(self, mode):
-        if   mode in ('faces'):    return self._calc_mpi_face_delta()
-        elif mode in ('vertices'): return self._calc_mpi_vertex_delta()
+        if   mode in ['faces',]:    return self._calc_mpi_face_delta()
+        elif mode in ['vertices',]: return self._calc_mpi_vertex_delta()
         else: raise ValueError(f"Unknown {mode = }")
 
     def _calc_mpi_vertex_delta(self) -> dict[int, dict[str, "np.ndarray"]]:
@@ -691,7 +691,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                 [3, 0, 4],
             )]
 
-        raise NotImplementedError(f"_face_vertex_indices: etype '{et}' not implemented")
+        raise NotImplementedError(f"{et} etype not implemented")
 
     def collect_mpi_vertex_nodes(self) -> dict[int, "np.ndarray"]:
         """
@@ -733,8 +733,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return out
 
-    def _metric_from_ab(self, a: np.ndarray, b: np.ndarray, metric: str) -> np.ndarray:
-        # Always float64 for future-proofing and to support ratio cleanly.
+    def _metric_from_ab(self, a, b, metric):
         a = a.astype(np.float64, copy=False)
         b = b.astype(np.float64, copy=False)
 
@@ -748,7 +747,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             np.divide(a, den, out=out, where=(den > 0.0))
             return out
         else:
-            raise ValueError(f"Unknown metric {metric!r}; expected 'delta' or 'ratio'")
+            raise ValueError(f"Unknown {metric = }")
 
     def _calc_mpi_vertex_affinity(self) -> dict[int, dict[str, np.ndarray]]:
         """
@@ -891,16 +890,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         aff_by_rank = self._compute_affinity('faces')  # {nbr:{et:[lid,a,b]}}
         etypes_all  = list(self._etype_order())
 
-        def metric_from_ab(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-            a = a.astype(np.float64, copy=False)
-            b = b.astype(np.float64, copy=False)
-            if metric == "delta":
-                return a - b
-            den = a + b
-            out = np.full_like(a, np.inf, dtype=np.float64)
-            np.divide(a, den, out=out, where=(den > 0.0))
-            return out
-
         def score_metric(x: np.ndarray, *, et: str, nbr: int) -> np.ndarray:
             s = x
             if etype_scale is not None:
@@ -926,7 +915,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                 a    = arr[:, 1].astype(np.int64, copy=False)
                 b    = arr[:, 2].astype(np.int64, copy=False)
 
-                mraw = metric_from_ab(a, b)
+                #mraw = metric_from_ab(a, b)
+                mraw = self._metric_from_ab(a, b, metric)
                 mkeep = (mraw <= -1)
                 if not np.any(mkeep):
                     continue
