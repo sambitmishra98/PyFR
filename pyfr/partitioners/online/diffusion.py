@@ -317,13 +317,13 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
     # ----------------- Delta computations -----------------------
     def _compute_affinity(self, mode):
-        if   mode in ("faces"):    return self._calc_mpi_face_affinity()
-        elif mode in ("vertices"): return self._calc_mpi_vertex_affinity()
+        if   mode in ('faces'):    return self._calc_mpi_face_affinity()
+        elif mode in ('vertices'): return self._calc_mpi_vertex_affinity()
         else: raise ValueError(f"Invalid {mode = }")
 
     def _compute_deltas(self, mode):
-        if   mode in ("faces"):    return self._calc_mpi_face_delta()
-        elif mode in ("vertices"): return self._calc_mpi_vertex_delta()
+        if   mode in ('faces'):    return self._calc_mpi_face_delta()
+        elif mode in ('vertices'): return self._calc_mpi_vertex_delta()
         else: raise ValueError(f"Unknown {mode = }")
 
     def _calc_mpi_vertex_delta(self) -> dict[int, dict[str, "np.ndarray"]]:
@@ -888,7 +888,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         self._reset_j_with_i()
         st = self.i
 
-        aff_by_rank = self._compute_affinity("faces")  # {nbr:{et:[lid,a,b]}}
+        aff_by_rank = self._compute_affinity('faces')  # {nbr:{et:[lid,a,b]}}
         etypes_all  = list(self._etype_order())
 
         def metric_from_ab(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -992,7 +992,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             if stop_all:
                 break
 
-    def diffuse_step(self, flow_matrix, threshold, scale, score_by):
+    def diffuse_step(self, flow_matrix, threshold, scale, mode='faces'):
 
         M = np.asarray(flow_matrix, dtype=np.int64)
 
@@ -1002,45 +1002,33 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         M_eff[M_eff < 0] = 0
         np.fill_diagonal(M_eff, 0)
 
-        mode = "vertices" if str(score_by).lower().startswith("v") else "faces"
-
         moved_local, flow_used, eidxs_diff = self.diffuse(mode=mode,
                                                           threshold=threshold,
                                                           flow_matrix=M_eff,
-                                        move_spts_nodes=True,)#(mode == "vertices"),)
+                                        move_spts_nodes=True,)#(mode == 'vertices'),)
 
         moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
 
         return moved_glob, eidxs_diff
 
     def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
-        exec_order =(  [(6.0, "vertices")] #+ [(2.0, "face")]
-                     + [(0.0, "faces")] * comm['world'].size)
+        exec_order =(  [(6.0, 'vertices')] + [(2.0, 'faces')]
+                     + [(0.0, 'faces')] * comm['world'].size)
 
-        for thr, score_by in exec_order:
+        for thr, mode in exec_order:
             M0 = self.element_flow_plan(target_counts)
-            self.diffuse_step(M0, thr, flowmat_relax, score_by)
+            self.diffuse_step(M0, thr, flowmat_relax, mode)
             if smooth==True: self.smooth_until_stagnates(move_spts_nodes=True)
 
-    def diffuse(self, *, mode: str = "faces", threshold: float = 0.0,
-        flow_matrix, move_spts_nodes: bool = False):
+    def diffuse(self, *, mode = 'faces', threshold = 0., flow_matrix, 
+                move_spts_nodes = False):
         
-        mode = str(mode).lower()
-        mode = "vertices" if mode.startswith("v") else "faces"
-
         thr = int(threshold) if float(threshold).is_integer() else float(threshold)
-
-        # Vertex mode must keep spts_nodes consistent for subsequent vertex scoring
-        if mode == "vertices":
-            move_spts_nodes = True
+        if mode == 'vertices': move_spts_nodes = True
 
         M = np.asarray(flow_matrix, dtype=np.int64)
-        if M.ndim != 2 or M.shape[0] != M.shape[1] or int(M.shape[0]) != comm['world'].size:
-            raise ValueError(f"diffuse: bad flow_matrix shape {M.shape}, comm size {comm['world'].size}")
 
-        # Always start from i -> j (collective safety relies on everyone committing)
         self._reset_j_with_i()
-        st = self.i
         etypes_all = list(self._etype_order())
 
         # Canonical candidate source (per neighbour, per etype: [lid, delta])
@@ -1074,7 +1062,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                 lids_t = lids[m_thr]
                 dlt_t  = dlt[m_thr]
 
-                gids_t = st.eidxs[et][lids_t].astype(np.int64, copy=False)
+                gids_t = self.i.eidxs[et][lids_t].astype(np.int64, copy=False)
 
                 # Legacy semantics: pick at most once per sweep by gid (per etype)
                 pset = picked_by_et[et]
