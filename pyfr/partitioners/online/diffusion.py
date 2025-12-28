@@ -870,13 +870,9 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return v
 
-    # ----------------- Legacy-style smoothing pass ----------------------------
+    # ----------------- Drivers ----------------------------
 
-    def smooth(self, metric: str = "delta", 
-                     etype_scale: dict[str, float] | None = None,
-                     device_bias: dict[str, dict[str, float]] | None = None,
-                     rank_tags: list[str] | None = None,
-                     move_spts_nodes=False) -> int:
+    def smooth(self, metric: str = "delta", etype_scale: dict[str, float] | None = None, device_bias: dict[str, dict[str, float]] | None = None, rank_tags: list[str] | None = None, move_spts_nodes=False) -> int:
         metric = str(metric).lower()
         if metric not in ("delta", "ratio"):
             raise ValueError(f"smooth: metric must be 'delta' or 'ratio', got {metric!r}")
@@ -962,56 +958,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
         return int(chosen_flat.size)
 
-    def smooth_until_stagnates(self, max_iters = 20, move_spts_nodes=False):
-        stable = 0
-        last: Optional[int] = None
-
-        for _ in range(int(max_iters)):
-            moved_local = self.smooth(metric="delta", move_spts_nodes=move_spts_nodes)
-            moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
-
-            if last is not None and abs(moved_glob - last) <= 0:
-                stable += 1
-            else:
-                stable = 0
-            last = moved_glob
-
-            stop = (moved_glob == 0) or (stable >= 1)
-            stop_all = int(comm['world'].allreduce(1 if stop else 0, op=mpi.MAX))
-
-            if stop_all:
-                break
-
-    def diffuse_step(self, flow_matrix, threshold, scale, mode='faces'):
-
-        M = np.asarray(flow_matrix, dtype=np.int64)
-
-        # legacy-style relaxation: ceil
-        scale = float(scale)
-        M_eff = np.ceil(M.astype(np.float64) * scale).astype(np.int64)
-        M_eff[M_eff < 0] = 0
-        np.fill_diagonal(M_eff, 0)
-
-        moved_local, flow_used, eidxs_diff = self.diffuse(mode=mode,
-                                                          threshold=threshold,
-                                                          flow_matrix=M_eff,
-                                        move_spts_nodes=True,)#(mode == 'vertices'),)
-
-        moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
-
-        return moved_glob, eidxs_diff
-
-    def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
-        exec_order =(  [(6.0, 'vertices')] + [(2.0, 'faces')]
-                     + [(0.0, 'faces')] * comm['world'].size)
-
-        for thr, mode in exec_order:
-            M0 = self.element_flow_plan(target_counts)
-            self.diffuse_step(M0, thr, flowmat_relax, mode)
-            if smooth==True: self.smooth_until_stagnates(move_spts_nodes=True)
-
-    def diffuse(self, *, mode = 'faces', threshold = 0., flow_matrix, 
-                move_spts_nodes = False):
+    def diffuse(self, *, mode = 'faces', threshold = 0., flow_matrix, move_spts_nodes = False):
         
         thr = int(threshold) if float(threshold).is_integer() else float(threshold)
         if mode == 'vertices': move_spts_nodes = True
@@ -1087,6 +1034,204 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         moved_local = int(sum(len(g) for per in eidxs_diff.values() for g in per.values()))
         self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
         return moved_local, flow_used, eidxs_diff
+
+    def diffuse2(self, *, mode='faces', metric='delta', threshold=0.0, flow_matrix=None, move_spts_nodes=False, debug=False):
+        """
+        Affinity-driven diffusion (no precomputed delta tables).
+
+        Parameters
+        ----------
+        mode : str
+            'faces'/'vertices' (also accepts 'e'->faces, 'v'->vertices).
+        metric : str
+            'delta' (a-b) or 'ratio' (a/(a+b), smaller => more neighbour-tied).
+        threshold : float|int
+            Move candidates with score <= threshold.
+        flow_matrix : (P,P) int array
+            Per-rank caps M[src,nbr].
+        move_spts_nodes : bool
+            If True, relocate spts_nodes alongside eidxs (forced True in vertex mode).
+        debug : bool
+            If True, print one deterministic summary line per rank.
+
+        Returns
+        -------
+        moved_local : int
+        flow_used   : (P,P) int array
+        eidxs_diff  : dict[int, dict[str, np.ndarray]]
+        """
+        # ----------------- Parse mode deterministically -----------------
+        m = str(mode).strip().lower()
+        mode_map = {
+            'faces': 'faces', 'face': 'faces', 'f': 'faces', 'e': 'faces', 'edge': 'faces', 'edges': 'faces',
+            'vertices': 'vertices', 'vertex': 'vertices', 'v': 'vertices', 'vert': 'vertices', 'vtx': 'vertices'
+        }
+        if m not in mode_map:
+            raise ValueError(f"diffuse2: unknown mode {mode!r}")
+        mode = mode_map[m]
+
+        metric = str(metric).strip().lower()
+        if metric not in ('delta', 'ratio'):
+            raise ValueError(f"diffuse2: metric must be 'delta' or 'ratio', got {metric!r}")
+
+        # Threshold type: keep your existing behaviour
+        thr = int(threshold) if float(threshold).is_integer() else float(threshold)
+
+        # Vertex mode must keep spts_nodes consistent for subsequent vertex scoring
+        if mode == 'vertices':
+            move_spts_nodes = True
+
+        M = np.asarray(flow_matrix, dtype=np.int64)
+        if M.ndim != 2 or M.shape[0] != M.shape[1] or int(M.shape[0]) != comm['world'].size:
+            raise ValueError(f"diffuse2: bad flow_matrix shape {M.shape}, comm size {comm['world'].size}")
+
+        # Always start from i -> j
+        self._reset_j_with_i()
+        st = self.i
+        etypes_all = list(self._etype_order())
+
+        # Canonical candidate source: {nbr: {et: (N,3) [lid,a,b]}}
+        aff_by_rank = self._compute_affinity(mode)
+
+        picked_by_et = {et: set() for et in etypes_all}   # per-etype gid de-dupe (legacy semantics)
+        eidxs_diff: dict[int, dict[str, np.ndarray]] = {}
+        flow_used = np.zeros_like(M, dtype=np.int64)
+
+        # Optional debug accumulation
+        moved_to = {}
+
+        for nbr in range(comm['world'].size):
+            cap = int(M[rank['world'], nbr])
+            if cap <= 0 or nbr == rank['world']:
+                continue
+
+            per_et = aff_by_rank.get(int(nbr), {})
+            cand: list[tuple[float, int, int, str]] = []
+            # tuple: (score, gid_u, gid, et)
+
+            for et in etypes_all:
+                arr = per_et.get(et, None)
+                if arr is None or arr.size == 0:
+                    continue
+
+                lids = arr[:, 0].astype(np.int64, copy=False)
+                a    = arr[:, 1].astype(np.int64, copy=False)
+                b    = arr[:, 2].astype(np.int64, copy=False)
+
+                # Derive score from (a,b)
+                if metric == 'delta':
+                    score = (a - b).astype(np.int64, copy=False)   # exact, integer-valued
+                else:
+                    # ratio: a/(a+b), smaller => more neighbour-tied
+                    den = (a + b).astype(np.float64, copy=False)
+                    score = np.full(a.shape, np.inf, dtype=np.float64)
+                    np.divide(a.astype(np.float64, copy=False), den, out=score, where=(den > 0.0))
+
+                # Threshold
+                keep = (score <= thr)
+                if not np.any(keep):
+                    continue
+
+                lids_t  = lids[keep]
+                score_t = score[keep]
+
+                # Local per-etype gid; NOT globally unique across etypes
+                gids_t = st.eidxs[et][lids_t].astype(np.int64, copy=False)
+                # Globally-unique id for tie-breaking only
+                gids_u = (int(st.edisps[et]) + gids_t).astype(np.int64, copy=False)
+
+                pset = picked_by_et[et]
+                for gid_u, gid, sc in zip(gids_u.tolist(), gids_t.tolist(), score_t.tolist()):
+                    if gid not in pset:
+                        cand.append((float(sc), int(gid_u), int(gid), et))
+
+            if not cand:
+                continue
+
+            # Deterministic: primary score, then globally-unique element id
+            cand.sort(key=lambda t: (t[0], t[1]))
+
+            chosen = cand[: min(cap, len(cand))]
+
+            per_out: dict[str, list[int]] = {}
+            for sc, gid_u, gid, et in chosen:
+                per_out.setdefault(et, []).append(gid)
+                picked_by_et[et].add(gid)
+
+            out_per = {
+                et: np.asarray(sorted(v), dtype=np.int64)
+                for et, v in per_out.items()
+                if v
+            }
+
+            if out_per:
+                eidxs_diff[int(nbr)] = out_per
+                used = int(sum(len(v) for v in out_per.values()))
+                flow_used[rank['world'], int(nbr)] = used
+                if debug:
+                    moved_to[int(nbr)] = used
+
+        moved_local = int(sum(len(g) for per in eidxs_diff.values() for g in per.values()))
+        self._apply_plan_and_commit(eidxs_diff, move_spts_nodes=move_spts_nodes)
+
+        if debug:
+            # One line per rank, deterministic key ordering
+            items = ",".join(f"{k}:{moved_to[k]}" for k in sorted(moved_to))
+            print(f"[diffuse2] rank={int(rank['world'])} mode={mode} metric={metric} thr={thr} moved_local={moved_local} moved_to={{{items}}}")
+
+        return moved_local, flow_used, eidxs_diff
+
+
+    # ----------------- Wrappers ----------------------------
+
+    def smooth_until_stagnates(self, max_iters = 20, move_spts_nodes=False):
+        stable = 0
+        last: Optional[int] = None
+
+        for _ in range(int(max_iters)):
+            moved_local = self.smooth(metric="delta", move_spts_nodes=move_spts_nodes)
+            moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
+
+            if last is not None and abs(moved_glob - last) <= 0: stable += 1
+            else: stable = 0
+
+            last = moved_glob
+
+            stop = (moved_glob == 0) or (stable >= 1)
+            stop_all = int(comm['world'].allreduce(1 if stop else 0, op=mpi.MAX))
+
+            if stop_all:
+                break
+
+    def diffuse_step(self, flow_matrix, threshold, scale, mode='faces'):
+
+        M = np.asarray(flow_matrix, dtype=np.int64)
+
+        # legacy-style relaxation: ceil
+        scale = float(scale)
+        M_eff = np.ceil(M.astype(np.float64) * scale).astype(np.int64)
+        M_eff[M_eff < 0] = 0
+        np.fill_diagonal(M_eff, 0)
+
+        moved_local, flow_used, eidxs_diff = self.diffuse2(mode=mode,
+                                                          threshold=threshold,
+                                                          flow_matrix=M_eff,
+                                        move_spts_nodes=True,)#(mode == 'vertices'),)
+
+        moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
+
+        return moved_glob, eidxs_diff
+
+    # ----------------- Diffuse + Smooth wrappers ----------------------------
+
+    def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
+        exec_order =(  [(6.0, 'vertices')] + [(2.0, 'faces')]
+                     + [(0.0, 'faces')] * comm['world'].size)
+
+        for thr, mode in exec_order:
+            M0 = self.element_flow_plan(target_counts)
+            self.diffuse_step(M0, thr, flowmat_relax, mode)
+            if smooth==True: self.smooth_until_stagnates(move_spts_nodes=True)
 
     def iterate_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
                                  max_iters: int = 1, smooth: bool = True):
