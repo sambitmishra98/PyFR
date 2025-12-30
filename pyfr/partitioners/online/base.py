@@ -1525,58 +1525,6 @@ class _MetaMesh:
 
 
 class WaitsToTargetsModelMixin:
-
-    """Cost-model mixin that maps measured runtime/communication signals to *target*
-    element counts per rank.
-
-    This mixin is the *performance-model* layer.  It should not mutate partitions.
-    It provides:
-      (i) ingestion of performance telemetry (waitsome matrices, per-rank compute),
-     (ii) regularisation/smoothing and device-aware weighting,
-    (iii) production of integer targets and (optionally) per-etype weights.
-
-    Inputs (typical)
-    ----------------
-    - `g1a, g1s, g1r`: aggregated/median MPI Waitsome time matrices:
-        * all-time, send-time, recv-time (or any consistent decomposition).
-    - Per-rank compute proxies (e.g. ndofs, wall-clock kernel time, FLOP proxies).
-    - Device tags and etype preference policies (CPU/GPU, hex/tet bias, etc.).
-    - Online controls from config:
-        * jitter fractions, smoothing windows, lb cadence, caps, min-elements, etc.
-
-    Outputs (typical)
-    -----------------
-    - `targets[r]`: integer target element counts for each *world rank* (or a defined
-      rank-list ordering), with exact global conservation enforced:
-          sum(targets) == sum(current_counts)
-    - Optional auxiliary products:
-        * rank weights / speeds,
-        * per-etype weighting vectors,
-        * diagnostic scalars for logging (fit residuals, stability metrics).
-
-    Contract / invariants
-    ---------------------
-    - Deterministic: same inputs -> same targets (seeded randomness only via an
-      explicit RNG/seed parameter).
-    - Conservative: targets must preserve total element count.
-    - Safe for dynamic ranks: ranks with `current==0` may still get `target>0`
-      (addition), and ranks with `target==0` may currently own elements (removal).
-
-    Public API (expected)
-    ---------------------
-    - `calc_target_ecounts(current_counts, g1a, g1s, g1r, ...) -> targets`
-    - `rank_tags()` / `device_tags` helpers to align devices with ranks.
-    - Configuration exposure:
-        * jitter schedule parameters,
-        * fitting window/robust statistics parameters.
-
-    Notes on architecture
-    ---------------------
-    If this mixin needs mesh-derived features (etype mix, ndofs), pass them in as
-    arguments or via a small immutable “telemetry bundle”.  Avoid reaching into
-    partition mutation internals to keep the model testable in isolation.
-    """
-
     _LB_CYCLIC_JITTER_CTR = 0
 
     def __init__(self, cfg):
@@ -1668,8 +1616,20 @@ class WaitsToTargetsModelMixin:
 
         if g1s is not None:
 
-            cost_world = execute['compute'](lambda: self.compute_cost(g1a, g1s, g1r), None)
-            cost_world = W.bcast(cost_world, root=rootc_w)
+            P = int(W.size)
+            mpidbl = mpi.DOUBLE
+
+            if int(rank['world']) == rootc_w:
+                cost_world = execute['compute'](lambda: self.compute_cost(g1a, g1s, g1r), None)
+                cost_world = np.asarray(cost_world, dtype=np.float64, copy=False)
+            else:
+                cost_world = np.empty(P, dtype=np.float64)
+
+            W.Bcast([cost_world, mpidbl], root=rootc_w)
+            self.cost = cost_world
+
+            #cost_world = execute['compute'](lambda: self.compute_cost(g1a, g1s, g1r), None)
+            #cost_world = W.bcast(cost_world, root=rootc_w)
             self.cost = np.asarray(cost_world, dtype=np.float64)
 
             comp_ranks = np.asarray(rankmap['compute'], dtype=np.int64)
@@ -1683,18 +1643,28 @@ class WaitsToTargetsModelMixin:
             cost_world = 1
             weights_comp = np.ones(len(rankmap['compute']), dtype=np.float64)
 
-        if cost_world is not None:
-            target_comp = super().calc_target(weights_comp)
+        mpii64 = mpi.INT64_T if hasattr(mpi, "INT64_T") else mpi.LONG_LONG
+        P = int(W.size)
+
+        if int(rank['world']) == rootc_w:
+            target_comp = super().calc_target(weights_comp)   # may be Pc or P depending on MRO
+            target_world = self.remap_to_world(target_comp)   # now robust (Fix 1)
+            target_world = np.asarray(target_world, dtype=np.int64, copy=False)
         else:
-            target_comp = None
+            target_world = np.empty(P, dtype=np.int64)
 
-        target_comp = W.bcast(target_comp, root=rootc_w)
+        W.Bcast([target_world, mpii64], root=rootc_w)
 
-        # Remap from *current compute layout* -> *planned next compute layout*
-        target_world = self.remap_to_world(target_comp)  # we’ll make this use plancompute next
         target_world = self.add_jitter_to_targets(target_world)
-
         return target_world
+
+        #target_comp = W.bcast(target_comp, root=rootc_w)
+        #
+        ## Remap from *current compute layout* -> *planned next compute layout*
+        #target_world = self.remap_to_world(target_comp)  # we’ll make this use plancompute next
+        #target_world = self.add_jitter_to_targets(target_world)
+        #
+        #return target_world
 
     def compute_cost(self, g1a, g1s, g1r):
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
@@ -2430,19 +2400,31 @@ class RankAllocatorMixin:
         old_ranks = list(rankmap['compute'])       # world ranks, current compute order
         new_ranks = list(rankmap['plancompute'])   # world ranks, planned next order
 
-        N_star_old = np.asarray(N_star_old, dtype=float)
-        if N_star_old.size != len(old_ranks):
-            raise ValueError(f"Unexpected old_ranks={len(old_ranks)} vs N_star_old={N_star_old.size}")
+        P_world = int(comm['world'].size)
 
-        old_mass = dict(zip(old_ranks, map(float, N_star_old)))
+        N_star_old = np.asarray(N_star_old, dtype=float).ravel()
 
-        # Existing fallback (keep it)
+        # Accept BOTH:
+        #  - compute-shaped input (Pc)
+        #  - world-shaped input (P)
+        if N_star_old.size == P_world:
+            # Interpret as world-vector; extract current compute order
+            N_star_old_comp = np.asarray([N_star_old[int(wr)] for wr in old_ranks], dtype=float)
+        elif N_star_old.size == len(old_ranks):
+            N_star_old_comp = N_star_old
+        else:
+            raise ValueError(
+                f"remap_to_world: got N_star_old.size={N_star_old.size}, "
+                f"expected Pc={len(old_ranks)} or P={P_world}. "
+                f"old_ranks={old_ranks}"
+            )
+
+        old_mass = dict(zip(old_ranks, map(float, N_star_old_comp)))
+
         mean_new = float(self.i.nelems_g) / float(len(new_ranks))
 
-        # NEW: device-aware mean fallback for ranks absent from old_mass
         winfo = get_comm_info('world')
 
-        # Precompute per-device mean over the *existing* compute ranks
         dev_means = {}
         if winfo is not None:
             by_dev = {}
@@ -2468,11 +2450,12 @@ class RankAllocatorMixin:
 
         tgt_new = self.int_round(N_star_new)
 
-        world = np.zeros(comm['world'].size, dtype=np.int64)
+        world = np.zeros(P_world, dtype=np.int64)
         for wr, m in zip(new_ranks, tgt_new):
             world[int(wr)] = int(m)
 
         return world
+
 
 
     # ----------------- Carving partitions to look better ----------------------
@@ -3662,21 +3645,19 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         RankAllocatorMixin.__init__(self, cfg)
 
         # Initially balance elements aggressively
-        self._init_aggr_iters = cfg.getint('partition',
-                                             'lb-init-aggressive-iters', 
-                                              comm['world'].size)
+        self._init_aggr_iters = cfg.getint('partition', 'lb-init-aggressive-iters')
 
-        self.jitter = cfg.getfloat('partition', 'target-jitter', 0.0)
+        self.jitter = cfg.getfloat('partition', 'target-jitter')
         self.jitter_rank = 0 
         
         # Get solver order from cfg
         self.order = cfg.getint('solver', 'order')
         
-        self.shuffle_if_stagnant = cfg.getint('partition', 'shuffle-if-stagnant', 1)
+        self.shuffle_if_stagnant = cfg.getint('partition', 'shuffle-if-stagnant')
         self.last_max_cost = None
         self.last_max_cost_iter = 0
 
-        self._perfwin = cfg.getint('partition', 'perf-window', 20)
+        self._perfwin = cfg.getint('partition', 'perf-window', 1)
         self.cost_store    = deque(maxlen=self._perfwin)
         self.nfevals_store = deque(maxlen=self._perfwin)
         self.dofs_store    = deque(maxlen=self._perfwin)
