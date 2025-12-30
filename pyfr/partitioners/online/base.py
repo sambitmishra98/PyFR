@@ -3578,6 +3578,47 @@ class OfflineRepartitioner(_MetaMesh):
     def _to_world_targets(self, targets_comp, comp_ranks):
         return targets_comp
 
+    # --- NEW: fixed-size buffer collectives (no pickle) ---
+    def _world_allgather_i64_scalar(self, x: int) -> np.ndarray:
+        W = comm['world']
+        send = np.asarray([int(x)], dtype=np.int64)
+        recv = np.empty(W.size, dtype=np.int64)
+
+        mpitype = mpi.INT64_T if hasattr(mpi, "INT64_T") else mpi.LONG_LONG
+        W.Allgather([send, mpitype], [recv, mpitype])
+        return recv
+
+    def _world_allgather_i64_scalar_dbg(self, x: int, tag: str) -> np.ndarray:
+        dbg = bool(int(os.environ.get("PYFR_LB_DEBUG", "0")))
+        wi = int(rank['world'])
+
+        if dbg:
+            print(f"[lb.{tag}] ENTER rank={wi} x={int(x)}", flush=True)
+
+        out = self._world_allgather_i64_scalar(x)
+
+        if dbg:
+            print(f"[lb.{tag}] EXIT  rank={wi} out0={int(out[0])} outN={int(out[-1])}", flush=True)
+
+        return out
+
+    def _world_check_comp_ranks_consistent(self, comp_ranks: list[int]) -> None:
+        dbg = bool(int(os.environ.get("PYFR_LB_DEBUG", "0")))
+        if not dbg:
+            return
+
+        W = comm['world']
+        wi = int(rank['world'])
+
+        cr = np.asarray(comp_ranks, dtype=np.int32)
+        crc = np.int64(zlib.crc32(cr.tobytes()))
+        all_crc = self._world_allgather_i64_scalar_dbg(int(crc), "compcrc")
+
+        if np.any(all_crc != all_crc[0]):
+            if wi == int(root['world']):
+                print(f"[lb.compcrc] MISMATCH all_crc={all_crc.tolist()}", flush=True)
+            raise RuntimeError("[lb.compcrc] rankmap['compute'] is inconsistent across WORLD")
+
     def calc_target(self, weights):
         """
         OfflineRepartitioner:
@@ -3589,11 +3630,14 @@ class OfflineRepartitioner(_MetaMesh):
         comp_ranks = list(rankmap['compute'])
         comp_set = set(comp_ranks)
 
+        # Debug invariant: compute membership must match on every rank
+        self._world_check_comp_ranks_consistent(comp_ranks)
+
         # Safe even on ranks not in compute (treat as 0 elements)
         Neach = int(getattr(self.i, 'nelems', 0)) if wi in comp_set else 0
 
-        # World collective is always valid
-        Nall_world = comm['world'].allgather(np.int64(Neach))
+        # Buffer allgather (no pickle)
+        Nall_world = self._world_allgather_i64_scalar_dbg(Neach, "Neach")
 
         # Extract compute-ordered counts
         Nall_comp = np.asarray([int(Nall_world[r]) for r in comp_ranks], dtype=np.int64)
