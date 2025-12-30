@@ -1610,61 +1610,107 @@ class WaitsToTargetsModelMixin:
         _append_csv_row('g1-recv-median-ms.csv', mcols, [int(recv_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
 
     def calc_target(self, g1a, g1s=None, g1r=None):
-
         W = comm['world']
-        rootc_w = int(rankmap['compute'][0])  # world rank id of compute-root
-
-        if g1s is not None:
-
-            P = int(W.size)
-            mpidbl = mpi.DOUBLE
-
-            if int(rank['world']) == rootc_w:
-                cost_world = execute['compute'](lambda: self.compute_cost(g1a, g1s, g1r), None)
-                cost_world = np.asarray(cost_world, dtype=np.float64, copy=False)
-            else:
-                cost_world = np.empty(P, dtype=np.float64)
-
-            W.Bcast([cost_world, mpidbl], root=rootc_w)
-            self.cost = cost_world
-
-            #cost_world = execute['compute'](lambda: self.compute_cost(g1a, g1s, g1r), None)
-            #cost_world = W.bcast(cost_world, root=rootc_w)
-            self.cost = np.asarray(cost_world, dtype=np.float64)
-
-            comp_ranks = np.asarray(rankmap['compute'], dtype=np.int64)
-            cost_comp = self.cost[comp_ranks]
-
-            weights_comp = np.zeros_like(cost_comp, dtype=np.float64)
-            np.divide(1.0, cost_comp, out=weights_comp, where=np.isfinite(cost_comp) & (cost_comp > 0))
-
-        else:
-            # Set equiweighted targets if no comm cost provided
-            cost_world = 1
-            weights_comp = np.ones(len(rankmap['compute']), dtype=np.float64)
-
-        mpii64 = mpi.INT64_T if hasattr(mpi, "INT64_T") else mpi.LONG_LONG
         P = int(W.size)
+        wi = int(rank['world'])
 
-        if int(rank['world']) == rootc_w:
-            target_comp = super().calc_target(weights_comp)   # may be Pc or P depending on MRO
-            target_world = self.remap_to_world(target_comp)   # now robust (Fix 1)
-            target_world = np.asarray(target_world, dtype=np.int64, copy=False)
-        else:
-            target_world = np.empty(P, dtype=np.int64)
+        self._lb_epoch = getattr(self, '_lb_epoch', 0) + 1
+        ep = int(self._lb_epoch)
 
-        W.Bcast([target_world, mpii64], root=rootc_w)
+        comp_wrs = list(rankmap['compute'])
+        if not comp_wrs:
+            raise RuntimeError("rankmap['compute'] empty")
+        rootc_w = int(comp_wrs[0])
 
-        target_world = self.add_jitter_to_targets(target_world)
-        return target_world
+        # Everyone must agree on the compute ranklist (catch divergence early)
+        sig = (P, rootc_w, tuple(comp_wrs))
+        sigs = W.allgather(sig)
+        if any(s != sig for s in sigs):
+            if wi == int(root['world']):
+                print(f"[lb ep={ep}] FATAL rankmap mismatch", flush=True)
+                for r, s in enumerate(sigs):
+                    if s != sig:
+                        print(f"  rank {r}: {s}", flush=True)
+            comm['world'].Abort(2)
 
-        #target_comp = W.bcast(target_comp, root=rootc_w)
-        #
-        ## Remap from *current compute layout* -> *planned next compute layout*
-        #target_world = self.remap_to_world(target_comp)  # we’ll make this use plancompute next
-        #target_world = self.add_jitter_to_targets(target_world)
-        #
-        #return target_world
+        W.barrier()
+        if wi == int(root['world']):
+            print(f"[lb ep={ep}] calc_target enter P={P} rootc_w={rootc_w} Pc={len(comp_wrs)}", flush=True)
+
+        # Decide whether g1 is valid on root (then broadcast)
+        has_g1 = None
+        if wi == rootc_w:
+            has_g1 = bool(g1s is not None and g1r is not None)
+        has_g1 = W.bcast(has_g1, root=rootc_w)
+
+        # Compute WORLD cost on root ONLY (no execute wrapper)
+        cost_world = None
+        if wi == rootc_w:
+            if has_g1:
+                cw = self.compute_cost(g1a, g1s, g1r)   # must return shape (P,)
+                cw = np.asarray(cw, dtype=np.float64)
+                if cw.shape != (P,):
+                    raise ValueError(f"compute_cost must return {(P,)}, got {cw.shape}")
+                cost_world = cw
+            else:
+                cost_world = np.full(P, 1.0, dtype=np.float64)
+
+            # Force inactive ranks to inf (so they get zero weight)
+            comp_set = set(int(r) for r in comp_wrs)
+            for r in range(P):
+                if r not in comp_set:
+                    cost_world[r] = np.inf
+
+        # Broadcast cost (pickle-based)
+        W.barrier()
+        cost_world = W.bcast(cost_world, root=rootc_w)
+        cost_world = np.asarray(cost_world, dtype=np.float64)
+        self.cost = cost_world
+
+        if wi == int(root['world']):
+            fin = np.isfinite(cost_world)
+            print(f"[lb ep={ep}] cost finite={int(fin.sum())}/{P} "
+                f"min={np.nanmin(np.where(fin, cost_world, np.nan))} "
+                f"max={np.nanmax(np.where(fin, cost_world, np.nan))}", flush=True)
+
+        # Build WORLD weights only on compute ranks
+        weights_world = np.zeros(P, dtype=np.float64)
+        comp = np.asarray(comp_wrs, dtype=np.int64)
+        cc = cost_world[comp]
+        np.divide(1.0, cc, out=weights_world[comp],
+                where=np.isfinite(cc) & (cc > 0.0))
+
+        # Compute WORLD targets on root using a PURE function (no MPI inside)
+        tgt = None
+        if wi == rootc_w:
+            print(f"[lb ep={ep}] root computing tgt_world...", flush=True)
+            tgt = self.calc_target_world(weights_world)          # returns (P,)
+            tgt = np.asarray(tgt, dtype=np.int64)
+
+            # Ensure inactive ranks stay at 0 even after any jitter you do later
+            inactive = np.ones(P, dtype=bool)
+            inactive[comp] = False
+            tgt[inactive] = 0
+
+            # Optional: jitter, but keep inactive zeroed afterwards
+            tgt = self.add_jitter_to_targets(tgt)
+            tgt[inactive] = 0
+
+            # Fix sum exactly (move any deficit/excess to compute-root)
+            d = int(self.i.nelems_g) - int(tgt.sum())
+            tgt[rootc_w] += d
+
+            if tgt.sum() != int(self.i.nelems_g):
+                raise ValueError(f"tgt sum {int(tgt.sum())} != nelems_g {int(self.i.nelems_g)}")
+
+        W.barrier()
+        tgt = W.bcast(tgt, root=rootc_w)
+        tgt = np.asarray(tgt, dtype=np.int64)
+
+        if wi == int(root['world']):
+            print(f"[lb ep={ep}] tgt sum={int(tgt.sum())} min={int(tgt.min())} max={int(tgt.max())}", flush=True)
+
+        return tgt
 
     def compute_cost(self, g1a, g1s, g1r):
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
@@ -3558,81 +3604,41 @@ class OfflineRepartitioner(_MetaMesh):
     def __init__(self, mesh, cfg=None):
         _MetaMesh.__init__(self, mesh, cfg)
 
-    def _to_world_targets(self, targets_comp, comp_ranks):
-        return targets_comp
+    def calc_target_world(self, weights_world):
+        P = int(comm['world'].size)
+        comp_wrs = np.asarray(rankmap['compute'], dtype=np.int64)
+        Pc = int(comp_wrs.size)
 
-    # --- NEW: fixed-size buffer collectives (no pickle) ---
-    def _world_allgather_i64_scalar(self, x: int) -> np.ndarray:
-        W = comm['world']
-        send = np.asarray([int(x)], dtype=np.int64)
-        recv = np.empty(W.size, dtype=np.int64)
+        w = np.asarray(weights_world, dtype=np.float64)
+        if w.shape != (P,):
+            raise ValueError(f"weights_world shape {w.shape} != {(P,)}")
 
-        mpitype = mpi.INT64_T if hasattr(mpi, "INT64_T") else mpi.LONG_LONG
-        W.Allgather([send, mpitype], [recv, mpitype])
-        return recv
+        wc = w[comp_wrs]
+        wc = np.where(np.isfinite(wc) & (wc > 0.0), wc, 0.0)
 
-    def _world_allgather_i64_scalar_dbg(self, x: int, tag: str) -> np.ndarray:
-        dbg = bool(int(os.environ.get("PYFR_LB_DEBUG", "0")))
-        wi = int(rank['world'])
+        # Fallback if everything is zero/NaN/inf
+        s = float(wc.sum())
+        if s <= 0.0:
+            wc = np.ones(Pc, dtype=np.float64)
+            s = float(Pc)
 
-        if dbg:
-            print(f"[lb.{tag}] ENTER rank={wi} x={int(x)}", flush=True)
+        wc /= s
 
-        out = self._world_allgather_i64_scalar(x)
+        Ntot = int(self.i.nelems_g)
 
-        if dbg:
-            print(f"[lb.{tag}] EXIT  rank={wi} out0={int(out[0])} outN={int(out[-1])}", flush=True)
+        raw = wc * Ntot
+        base = np.floor(raw).astype(np.int64)
+        rem = Ntot - int(base.sum())
 
-        return out
+        if rem:
+            frac = raw - base
+            order = np.argsort(frac)[::-1]
+            base[order[:rem]] += 1
 
-    def _world_check_comp_ranks_consistent(self, comp_ranks: list[int]) -> None:
-        dbg = bool(int(os.environ.get("PYFR_LB_DEBUG", "0")))
-        if not dbg:
-            return
+        tgt = np.zeros(P, dtype=np.int64)
+        tgt[comp_wrs] = base
+        return tgt
 
-        W = comm['world']
-        wi = int(rank['world'])
-
-        cr = np.asarray(comp_ranks, dtype=np.int32)
-        crc = np.int64(zlib.crc32(cr.tobytes()))
-        all_crc = self._world_allgather_i64_scalar_dbg(int(crc), "compcrc")
-
-        if np.any(all_crc != all_crc[0]):
-            if wi == int(root['world']):
-                print(f"[lb.compcrc] MISMATCH all_crc={all_crc.tolist()}", flush=True)
-            raise RuntimeError("[lb.compcrc] rankmap['compute'] is inconsistent across WORLD")
-
-    def calc_target(self, weights):
-        """
-        OfflineRepartitioner:
-        compute target element counts for each rank using current counts
-        on the *compute* ranklist, but do so with world-safe collectives.
-        """
-        wi = int(rank['world'])
-
-        comp_ranks = list(rankmap['compute'])
-        comp_set = set(comp_ranks)
-
-        # Debug invariant: compute membership must match on every rank
-        self._world_check_comp_ranks_consistent(comp_ranks)
-
-        # Safe even on ranks not in compute (treat as 0 elements)
-        Neach = int(getattr(self.i, 'nelems', 0)) if wi in comp_set else 0
-
-        # Buffer allgather (no pickle)
-        Nall_world = self._world_allgather_i64_scalar_dbg(Neach, "Neach")
-
-        # Extract compute-ordered counts
-        Nall_comp = np.asarray([int(Nall_world[r]) for r in comp_ranks], dtype=np.int64)
-
-        weights = np.asarray(weights, dtype=np.float64)
-        if weights.size != Nall_comp.size:
-            raise ValueError(f"weights.size={weights.size} != Pc={Nall_comp.size}")
-
-        targets_unscaled = weights * Nall_comp
-        targets_comp = self.int_round(targets_unscaled)
-
-        return self._to_world_targets(targets_comp, comp_ranks)
  
     
 class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRepartitioner):
