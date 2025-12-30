@@ -35,6 +35,7 @@ class MPICommInfo:
     # ---- per-PROCESS state (same across comms) ----
     _device: Optional[str] = None
     _etype_order: Optional[List[str]] = None
+    _devices_world: Optional[List[str]] = None
 
     def __init__(self, name: str, comm,
                  rank: Optional[int], root: Optional[int],

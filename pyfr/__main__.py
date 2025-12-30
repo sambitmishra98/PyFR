@@ -20,6 +20,8 @@ from pyfr.mpiutil import (get_comm_rank_root, init_mpi, initialise_new_comm,
 from pyfr.partitioners import (BasePartitioner, get_partitioner,
                                reconstruct_partitioning, write_partitioning,
                                construct_by_diffusion)
+from pyfr.partitioners.native import (_write_random_partitioning, get_startup_init)
+
 from pyfr.plugins import BaseCLIPlugin
 from pyfr.progress import (NullProgressSequence, ProgressBar,
                            ProgressSequenceAction)
@@ -108,19 +110,6 @@ def main():
         metavar='key:value', help='partitioner-specific option'
     )
     ap_partition_add.set_defaults(process=process_partition_add)
-
-    # Construct partitioning
-    ap_partition_construct = ap_partition.add_parser(
-        'construct', help='partition construct --help'
-    )
-    ap_partition_construct.add_argument('mesh', help='input mesh file')
-    ap_partition_construct.add_argument('name', help='partitioning name')
-    ap_partition_construct.add_argument('-f', '--force', action='count',
-                                        help='overwrite existing partitioning')
-    ap_partition_construct.add_argument('--seed', type=int, default=-1,
-                                    help='RNG seed (-1: nondeterministic)')
-
-    ap_partition_construct.set_defaults(process=process_partition_construct)
 
     # Reconstruct partitioning
     ap_partition_reconstruct = ap_partition.add_parser(
@@ -392,30 +381,6 @@ def _counts_from_edisps(edisps: dict[str, int], ntotal: int) -> dict[str, int]:
     return cnt
 
 
-def _random_vparts_nonempty(n: int, nparts: int, *, seed: int) -> np.ndarray:
-    """
-    Return vparts (int32, shape (n,)) with all parts non-empty if n >= nparts.
-    If n < nparts, empties are unavoidable; we allow them.
-    """
-    rng = np.random.default_rng(None if seed < 0 else seed)
-
-    if nparts <= 1:
-        return np.zeros(n, dtype=np.int32)
-
-    if n == 0:
-        return np.empty(0, dtype=np.int32)
-
-    if n < nparts:
-        # Not enough elements to populate every part; accept empties.
-        return rng.integers(0, nparts, size=n, dtype=np.int32)
-
-    # Reroll until every part appears at least once (simple + robust for now)
-    # In practice, success probability is very high once n >> nparts.
-    while True:
-        v = rng.integers(0, nparts, size=n, dtype=np.int32)
-        if np.unique(v).size == nparts:
-            return v
-
 def _parse_rank_weights(spec: str | None, nparts: int) -> list[float]:
     """
     Parse weights spec into exactly nparts weights (one per MPI rank).
@@ -460,194 +425,6 @@ def _partitioning_nparts(mesh: h5py.File, pname: str) -> int:
 
     regions = mesh[f'partitionings/{pname}/eles'].attrs['regions']
     return int(len(regions))
-
-def _create_temp_random_partitioning(mesh_path: str, nparts: int, *, seed: int = -1) -> str:
-    """
-    Create a temporary random partitioning of size `nparts` in the mesh file.
-    Returns the temp partitioning name (string). Root-rank only.
-    """
-    tmpname = f"__tmp_rand_{nparts}_{uuid4().hex[:10]}"
-
-    with h5py.File(mesh_path, 'r+') as mesh:
-        mesh.require_group('partitionings')
-
-        # Build global connectivity arrays
-        con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
-        ntotal = int(len(ecurved))
-
-        # Random global assignment
-        vparts = _random_vparts_nonempty(ntotal, nparts, seed=seed)
-
-        # Construct + write partitioning
-        pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps, con, vparts)
-        write_partitioning(mesh, tmpname, pinfo)
-
-    return tmpname
-
-
-def _vparts_to_scatter_eidxs(
-    vparts: np.ndarray,
-    etypes_order: list[str],
-    edisps: dict[str, int],
-    ecnts: dict[str, int],
-    nparts: int,
-) -> list[dict[str, np.ndarray]]:
-    """
-    Convert global vparts into a list (len=nparts) of per-rank dicts:
-      out[r][etype] = gids (int64) owned by rank r for that etype.
-
-    Uses an argsort+split method per etype (O(N log N) per etype) but avoids
-    O(nparts*N) loops.
-    """
-    out = [{et: np.empty(0, dtype=np.int64) for et in etypes_order} for _ in range(nparts)]
-
-    for et in etypes_order:
-        d0 = int(edisps[et])
-        ne = int(ecnts[et])
-        if ne == 0:
-            continue
-
-        parts_et = np.asarray(vparts[d0:d0 + ne], dtype=np.int32)
-
-        # Sort element gids by owning part id
-        order = np.argsort(parts_et, kind='mergesort')
-        p_sorted = parts_et[order]
-
-        # Split positions for each rank in [0, nparts)
-        # idx[r]..idx[r+1] in `order` are gids with part == r
-        cuts = np.searchsorted(p_sorted, np.arange(1, nparts, dtype=np.int32))
-        blocks = np.split(order, cuts)
-
-        for r in range(nparts):
-            gids_r = blocks[r].astype(np.int64, copy=False)
-            out[r][et] = gids_r
-
-    return out
-
-
-def _pick_local_seed(eidxs_local: dict[str, np.ndarray], *, seed: int, rank: int) -> tuple[str, int] | None:
-    """
-    Pick one (etype, gid) from local ownership for printing.
-    Returns None if the rank has no elements.
-    """
-    ets = [et for et, a in eidxs_local.items() if a is not None and len(a) > 0]
-    if not ets:
-        return None
-
-    # Deterministic across ranks if seed >= 0
-    if seed < 0:
-        rng = np.random.default_rng()
-    else:
-        rng = np.random.default_rng(seed + 1_000_003 * int(rank))
-
-    et = ets[int(rng.integers(0, len(ets)))]
-    gids = np.asarray(eidxs_local[et], dtype=np.int64)
-    gid = int(gids[int(rng.integers(0, gids.size))])
-
-    return (et, gid)
-
-
-def process_partition_construct(args):
-    # Validate partitioning name
-    if not re.match(r'\w+$', args.name):
-        raise ValueError('Invalid partitioning name')
-
-    init_mpi()
-    comm, rank, root = get_comm_rank_root()
-    nparts = int(comm.size)
-
-    # ----------------------------
-    # Root: read mesh + make vparts
-    # ----------------------------
-    err = None
-    payload = None
-
-    if rank == root:
-        try:
-            with h5py.File(args.mesh, 'r') as mesh:
-                # Ensure partitionings group exists
-                if 'partitionings' not in mesh:
-                    raise ValueError("Mesh is missing 'partitionings' group")
-
-                # Refuse overwrite unless --force
-                if args.name in mesh['partitionings'] and not args.force:
-                    raise ValueError('Partitioning already exists; use -f to replace')
-
-                # Build what PyFR needs to write a proper partitioning
-                con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
-
-                etypes_order = list(edisps.keys())
-                ntotal = int(len(ecurved))
-                ecnts = _counts_from_edisps(edisps, ntotal)
-
-                # Phase 0: random partition
-                vparts = _random_vparts_nonempty(ntotal, nparts, seed=args.seed)
-
-                # Scatter payload: per-rank per-etype gids
-                scatter_eidxs = _vparts_to_scatter_eidxs(vparts, etypes_order, edisps, ecnts, nparts)
-
-                payload = dict(
-                    con=con,
-                    ecurved=ecurved,
-                    edisps=edisps,
-                    etypes_order=etypes_order,
-                    ecnts=ecnts,
-                    vparts=vparts,
-                    scatter_eidxs=scatter_eidxs,
-                )
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-
-    # Broadcast errors to avoid deadlocks
-    err = comm.bcast(err, root=root)
-    if err:
-        raise RuntimeError(err)
-
-    # Broadcast small metadata
-    etypes_order = comm.bcast(payload['etypes_order'] if rank == root else None, root=root)
-    edisps       = comm.bcast(payload['edisps']       if rank == root else None, root=root)
-
-    # Scatter local eidxs ownership to every rank
-    eidxs_local = comm.scatter(payload['scatter_eidxs'] if rank == root else None, root=root)
-
-    # ----------------------------
-    # All ranks: pick local seed, gather and print on root
-    # ----------------------------
-    seed_local = _pick_local_seed(eidxs_local, seed=args.seed, rank=rank)
-    seeds = comm.gather(seed_local, root=root)
-
-    if rank == root:
-        print(f"[construct] nparts={nparts} name={args.name!r} seed={args.seed}", flush=True)
-        for r, s in enumerate(seeds):
-            if s is None:
-                print(f"[construct.seed] r{r}: <empty>", flush=True)
-            else:
-                et, gid = s
-                eid = int(edisps[et] + int(gid))
-                print(f"[construct.seed] r{r}: etype={et} gid={gid} eid={eid}", flush=True)
-
-    comm.barrier()
-
-    # ----------------------------
-    # Root: write the partitioning
-    # ----------------------------
-    if rank == root:
-        con     = payload['con']
-        ecurved = payload['ecurved']
-        edisps2 = payload['edisps']
-        vparts  = payload['vparts']
-
-        with h5py.File(args.mesh, 'r+') as mesh:
-            # Re-check overwrite (race-safe)
-            if args.name in mesh['partitionings'] and not args.force:
-                raise ValueError('Partitioning already exists; use -f to replace')
-
-            pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps2, con, vparts)
-            write_partitioning(mesh, args.name, pinfo)
-
-            print(f"[construct] wrote partitionings/{args.name}", flush=True)
-
-    comm.barrier()
 
 def process_partition_reconstruct(args):
     with (h5py.File(args.mesh, 'r+') as mesh,
@@ -705,7 +482,7 @@ def process_partition_diffuse(args):
                     )
             else:
                 # Create a temporary random init partitioning
-                tmp_pname = _create_temp_random_partitioning(args.mesh, nparts, seed=-1)
+                tmp_pname = _create_temp_random_partitioning(args.mesh, nparts)
                 used_tmp = True
 
             print(f"[diffuse] init_pname={(init_pname or tmp_pname)!r} used_tmp={used_tmp}", flush=True)
@@ -759,7 +536,6 @@ def process_partition_remove(args):
             raise ValueError(f'Partitioning {args.name} does not exist')
 
         del mparts[args.name]
-
 
 def process_region_add(args):
     # Read the STL file
@@ -953,26 +729,12 @@ def _process_common(args, soln, cfg):
     # If we start from a 1-way mesh but run with >1 ranks, create a temp random pname
     startup_from_one = (str(compute_pname) == '1' and comm['compute'].size > 1)
 
-    if startup_from_one:
-        # For now, be strict (you asked for NotImplemented liberally)
-        if comm['compute'].size != comm['world'].size:
-            raise NotImplementedError(
-                "[startup-rand] compute comm != world comm not supported yet"
-            )
+    startup_init = get_startup_init(cfg, startup_from_one=startup_from_one)
+    if rank['world'] == root['world']:
+        print(f"[startup-init] mode={startup_init.name!r} startup_from_one={startup_from_one}",
+            flush=True)
 
-        seed = -1
-        if cfg is not None and cfg.hasopt('partition', 'startup-rand-seed'):
-            seed = cfg.getint('partition', 'startup-rand-seed')
-
-        if rank['world'] == root['world']:
-            tmp = _write_startup_random_partitioning(args.mesh, comm['compute'].size, seed=seed)
-            print(f"[startup-rand] wrote partitioning {tmp!r} (nparts={comm['compute'].size}, seed={seed})",
-                  flush=True)
-        else:
-            tmp = None
-
-        compute_pname = comm['world'].bcast(tmp, root=root['world'])
-        comm['world'].barrier()
+    compute_pname = startup_init.prepare_pname(mesh_path=args.mesh, compute_pname=compute_pname)
 
     # --- Read mesh on compute comm for ALL ranks ---
     reader = NativeReader(args.mesh, pname=str(compute_pname), comm_name='compute')
@@ -998,20 +760,7 @@ def _process_common(args, soln, cfg):
     mmesh.recheck_online_file()
 
     # Optional: if you want your original “clean up random” passes
-    if startup_from_one:
-        ne_loc = int(mmesh.i.nelems)
-        ecurrs_wr = comm['world'].allgather(ne_loc)
-        target = mmesh.calc_target(ecurrs_wr)
-
-        if partitioner == 'diffusion':
-            mmesh.i.info()
-            mmesh.remove_islands_till_convergence()
-            mmesh.i.info()
-            mmesh.iterate_till_convergence(target, max_iters=100)
-            mmesh.i.info()
-        else:
-            mmesh.intg_repartition(target)
-            mmesh.i.info()
+    startup_init.postprocess(mmesh=mmesh, partitioner=partitioner)
 
     # If compute-ranklist differs from current communicator, reinitialise
     if len(part_ranklist) != len(rankmap['compute']):
@@ -1022,7 +771,7 @@ def _process_common(args, soln, cfg):
     # New mesh lives under the 'newcompute' logical name while we migrate.
     ncmesh = mmesh.to_mesh(mmesh.i.eidxs)
 
-    # Relocate restart solution if present (pyfr run => soln is None)
+    # IF restart, relocate soln
     soln = _relocate_soln_by_etype(mesh, ncmesh, soln, edim=2)
 
     if rank['world'] == root['world']:
@@ -1047,30 +796,20 @@ def _process_common(args, soln, cfg):
     # Execute!
     solver.run()
 
+def _startup_cleanup_random_diffusion(mmesh, *, max_iters: int = 100) -> None:
+    # Determine the target based on current (post-rand) distribution
+    ne_loc = int(mmesh.i.nelems)
+    ecurrs_wr = comm['world'].allgather(ne_loc)
+    target = mmesh.calc_target(ecurrs_wr)
 
-def _write_startup_random_partitioning(mesh_path: str, nparts: int, *, seed: int = -1) -> str:
-    """
-    Root-only: write a temporary random partitioning with `nparts` parts into mesh_path.
-    Returns the new partitioning name.
-    """
-    pname = f"__startup_rand_{nparts}_{uuid4().hex[:8]}"
-    rng = np.random.default_rng(None if seed < 0 else int(seed))
+    if rank['world'] == root['world']:
+        print(f"[startup-contig] enabled=True max_iters={max_iters}", flush=True)
 
-    with h5py.File(mesh_path, 'r+') as mesh:
-        mesh.require_group('partitionings')
-
-        con, ecurved, edisps, _ = BasePartitioner.construct_global_con(mesh)
-        ntotal = int(len(ecurved))
-
-        if nparts <= 1:
-            vparts = np.zeros(ntotal, dtype=np.int32)
-        else:
-            vparts = rng.integers(0, nparts, size=ntotal, dtype=np.int32)
-
-        pinfo = BasePartitioner.construct_partitioning(mesh, ecurved, edisps, con, vparts)
-        write_partitioning(mesh, pname, pinfo)
-
-    return pname
+    mmesh.i.info()
+    mmesh.remove_islands_till_convergence()
+    mmesh.i.info()
+    mmesh.iterate_till_convergence(target, max_iters=max_iters)
+    mmesh.i.info()
 
 
 def process_run(args):

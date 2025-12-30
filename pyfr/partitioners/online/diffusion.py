@@ -1527,3 +1527,84 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
             self.drain_till_convergence(drain_target, smooth=False)
             self.remove_islands_till_convergence(target=target)
             self.iterate_aggressively(target)
+
+    def startup_make_contiguous(self, *, max_iters: int = 12,
+                                maintain_cluster_by_device_types: bool = False) -> None:
+        ne_loc = int(self.i.nelems)
+        ecurrs_wr = comm['world'].allgather(ne_loc)
+        target = self.calc_target(ecurrs_wr)
+
+        if rank['world'] == root['world']:
+            print(f"[startup-contig] enabled=True max_iters={max_iters}", flush=True)
+            if maintain_cluster_by_device_types:
+                print("[startup-contig] maintain_cluster_by_device_types=True", flush=True)
+
+        # Compute and install cluster ids only for the duration of startup
+        if maintain_cluster_by_device_types:
+            self._startup_cluster_ids = self._infer_device_type_clusters_from_mpicomminfo()
+            self._startup_cluster_mask_printed = False
+        else:
+            self._startup_cluster_ids = None
+
+        try:
+            self.i.info()
+
+            cur = self._cur_counts_total
+            tgt = self._cluster_equal_target(cur, self._startup_cluster_ids)
+            self.remove_islands_till_convergence(target=tgt)
+            self.i.info()
+            self.iterate_till_convergence(tgt, max_iters=max_iters)
+            self.i.info()
+        finally:
+            self._startup_cluster_ids = None
+
+
+    def _infer_device_type_clusters_from_mpicomminfo(self):
+        """
+        Cluster ranks by device tags from MPICommInfo.devices_world.
+        Each unique tag becomes a cluster id (stable order of first appearance).
+        """
+        from pyfr.mpiutil import comm_rank_roots  # wherever you keep it
+
+        winfo = comm_rank_roots.get('world')
+        devices = None if winfo is None else winfo.devices_world
+
+        if devices is None:
+            # Fallback: read directly from config if needed
+            cfg = getattr(self, 'cfg', None)
+            if cfg is not None and cfg.hasopt('backend', 'devices'):
+                devices = cfg.getliteral('backend', 'devices')
+
+        if devices is None:
+            raise ValueError("[startup-contig] cannot infer device clusters: no devices_world and no [backend] devices")
+
+        # Normalise tags
+        tags = [str(d).strip() for d in devices]
+
+        # Factorize tags -> cluster ids (stable)
+        tag_to_cid = {}
+        cids = np.empty(len(tags), dtype=np.int32)
+        for i, t in enumerate(tags):
+            if t not in tag_to_cid:
+                tag_to_cid[t] = len(tag_to_cid)
+            cids[i] = tag_to_cid[t]
+
+        if rank['world'] == root['world']:
+            groups = {t: np.nonzero(cids == cid)[0].tolist() for t, cid in tag_to_cid.items()}
+            print(f"[startup-contig] device_clusters_by_tag={groups}", flush=True)
+
+        return cids
+
+
+    def _cluster_equal_target(self, cur_counts, cids):
+        cur = np.asarray(cur_counts, dtype=np.int64)
+        cids = np.asarray(cids, dtype=np.int32)
+
+        tgt = np.zeros_like(cur)
+        for cid in np.unique(cids):
+            idx = np.nonzero(cids == cid)[0]
+            tot = int(cur[idx].sum())
+            q, r = divmod(tot, idx.size)
+            tgt[idx] = q
+            tgt[idx[:r]] += 1  # deterministic remainder
+        return tgt.tolist()
