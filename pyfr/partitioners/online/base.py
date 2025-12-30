@@ -3200,57 +3200,165 @@ class CarverMixin:
                     print("[rmislands.aggr] STALL: moved_glob=0 while remaining_glob>0", flush=True)
                 break
 
+    def _iface_from_affinity(
+        self,
+        mode: str,
+        *,
+        metric: str = "delta",
+        score_max: float | None = None,
+    ):
+        """
+        From affinity tables (lid,a,b), compute per-local-element:
+          - iface_mask[flat] : touches any MPI interface in this mode
+          - best_nbr[flat]   : neighbour rank minimising score
+          - best_score[flat] : minimal score (float64)
 
-
-    def _iface_from_deltas(self, mode: str, *, delta_max: int | None = None):
+        score_max: optional gate (e.g. delta <= 0 for faces).
+        """
         st   = self.i
         nloc = int(st.eidxs_flat.size)
 
-        deltas = self._compute_deltas(mode)  # {nbr:{et:(N,2)[lid,delta]}}
         iface_mask = np.zeros(nloc, dtype=bool)
+        best_nbr   = np.full(nloc, -1, dtype=np.int32)
+        best_score = np.full(nloc, np.inf, dtype=np.float64)
 
-        if not deltas:
-            return (
-                iface_mask,
-                np.full(nloc, -1, dtype=np.int32),
-                np.full(nloc,  2**30, dtype=np.int32),
-            )
+        aff = self._compute_affinity(mode)  # {nbr:{et:(N,3)[lid,a,b]}}
+        if not aff or nloc == 0:
+            return iface_mask, best_nbr, best_score
 
-        best_nbr = np.full(nloc, -1, dtype=np.int32)
-        best_del = np.full(nloc,  2**30, dtype=np.int32)
+        metric = str(metric).strip().lower()
+        if metric not in ("delta", "ratio"):
+            raise ValueError(f"_iface_from_affinity: invalid metric {metric!r}")
 
-        for nbr, per_et in deltas.items():
-            nbr = int(nbr)
+        for nbr in sorted(int(n) for n in aff.keys()):
+            per_et = aff[nbr]
             for et, mat in per_et.items():
                 if mat is None or mat.size == 0:
                     continue
 
                 lids  = mat[:, 0].astype(np.int64, copy=False)
-                delt  = mat[:, 1].astype(np.int32, copy=False)
-                flats = st.lids_to_flat(et, lids)
+                a     = mat[:, 1]
+                b     = mat[:, 2]
+                flats = st.lids_to_flat(str(et), lids)
 
-                # touches some MPI interface (regardless of delta gate)
+                # touches some MPI interface (regardless of score gate)
                 iface_mask[flats] = True
 
-                if delta_max is not None:
-                    ok = (delt <= int(delta_max))
+                sc = self._metric_from_ab(a, b, metric)  # float64
+
+                if score_max is not None:
+                    ok = (sc <= float(score_max))
                     if not np.any(ok):
                         continue
                     flats2 = flats[ok]
-                    delt2  = delt[ok]
+                    sc2    = sc[ok]
                 else:
                     flats2 = flats
-                    delt2  = delt
+                    sc2    = sc
 
-                curd = best_del[flats2]
-                curn = best_nbr[flats2]
-                better = (delt2 < curd) | ((delt2 == curd) & ((curn < 0) | (nbr < curn)))
+                cur_sc = best_score[flats2]
+                cur_nb = best_nbr[flats2]
+
+                # minimise score; tie-break by smaller nbr id (and handle unset cur_nb)
+                better = (sc2 < cur_sc) | ((sc2 == cur_sc) & ((cur_nb < 0) | (nbr < cur_nb)))
                 if np.any(better):
                     sel = flats2[better]
-                    best_del[sel] = delt2[better]
-                    best_nbr[sel] = np.int32(nbr)
+                    best_score[sel] = sc2[better].astype(np.float64, copy=False)
+                    best_nbr[sel]   = np.int32(nbr)
 
-        return iface_mask, best_nbr, best_del
+        return iface_mask, best_nbr, best_score
+
+    def _best_dest_by_core_from_affinity(
+        self,
+        mode: str,
+        *,
+        cores: np.ndarray,
+        cflat: np.ndarray,
+        okc: np.ndarray,
+        metric: str = "delta",
+        score_max: float | None = None,
+    ):
+        """
+        For each local element touching any MPI interface in `mode`,
+        choose the neighbour whose *core* is geometrically closest.
+
+        Returns
+        -------
+        iface_mask : bool[nloc]
+        best_dest  : int32[nloc]   (neighbour rank; -1 if none)
+        best_dist  : float64[nloc] (distance to best_dest core)
+        best_score : float64[nloc] (affinity score to best_dest; optional use)
+        """
+        st   = self.i
+        nloc = int(st.eidxs_flat.size)
+        P    = int(cores.shape[0])
+
+        iface_mask = np.zeros(nloc, dtype=bool)
+        best_dest  = np.full(nloc, -1, dtype=np.int32)
+        best_dist  = np.full(nloc, np.inf, dtype=np.float64)
+        best_score = np.full(nloc, np.inf, dtype=np.float64)
+
+        aff = self._compute_affinity(mode)  # {nbr:{et:(N,3)[lid,a,b]}}
+        if not aff or nloc == 0:
+            return iface_mask, best_dest, best_dist, best_score
+
+        metric = str(metric).strip().lower()
+        if metric not in ("delta", "ratio"):
+            raise ValueError(f"_best_dest_by_core_from_affinity: invalid metric {metric!r}")
+
+        for nbr in sorted(int(n) for n in aff.keys()):
+            if nbr < 0 or nbr >= P:
+                continue
+
+            core_n = cores[nbr]
+            if not np.all(np.isfinite(core_n)):
+                continue
+
+            per_et = aff[nbr]
+            for et, mat in per_et.items():
+                if mat is None or mat.size == 0:
+                    continue
+
+                lids  = mat[:, 0].astype(np.int64, copy=False)
+                a     = mat[:, 1]
+                b     = mat[:, 2]
+                flats = st.lids_to_flat(str(et), lids)
+
+                iface_mask[flats] = True
+
+                m_ok = okc[flats]
+                if not np.any(m_ok):
+                    continue
+
+                flats2 = flats[m_ok]
+                a2 = a[m_ok]
+                b2 = b[m_ok]
+
+                sc = self._metric_from_ab(a2, b2, metric)
+
+                if score_max is not None:
+                    m_sc = (sc <= float(score_max))
+                    if not np.any(m_sc):
+                        continue
+                    flats2 = flats2[m_sc]
+                    sc2    = sc[m_sc]
+                else:
+                    sc2 = sc
+
+                d = np.linalg.norm(cflat[flats2, :] - core_n[None, :], axis=1)
+
+                curd = best_dist[flats2]
+                curk = best_dest[flats2]
+
+                # minimise geometric distance; tie-break by smaller nbr id
+                better = (d < curd) | ((d == curd) & ((curk < 0) | (nbr < curk)))
+                if np.any(better):
+                    sel = flats2[better]
+                    best_dist[sel]  = d[better]
+                    best_dest[sel]  = np.int32(nbr)
+                    best_score[sel] = sc2[better].astype(np.float64, copy=False)
+
+        return iface_mask, best_dest, best_dist, best_score
 
     def _move_by_best_rank(self, chosen_flat, best_rank, *, move_spts_nodes: bool):
         st = self.i
@@ -3332,9 +3440,19 @@ class CarverMixin:
 
             cflat, okc = self._centroids_flat()
 
-            is_faces = mode.startswith(("f", "e"))  # faces/edges
-            dmax = 0 if (is_faces and require_nonpos_delta_for_faces) else None
-            iface_mask, best_nbr, best_del = self._iface_from_deltas(mode, delta_max=dmax)
+            mode = str(self.outlier_removal_mode).lower()
+            is_faces = mode.startswith(("f", "e"))
+            if is_faces:
+                mode = "faces"
+            elif mode.startswith(("v",)):
+                mode = "vertices"
+            else:
+                raise ValueError(f"remove_outliers: unknown mode {mode!r}")
+
+            score_max = 0.0 if (mode == "faces" and require_nonpos_delta_for_faces) else None
+            iface_mask, best_nbr, best_del = self._iface_from_affinity(
+                mode, metric="delta", score_max=score_max
+            )
 
             # Default: no-op commit unless we successfully pick moves
             do_move = True
@@ -3369,84 +3487,9 @@ class CarverMixin:
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
         if verbose and rnk == root_w:
             # cand size may be undefined if we never built it; keep log minimal/robust
-            print(f"[rmoutliers] mode={mode} top={top} moved_glob={moved_glob}", flush=True)
+            print(f"[rmoutliers] mode={mode} metric=delta score_max={score_max} top={top} moved_glob={moved_glob}", flush=True)
 
         return int(moved_local)
-
-    def _best_dest_by_core_from_deltas(
-        self,
-        mode: str,
-        *,
-        cores: np.ndarray,
-        cflat: np.ndarray,
-        okc: np.ndarray,
-        delta_max: int | None = None,
-    ):
-        st   = self.i
-        nloc = int(st.eidxs_flat.size)
-        P    = int(cores.shape[0])
-
-        deltas = self._compute_deltas(mode)  # {nbr:{et:(N,2)[lid,delta]}}
-        iface_mask = np.zeros(nloc, dtype=bool)
-
-        if not deltas:
-            return (
-                iface_mask,
-                np.full(nloc, -1, dtype=np.int32),
-                np.full(nloc, np.inf, dtype=np.float64),
-                np.full(nloc, 2**30, dtype=np.int32),
-            )
-
-        best_dest  = np.full(nloc, -1, dtype=np.int32)
-        best_dist  = np.full(nloc, np.inf, dtype=np.float64)
-        best_delta = np.full(nloc, 2**30, dtype=np.int32)
-
-        for nbr, per_et in deltas.items():
-            nbr = int(nbr)
-            if nbr < 0 or nbr >= P:
-                continue
-
-            core_n = cores[nbr]
-            if not np.all(np.isfinite(core_n)):
-                continue
-
-            for et, mat in per_et.items():
-                if mat is None or mat.size == 0:
-                    continue
-
-                lids  = mat[:, 0].astype(np.int64, copy=False)
-                delt  = mat[:, 1].astype(np.int32, copy=False)
-                flats = st.lids_to_flat(et, lids)
-
-                iface_mask[flats] = True
-
-                # centroid-valid only
-                m_ok = okc[flats]
-                if not np.any(m_ok):
-                    continue
-
-                flats2 = flats[m_ok]
-                delt2  = delt[m_ok]
-
-                if delta_max is not None:
-                    m_d = (delt2 <= int(delta_max))
-                    if not np.any(m_d):
-                        continue
-                    flats2 = flats2[m_d]
-                    delt2  = delt2[m_d]
-
-                d = np.linalg.norm(cflat[flats2, :] - core_n[None, :], axis=1)
-
-                curd = best_dist[flats2]
-                curk = best_dest[flats2]
-                better = (d < curd) | ((d == curd) & ((curk < 0) | (nbr < curk)))
-                if np.any(better):
-                    sel = flats2[better]
-                    best_dist[sel]  = d[better]
-                    best_dest[sel]  = np.int32(nbr)
-                    best_delta[sel] = delt2[better]
-
-        return iface_mask, best_dest, best_dist, best_delta
 
     def add_inliers(
         self,
@@ -3481,8 +3524,16 @@ class CarverMixin:
                 if not np.all(np.isfinite(core_self)):
                     do_move = False
                 else:
-                    iface_mask, best_dest, best_dist, _best_delta = self._best_dest_by_core_from_deltas(
-                        mode, cores=cores, cflat=cflat, okc=okc, delta_max=None
+                    mode = str(self.inlier_addition_mode).lower()
+                    if mode.startswith(("f", "e")):
+                        mode = "faces"
+                    elif mode.startswith(("v",)):
+                        mode = "vertices"
+                    else:
+                        raise ValueError(f"add_inliers: unknown mode {mode!r}")
+
+                    iface_mask, best_dest, best_dist, _best_aff = self._best_dest_by_core_from_affinity(
+                        mode, cores=cores, cflat=cflat, okc=okc, metric="delta", score_max=None
                     )
 
                     cand_flat = np.nonzero(iface_mask & okc & (best_dest >= 0))[0].astype(np.int64, copy=False)
@@ -3515,7 +3566,7 @@ class CarverMixin:
 
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
         if verbose and rnk == root_w:
-            print(f"[addinliers] mode={mode} top={top} moved_glob={moved_glob}", flush=True)
+            print(f"[addinliers] mode={mode} metric=delta top={top} moved_glob={moved_glob}", flush=True)
 
         return int(moved_local)
 
