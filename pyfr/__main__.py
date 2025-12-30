@@ -995,6 +995,8 @@ def _process_common(args, soln, cfg):
     else:
         raise NotImplementedError(f"Unknown partitioner: {partitioner}")
 
+    mmesh.recheck_online_file()
+
     # Optional: if you want your original “clean up random” passes
     if startup_from_one:
         ne_loc = int(mmesh.i.nelems)

@@ -142,17 +142,27 @@ class MPICommInfo:
 
     # ---------------- constructors / factories ----------------
 
+    @property
+    def devices_world(self) -> Optional[List[str]]:
+        dv = type(self)._devices_world
+        return list(dv) if dv is not None else None
+
+    def device_of_world_rank(self, world_rank: int) -> Optional[str]:
+        dv = type(self)._devices_world
+        if dv is None:
+            return None
+        if 0 <= int(world_rank) < len(dv):
+            return dv[int(world_rank)]
+        return None
+
     @classmethod
     def world(cls, comm, cfg):
-        """ Construct the 'world' communicator wrapper, 
-            initialising static metadata.
-        """
         size = comm.Get_size()
         rank = comm.Get_rank()
         rankmap = list(range(size))
 
-        # Initialise class-level metadata once, based on cfg
         device = None
+        devices = None
         if cfg is not None and cfg.hasopt('backend', 'devices'):
             devices = cfg.getliteral('backend', 'devices')
             if len(devices) != size:
@@ -160,8 +170,8 @@ class MPICommInfo:
             device = devices[rank]
 
         cls._device = device
+        cls._devices_world = list(devices) if devices is not None else None  # NEW
 
-        # --- determine etype_order for THIS world rank's device ---
         etype_order = None
         if cfg is not None and device is not None:
             key = f'device-preference-{device}'
@@ -169,14 +179,10 @@ class MPICommInfo:
                 etype_order = cfg.getliteral('backend', key)
 
         if etype_order is None:
-            # global default; adjust as needed
             etype_order = ['hex', 'pyr', 'tet']
-
         cls._etype_order = list(etype_order)
 
-        # Instance object can now be created
         return cls('world', comm, rank, root=0, rankmap=rankmap)
-
     @classmethod
     def from_ranklist(cls, name: str, ranklist_world: List[int]):
         """

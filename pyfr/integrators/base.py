@@ -519,7 +519,6 @@ class BaseIntegrator:
             reason = self._abort_reason
             sys.exit(comm['world'].allreduce(reason, op=lambda x, y: x or y))
 
-
     def load_balance(self):
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
         if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
@@ -539,6 +538,11 @@ class BaseIntegrator:
             mmesh.i.info()
             
             wallt_iterate = time.perf_counter_ns() - wallt_start
+
+            # Create newcompute per non-zero elements within mmesh
+            cur0 = np.array(mmesh._cur_counts_total, dtype=np.int64)
+            next_ranklist = np.flatnonzero(cur0 > 0).astype(int).tolist()
+            initialise_new_comm('newcompute', next_ranklist)
 
             soln = self.reinit_mesh_soln(mmesh.to_mesh(mmesh.i.eidxs), self.compute_soln)
             promote_comm('newcompute', 'compute')

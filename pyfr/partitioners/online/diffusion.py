@@ -1393,7 +1393,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
     def iterate_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
                                  max_iters: int = 1, smooth: bool = True):
 
-        if rank['compute'] == root['compute']: print(f"TARGET: {target_counts}")
+        if rank['compute'] == root['compute']: print(f"TGT: {target_counts}")
 
         iters = 0
 
@@ -1403,7 +1403,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             iters += 1
 
             cur0 = self._cur_counts_total
-            if rank['compute'] == root['compute']: print(f"CURRENT: {cur0}")     
+            if rank['compute'] == root['compute']: print(f"CUR: {cur0}")     
 
             self.iterate(target_counts, flowmat_relax=flowmat_relax, smooth=smooth)
 
@@ -1463,7 +1463,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             return
 
         if rank['compute'] == root['compute']:
-            print(f"TARGET: {target}")
+            print(f"TGT: {target}")
 
         iters = 0
 
@@ -1482,7 +1482,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.iterate(target, flowmat_relax=1.0, smooth=smooth)
 
             cur0 = self._cur_counts_total
-            if rank['compute'] == root['compute']: print(f"CURRENT: {cur0}")     
+            if rank['compute'] == root['compute']: print(f"CUR: {cur0}")     
 
 class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
 
@@ -1491,8 +1491,8 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
         DiffusionRepartitioner.__init__(self, mesh, cfg)
 
     def intg_repartition(self, target):
+        self.record_perf_sample(nfevals = 1, nvars = 5)
 
-        self.record_perf_sample(nfevals = 10, nvars = 5)
         stagnated = self.detect_stagnation()
         worst = None
         if stagnated:
@@ -1517,7 +1517,13 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
             # Re-normalise by ...int... the cost after moving the mass
             drain_target = self.int_round(drain_target)
 
-        self.add_ranks(target)
-        self.drain_till_convergence(drain_target, smooth=False)
-        self.remove_islands_till_convergence(target=target)
-        self.iterate_aggressively(target)
+            self.drain_till_convergence(drain_target, smooth=False)
+            self.iterate_aggressively(drain_target)
+
+            self.reset_perf_state()
+
+        else:
+            self.add_ranks(target)
+            self.drain_till_convergence(drain_target, smooth=False)
+            self.remove_islands_till_convergence(target=target)
+            self.iterate_aggressively(target)
