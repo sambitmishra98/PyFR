@@ -1292,67 +1292,6 @@ class _MetaMesh:
 
         return eidxs_diff
 
-    # -----------------
-    # Testing / ideas
-    # -----------------
-
-    def _get_global_owner_array(self) -> np.ndarray:
-        """
-        Debug helper: build a global owner array
-
-            owners_global[g] = rank that owns global element ID g,
-
-        using PartitionState.eidxs_flat (global IDs local to this rank) and an
-        allgather across ranks.
-        """
-        cw = comm['world']
-        my_rank = int(rank['world'])
-        gen = int(self._ver.get('topology', 0))
-
-        c = self._cache.get('owner_global')
-        if c is not None and c['gen'] == gen:
-            return c['owners']
-
-        ids_local = np.asarray(self.i.eidxs_flat, dtype=np.int64)
-
-        Ne_global = int(self.i.nelems_g)
-        owners_global = np.full(Ne_global, -1, dtype=np.int32)
-
-        # Safety: eid range + uniqueness
-        ids_local = np.asarray(ids_local, dtype=np.int64)
-        if ids_local.size:
-            if ids_local.min() < 0 or ids_local.max() >= Ne_global:
-                raise ValueError(
-                    f"eid out of range on rank={my_rank}: "
-                    f"min={ids_local.min()} max={ids_local.max()} Ne_global={Ne_global}"
-                )
-
-        # Fill owners from gathered eid lists
-        all_ids = cw.allgather(ids_local)
-        for rr, eids_rr in enumerate(all_ids):
-            eids_rr = np.asarray(eids_rr, dtype=np.int64)
-            if eids_rr.size:
-                owners_global[eids_rr] = rr
-
-        # Final safety: every eid must be owned by exactly one rank
-        if np.any(owners_global < 0):
-            miss = int(np.sum(owners_global < 0))
-            raise ValueError(f"owners_global has {miss} unassigned eids (non-dense or missing elements).")
-
-        # owners_global = np.empty(Ne_global, dtype=np.int32)
-        # owners_global.fill(-1)
-        # # Enumerate across allgathered global IDs
-        # for rr, gids_rr in enumerate(cw.allgather(ids_local)):
-        #     gids_rr = np.asarray(gids_rr, dtype=np.int64)
-        #     if gids_rr.size == 0:
-        #         continue
-        #     owners_global[gids_rr] = rr
-        # self._cache['owner_global'] = {'gen': gen, 'owners': owners_global,}
-
-        self._cache['owner_global'] = {'gen': gen, 'owners': owners_global}
-        return owners_global
-
-
     def _get_global_owner_array(self) -> np.ndarray:
         cw = comm['world']
         my_rank = int(rank['world'])
@@ -1398,32 +1337,6 @@ class _MetaMesh:
         self._cache['owner_global'] = {'gen': gen, 'owners': owners_global}
         return owners_global
 
-
-    def _retag_con_owners(self):
-        """
-        Retag connectivity owner fields using global IDs in con_idx.
-        """
-        owners_global = self._get_global_owner_array()
-        
-        for et, con_idx in self.i.con_idx.items():
-            con_idx_arr = con_idx
-            con_mpi_arr = self.i.con_mpi[et]
-
-            if con_idx_arr.size == 0 or con_mpi_arr.size == 0:
-                continue
-
-            eid_flat    = con_idx_arr.reshape(-1)
-            owners_flat = con_mpi_arr.reshape(-1)
-
-            valid = (eid_flat >= 0)
-            if np.any(valid):
-                owners_flat[valid] = owners_global[eid_flat[valid]].astype(np.int32)
-
-            new_owners = owners_flat.reshape(con_mpi_arr.shape)
-            self.i.con_mpi[et][...] = new_owners
-
-
-
     def _retag_con_owners(self):
         """
         Retag connectivity owner fields using global IDs in con_idx.
@@ -1452,9 +1365,6 @@ class _MetaMesh:
                 owners_flat[valid] = owners_global[eid_flat[valid]].astype(np.int32)
 
             self.i.con_mpi[et][...] = owners_flat.reshape(con_mpi_arr.shape)
-
-
-
 
     def plan_eidxs_dest_from_diff(self, eidxs_diff, verbose=False):
         """
@@ -1556,7 +1466,7 @@ class WaitsToTargetsModelMixin:
         """
         Snapshot g1 medians to CSV in integer microseconds.
         """
-        if rank['compute'] != root['compute']: return
+        if rank['compute'] != root['compute'] and comm['compute'] != mpi.COMM_NULL: return
 
         # Scale to microseconds and cast to int (compute index space)
         all_us  = np.rint(g1a * 1e6).astype(np.int64)
@@ -1609,108 +1519,30 @@ class WaitsToTargetsModelMixin:
         _append_csv_row('g1-send-median-ms.csv', mcols, [int(send_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
         _append_csv_row('g1-recv-median-ms.csv', mcols, [int(recv_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
 
-    def calc_target(self, g1a, g1s=None, g1r=None):
-        W = comm['world']
-        P = int(W.size)
-        wi = int(rank['world'])
+    def calc_target(self, g1a, g1s, g1r):
 
-        self._lb_epoch = getattr(self, '_lb_epoch', 0) + 1
-        ep = int(self._lb_epoch)
+        # 0. Broadcast g1a, g1s, g1r from compute root to all ranks
+        g1a = comm['world'].bcast(g1a, root=root['world'])
+        g1s = comm['world'].bcast(g1s, root=root['world'])
+        g1r = comm['world'].bcast(g1r, root=root['world'])
+        cost = self.compute_cost(g1a, g1s, g1r)   # must return shape (P,)
+        target = super().calc_target_world(cost)
 
-        comp_wrs = list(rankmap['compute'])
-        if not comp_wrs:
-            raise RuntimeError("rankmap['compute'] empty")
-        rootc_w = int(comp_wrs[0])
+        # ADD
+        add_ranks = set(rankmap['plancompute']) - set(rankmap['compute'])
+        world_matching_ranks = [i for i, r in enumerate(get_comm_info('compute')._devices_world) if r == get_comm_info('compute')._device]
+        compute_matching_ranks = [r for r in rankmap['compute'] if r in world_matching_ranks]
+        mean_target = np.mean([target[r] for r in compute_matching_ranks])
+        target[list(add_ranks)] = mean_target
 
-        # Everyone must agree on the compute ranklist (catch divergence early)
-        sig = (P, rootc_w, tuple(comp_wrs))
-        sigs = W.allgather(sig)
-        if any(s != sig for s in sigs):
-            if wi == int(root['world']):
-                print(f"[lb ep={ep}] FATAL rankmap mismatch", flush=True)
-                for r, s in enumerate(sigs):
-                    if s != sig:
-                        print(f"  rank {r}: {s}", flush=True)
-            comm['world'].Abort(2)
+        # REMOVE
+        remove_ranks = set(rankmap['compute']) - set(rankmap['plancompute'])
+        target[list(remove_ranks)] = 0
 
-        W.barrier()
-        if wi == int(root['world']):
-            print(f"[lb ep={ep}] calc_target enter P={P} rootc_w={rootc_w} Pc={len(comp_wrs)}", flush=True)
+        target = self.add_jitter_to_targets(target)
+        target = self.int_round(target)
 
-        # Decide whether g1 is valid on root (then broadcast)
-        has_g1 = None
-        if wi == rootc_w:
-            has_g1 = bool(g1s is not None and g1r is not None)
-        has_g1 = W.bcast(has_g1, root=rootc_w)
-
-        # Compute WORLD cost on root ONLY (no execute wrapper)
-        cost_world = None
-        if wi == rootc_w:
-            if has_g1:
-                cw = self.compute_cost(g1a, g1s, g1r)   # must return shape (P,)
-                cw = np.asarray(cw, dtype=np.float64)
-                if cw.shape != (P,):
-                    raise ValueError(f"compute_cost must return {(P,)}, got {cw.shape}")
-                cost_world = cw
-            else:
-                cost_world = np.full(P, 1.0, dtype=np.float64)
-
-            # Force inactive ranks to inf (so they get zero weight)
-            comp_set = set(int(r) for r in comp_wrs)
-            for r in range(P):
-                if r not in comp_set:
-                    cost_world[r] = np.inf
-
-        # Broadcast cost (pickle-based)
-        W.barrier()
-        cost_world = W.bcast(cost_world, root=rootc_w)
-        cost_world = np.asarray(cost_world, dtype=np.float64)
-        self.cost = cost_world
-
-        if wi == int(root['world']):
-            fin = np.isfinite(cost_world)
-            print(f"[lb ep={ep}] cost finite={int(fin.sum())}/{P} "
-                f"min={np.nanmin(np.where(fin, cost_world, np.nan))} "
-                f"max={np.nanmax(np.where(fin, cost_world, np.nan))}", flush=True)
-
-        # Build WORLD weights only on compute ranks
-        weights_world = np.zeros(P, dtype=np.float64)
-        comp = np.asarray(comp_wrs, dtype=np.int64)
-        cc = cost_world[comp]
-        np.divide(1.0, cc, out=weights_world[comp],
-                where=np.isfinite(cc) & (cc > 0.0))
-
-        # Compute WORLD targets on root using a PURE function (no MPI inside)
-        tgt = None
-        if wi == rootc_w:
-            print(f"[lb ep={ep}] root computing tgt_world...", flush=True)
-            tgt = self.calc_target_world(weights_world)          # returns (P,)
-            tgt = np.asarray(tgt, dtype=np.int64)
-
-            # Ensure inactive ranks stay at 0 even after any jitter you do later
-            inactive = np.ones(P, dtype=bool)
-            inactive[comp] = False
-            tgt[inactive] = 0
-
-            # Optional: jitter, but keep inactive zeroed afterwards
-            tgt = self.add_jitter_to_targets(tgt)
-            tgt[inactive] = 0
-
-            # Fix sum exactly (move any deficit/excess to compute-root)
-            d = int(self.i.nelems_g) - int(tgt.sum())
-            tgt[rootc_w] += d
-
-            if tgt.sum() != int(self.i.nelems_g):
-                raise ValueError(f"tgt sum {int(tgt.sum())} != nelems_g {int(self.i.nelems_g)}")
-
-        W.barrier()
-        tgt = W.bcast(tgt, root=rootc_w)
-        tgt = np.asarray(tgt, dtype=np.int64)
-
-        if wi == int(root['world']):
-            print(f"[lb ep={ep}] tgt sum={int(tgt.sum())} min={int(tgt.min())} max={int(tgt.max())}", flush=True)
-
-        return tgt
+        return np.asarray(target, dtype=np.int64)
 
     def compute_cost(self, g1a, g1s, g1r):
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
@@ -2441,70 +2273,6 @@ class RankAllocatorMixin:
             self.online_cfg = Inifile.load(self.online_cfg_file)
 
         initialise_new_comm('plancompute', self.online_cfg.getliteral('partition', 'compute-ranklist'))
-
-    def remap_to_world(self, N_star_old):
-        old_ranks = list(rankmap['compute'])       # world ranks, current compute order
-        new_ranks = list(rankmap['plancompute'])   # world ranks, planned next order
-
-        P_world = int(comm['world'].size)
-
-        N_star_old = np.asarray(N_star_old, dtype=float).ravel()
-
-        # Accept BOTH:
-        #  - compute-shaped input (Pc)
-        #  - world-shaped input (P)
-        if N_star_old.size == P_world:
-            # Interpret as world-vector; extract current compute order
-            N_star_old_comp = np.asarray([N_star_old[int(wr)] for wr in old_ranks], dtype=float)
-        elif N_star_old.size == len(old_ranks):
-            N_star_old_comp = N_star_old
-        else:
-            raise ValueError(
-                f"remap_to_world: got N_star_old.size={N_star_old.size}, "
-                f"expected Pc={len(old_ranks)} or P={P_world}. "
-                f"old_ranks={old_ranks}"
-            )
-
-        old_mass = dict(zip(old_ranks, map(float, N_star_old_comp)))
-
-        mean_new = float(self.i.nelems_g) / float(len(new_ranks))
-
-        winfo = get_comm_info('world')
-
-        dev_means = {}
-        if winfo is not None:
-            by_dev = {}
-            for wr in old_ranks:
-                dev = winfo.device_of_world_rank(int(wr))
-                if dev is None:
-                    continue
-                by_dev.setdefault(dev, []).append(float(old_mass[int(wr)]))
-            for dev, vals in by_dev.items():
-                if vals:
-                    dev_means[dev] = float(np.mean(np.asarray(vals, dtype=float)))
-
-        def fallback_for_new_rank(wr: int) -> float:
-            dev = winfo.device_of_world_rank(int(wr)) if winfo is not None else None
-            if dev is not None and dev in dev_means:
-                return dev_means[dev]
-            return mean_new
-
-        N_star_new = np.asarray(
-            [old_mass.get(int(wr), fallback_for_new_rank(int(wr))) for wr in new_ranks],
-            dtype=float
-        )
-
-        tgt_new = self.int_round(N_star_new)
-
-        world = np.zeros(P_world, dtype=np.int64)
-        for wr, m in zip(new_ranks, tgt_new):
-            world[int(wr)] = int(m)
-
-        return world
-
-
-
-    # ----------------- Carving partitions to look better ----------------------
 
 
 class CarverMixin:
@@ -3605,6 +3373,13 @@ class OfflineRepartitioner(_MetaMesh):
         _MetaMesh.__init__(self, mesh, cfg)
 
     def calc_target_world(self, weights_world):
+        """
+            In an offline setting, given per-rank weights ...
+            this function calculates the target number of elements for each rank.
+            This can also use PartitionState.int_round() to handle nicer rounding.
+        
+        """
+
         P = int(comm['world'].size)
         comp_wrs = np.asarray(rankmap['compute'], dtype=np.int64)
         Pc = int(comp_wrs.size)
