@@ -1542,7 +1542,14 @@ class WaitsToTargetsModelMixin:
         target = self.add_jitter_to_targets(target)
         target = self.int_round(target)
 
-        return np.asarray(target, dtype=np.int64)
+        target = np.asarray(target, dtype=np.int64)
+
+        # Ensure all have the same target
+        target = comm['compute'].bcast(target, root=root['compute'])
+        target = comm['world'].bcast(target, root=root['world'])
+
+        return target
+
 
     def compute_cost(self, g1a, g1s, g1r):
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
