@@ -1297,7 +1297,7 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
                                 maintain_cluster_by_device_types: bool = False) -> None:
         ne_loc = int(self.i.nelems)
         ecurrs_wr = comm['world'].allgather(ne_loc)
-        target = self.calc_target(ecurrs_wr)
+        target = self.calc_target_offline(ecurrs_wr)
 
         if rank['world'] == root['world']:
             print(f"[startup-contig] enabled=True max_iters={max_iters}", flush=True)

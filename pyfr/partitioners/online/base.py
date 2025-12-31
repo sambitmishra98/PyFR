@@ -1526,7 +1526,7 @@ class WaitsToTargetsModelMixin:
         g1s = comm['world'].bcast(g1s, root=root['world'])
         g1r = comm['world'].bcast(g1r, root=root['world'])
         cost = self.compute_cost(g1a, g1s, g1r)   # must return shape (P,)
-        target = super().calc_target_world(cost)
+        target = super().calc_target_offline(1/cost)
 
         # ADD
         add_ranks = set(rankmap['plancompute']) - set(rankmap['compute'])
@@ -3372,52 +3372,14 @@ class OfflineRepartitioner(_MetaMesh):
     def __init__(self, mesh, cfg=None):
         _MetaMesh.__init__(self, mesh, cfg)
 
-    def calc_target_world(self, weights_world):
-        """
-            In an offline setting, given per-rank weights ...
-            this function calculates the target number of elements for each rank.
-            This can also use PartitionState.int_round() to handle nicer rounding.
-        
-        """
-
-        P = int(comm['world'].size)
-        comp_wrs = np.asarray(rankmap['compute'], dtype=np.int64)
-        Pc = int(comp_wrs.size)
-
-        w = np.asarray(weights_world, dtype=np.float64)
-        if w.shape != (P,):
-            raise ValueError(f"weights_world shape {w.shape} != {(P,)}")
-
-        wc = w[comp_wrs]
-        wc = np.where(np.isfinite(wc) & (wc > 0.0), wc, 0.0)
-
-        # Fallback if everything is zero/NaN/inf
-        s = float(wc.sum())
-        if s <= 0.0:
-            wc = np.ones(Pc, dtype=np.float64)
-            s = float(Pc)
-
-        wc /= s
-
-        Ntot = int(self.i.nelems_g)
-
-        raw = wc * Ntot
-        base = np.floor(raw).astype(np.int64)
-        rem = Ntot - int(base.sum())
-
-        if rem:
-            frac = raw - base
-            order = np.argsort(frac)[::-1]
-            base[order[:rem]] += 1
-
-        tgt = np.zeros(P, dtype=np.int64)
-        tgt[comp_wrs] = base
-        return tgt
-
+    def calc_target_offline(self, weights_world):
+        cur0 = np.asarray(self._cur_counts_total, dtype=np.int64)
+        return self.int_round(cur0*weights_world)
  
     
 class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRepartitioner):
-    shuffle_if_stagnant = 0
+    lb_outeriteration_counter = 0
+    lb_inneriteration_counter = 0
 
     def __init__(self, mesh, cfg):
         # Everything related to costs
@@ -3442,6 +3404,42 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         self.cost_store    = deque(maxlen=self._perfwin)
         self.nfevals_store = deque(maxlen=self._perfwin)
         self.dofs_store    = deque(maxlen=self._perfwin)
+
+        # Create a csv 
+        self.init_csv()
+        
+    def init_csv(self):
+        pass
+    
+    def to_csv(self):        
+        """
+            Store:
+                n, tcurr           (intg derived)
+                Outer-iteration    
+                    Options: 
+                        diffuse
+                        smooth
+                        remove_outliers
+                        add_inliers
+                        add-ranks
+                        remove-ranks
+
+                    Arguements: 
+                        iterations (if push to convergence, or till some number)
+                        threshold
+                        affinity criteria
+                        vertex-based or edge-based
+
+                Inner-iteration
+                    Options: 
+                        
+        
+        """
+
+
+
+
+        pass
 
     def record_perf_sample(self, *, nfevals, nvars: int = 1):
         """
