@@ -53,7 +53,7 @@ class MPICommInfo:
         if comm is None or comm == MPI.COMM_NULL:
             self.comm = MPI.COMM_NULL
             self.rank = None
-            self.root = None
+            self.root = 0
 
     # ---------------- basic properties ----------------
 
@@ -209,7 +209,7 @@ class MPICommInfo:
 
         if new_comm == MPI.COMM_NULL:
             new_rank = None
-            root = None
+            root = 0
         else:
             new_rank = new_comm.Get_rank()
             root = 0

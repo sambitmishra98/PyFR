@@ -1168,7 +1168,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             iters += 1
 
             cur0 = self._cur_counts_total
-            if rank['compute'] == root['compute']: print(f"CUR: {cur0}")     
+            if rank['compute'] == root['compute']: print(f"CURx: {cur0}")     
 
             self.iterate(target_counts, flowmat_relax=flowmat_relax, smooth=smooth)
 
@@ -1228,7 +1228,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             return
 
         if rank['compute'] == root['compute']:
-            print(f"TGT: {target}")
+            print(f"TGTy: {target}")
 
         iters = 0
 
@@ -1247,7 +1247,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.iterate(target, flowmat_relax=1.0, smooth=smooth)
 
             cur0 = self._cur_counts_total
-            if rank['compute'] == root['compute']: print(f"CUR: {cur0}")     
+            if rank['compute'] == root['compute']: print(f"CURy: {cur0}")     
 
 class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
 

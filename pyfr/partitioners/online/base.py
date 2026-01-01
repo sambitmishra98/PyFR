@@ -1521,23 +1521,34 @@ class WaitsToTargetsModelMixin:
 
     def calc_target(self, g1a, g1s, g1r):
 
-        # 0. Broadcast g1a, g1s, g1r from compute root to all ranks
-        g1a = comm['world'].bcast(g1a, root=root['world'])
-        g1s = comm['world'].bcast(g1s, root=root['world'])
-        g1r = comm['world'].bcast(g1r, root=root['world'])
         cost = self.compute_cost(g1a, g1s, g1r)   # must return shape (P,)
         target = super().calc_target_offline(1/cost)
 
-        # ADD
-        add_ranks = set(rankmap['plancompute']) - set(rankmap['compute'])
-        world_matching_ranks = [i for i, r in enumerate(get_comm_info('compute')._devices_world) if r == get_comm_info('compute')._device]
-        compute_matching_ranks = [r for r in rankmap['compute'] if r in world_matching_ranks]
-        mean_target = np.mean([target[r] for r in compute_matching_ranks])
-        target[list(add_ranks)] = mean_target
+        # ADD (deterministic, device-aware, rank-consistent)
+        add_ranks = sorted(set(rankmap['plancompute']) - set(rankmap['compute']))
+
+        if add_ranks:
+            devices_world = get_comm_info('world').devices_world
+
+            # Precompute mean target per device tag using *current compute ranks*
+            dev_to_tranks = {}
+            for r in rankmap['compute']:
+                dev = str(devices_world[r]).strip()
+                dev_to_tranks.setdefault(dev, []).append(r)
+
+            dev_to_mean = {}
+            for dev, rs in dev_to_tranks.items():
+                dev_to_mean[dev] = float(np.mean([target[r] for r in rs])) if rs else 0.0
+
+            # Fill each added rank using its OWN device tag
+            for r in add_ranks:
+                dev = str(devices_world[r]).strip()
+                mu = dev_to_mean.get(dev, float(np.mean([target[x] for x in rankmap['compute']])))
+                target[r] = mu
 
         # REMOVE
-        remove_ranks = set(rankmap['compute']) - set(rankmap['plancompute'])
-        target[list(remove_ranks)] = 0
+        remove_ranks = sorted(set(rankmap['compute']) - set(rankmap['plancompute']))
+        target[remove_ranks] = 0
 
         target = self.add_jitter_to_targets(target)
         target = self.int_round(target)
@@ -1545,15 +1556,22 @@ class WaitsToTargetsModelMixin:
         target = np.asarray(target, dtype=np.int64)
 
         # Ensure all have the same target
-        target = comm['compute'].bcast(target, root=root['compute'])
+        if comm['compute'] != mpi.COMM_NULL:
+            target = comm['compute'].bcast(target, root=root['compute'])
         target = comm['world'].bcast(target, root=root['world'])
 
         return target
 
 
     def compute_cost(self, g1a, g1s, g1r):
+
+        # 0. Broadcast g1a, g1s, g1r from compute root to all ranks
+        g1a = comm['world'].bcast(g1a, root=root['world'])
+        g1s = comm['world'].bcast(g1s, root=root['world'])
+        g1r = comm['world'].bcast(g1r, root=root['world'])
+
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
-        self.write_g1_median_csvs(g1a, g1s, g1r)
+        #self.write_g1_median_csvs(g1a, g1s, g1r)
 
         g1a = np.asarray(g1a, dtype=float)
         g1s = np.asarray(g1s, dtype=float)
