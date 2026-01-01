@@ -1363,7 +1363,17 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
 
     def _cluster_equal_target(self, cur_counts, cids):
         cur = np.asarray(cur_counts, dtype=np.int64)
-        cids = np.asarray(cids, dtype=np.int32)
+
+        # If no clustering is requested, treat all ranks as one cluster
+        if cids is None:
+            cids = np.zeros(cur.shape[0], dtype=np.int32)
+        else:
+            cids = np.asarray(cids, dtype=np.int32)
+            if cids.shape[0] != cur.shape[0]:
+                raise ValueError(
+                    f"[startup-contig] cluster id length {cids.shape[0]} != "
+                    f"cur_counts length {cur.shape[0]}"
+                )
 
         tgt = np.zeros_like(cur)
         for cid in np.unique(cids):
