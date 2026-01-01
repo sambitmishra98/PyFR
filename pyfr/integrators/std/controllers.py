@@ -179,7 +179,7 @@ class StdPIController(BaseStdController):
             self.dt = max(self.dt, self.dtmin)
 
             # Decide on the time step
-            dt = max(min(t - self.tcurr, self._dt, self.dtmax), self.dtmin)
+            dt = max(min(t - self.tcurr, self.dt), self.dtmin)
 
             # Take the step
             idxcurr, idxprev, idxerr = execute['compute'](lambda: self.step(self.tcurr, dt),

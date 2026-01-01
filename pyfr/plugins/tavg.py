@@ -114,6 +114,8 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         # Reduce
         self.tpts = comm.reduce(tpts, op=mpi.SUM, root=root)
 
+        self.tout_last = intg.tstart
+
         # Check if we are restarting and not before when tavg begins
         if intg.called_plugin_dt:
             self.tout_last = intg.tstart
