@@ -1571,7 +1571,7 @@ class WaitsToTargetsModelMixin:
         g1r = comm['world'].bcast(g1r, root=root['world'])
 
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
-        #self.write_g1_median_csvs(g1a, g1s, g1r)
+        self.write_g1_median_csvs(g1a, g1s, g1r)
 
         g1a = np.asarray(g1a, dtype=float)
         g1s = np.asarray(g1s, dtype=float)
