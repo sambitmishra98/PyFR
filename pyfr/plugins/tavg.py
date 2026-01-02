@@ -123,7 +123,8 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
                 raise RuntimeError('Restarting from a time other '
                                             'than t=0 is not supported')
         elif not intg.isrestart:
-            self.tout_last -= self.dt_out
+            pass 
+        # self.tout_last -= self.dt_out
 
     def _prepare_exprs(self):
         cfg, cfgsect = self.cfg, self.cfgsect
