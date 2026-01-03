@@ -83,6 +83,13 @@ class BaseIntegrator:
         if rank['world'] == root['world']:
             with open('lb_walltimes.csv', 'a') as f: f.write('tcurr,others,iterate,reinit\n')
 
+        # Step-attempt acceptance history (align with waitsome timing history)
+        self._step_accepted = None
+        if cfg.getbool('backend', 'collect-waitsome-times', False):
+            n = cfg.getint('backend', 'collect-waitsome-times-len', 0)
+            if n > 0:
+                self._step_accepted = deque(maxlen=n)
+
         self.wallt_end = time.perf_counter_ns()
 
         # Record the total amount of time spent in each plugin
@@ -107,6 +114,11 @@ class BaseIntegrator:
                                           'dt-adjust-max-fact', 1.001)
         self.dt_fallback = cfg.getfloat('solver-time-integrator', 'dt')
         self.dt_near = None
+
+    def _note_step_accepted(self, accepted: bool) -> None:
+        buf = self._step_accepted
+        if buf is not None:
+            buf.append(bool(accepted))
 
     def copy_to_empty_system(self):
 
@@ -498,6 +510,39 @@ class BaseIntegrator:
 
         return all_med, send_mat, recv_mat
 
+
+    def get_median_matrices(self):
+        if comm['compute'] == mpi.COMM_NULL:
+            return None, None, None
+
+        P = comm['compute'].size
+
+        accmask = None
+        buf = getattr(self, '_step_accepted', None)
+        if buf:
+            accmask = np.fromiter(buf, dtype=np.bool_, count=len(buf))
+
+            # Guard: if essentially nothing accepted, don’t feed garbage
+            if accmask.sum() < 3:
+                accmask = None
+
+        if rank['compute'] == root['compute'] and accmask is not None:
+            print(f"[lb-median] accepted-only samples: {int(accmask.sum())}/{accmask.size}", flush=True)
+
+        all_times = comm['compute'].allgather(self.system.rhs_all_times_median(accepted_mask=accmask))
+        ws_send   = comm['compute'].allgather(self.system.rhs_wait_times_send_median(accepted_mask=accmask))
+        ws_recv   = comm['compute'].allgather(self.system.rhs_wait_times_recv_median(accepted_mask=accmask))
+
+        all_med  = np.fromiter((float(all_times[r])  for r in range(P)),
+                               dtype=float, count=P)
+        send_mat = np.fromiter((float(ws_send[i][j]) for i in range(P) for j in range(P)),
+                               dtype=float, count=P*P).reshape(P, P)
+        recv_mat = np.fromiter((float(ws_recv[i][j]) for i in range(P) for j in range(P)),
+                               dtype=float, count=P*P).reshape(P, P)
+
+        return all_med, send_mat, recv_mat
+
+
     @property
     def cfgmeta(self):
         cfg = self.cfg.tostr()
@@ -521,7 +566,7 @@ class BaseIntegrator:
 
     def load_balance(self):
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
-        if self.nsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
+        if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
             if rank['world'] == root['world']: print('Switching, nacptsteps = ', self.nacptsteps)
             wallt_start = time.perf_counter_ns()
 

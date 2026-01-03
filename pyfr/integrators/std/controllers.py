@@ -23,6 +23,7 @@ class BaseStdController(BaseStdIntegrator):
             self._run_plugins()
 
     def _accept_step(self, dt, idxcurr, err=None):
+        self._note_step_accepted(True)
         self.tcurr += dt
         self.nacptsteps += 1
         self.nacptchain += 1
@@ -43,6 +44,7 @@ class BaseStdController(BaseStdIntegrator):
         self.stepinfo = []
 
     def _reject_step(self, dt, idxold, err=None):
+        self._note_step_accepted(False)
         if dt <= self.dtmin:
             raise RuntimeError('Minimum sized time step rejected')
 
@@ -196,6 +198,7 @@ class StdPIController(BaseStdController):
             if err < 1.0:
                 self._errprev = err
                 self._accept_step(self.dt, idxcurr, err=err)
+                self.load_balance()
             else:
                 self._reject_step(self.dt, idxprev, err=err)
 
@@ -206,4 +209,3 @@ class StdPIController(BaseStdController):
             # Compute the next time step
             self.dt_fallback = fac*self.dt
 
-            self.load_balance()

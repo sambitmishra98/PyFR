@@ -473,7 +473,6 @@ class BaseSystem:
 
         return stage_stats
 
-
     def rhs_all_times_median(self):
         u, f = list(self._rhs_uin_fout)[-1]
         g_list = tuple(self._rhs_graphs(u, f))
@@ -503,6 +502,117 @@ class BaseSystem:
         out = np.zeros(P, dtype=np.float64)
         for j, dt in enumerate(lsts):
             out[j] = statistics.median(dt) if dt else 0.0
+
+        return out
+
+    def _apply_tail_mask(self, arr: np.ndarray, accepted_mask) -> np.ndarray:
+        if accepted_mask is None:
+            return arr
+
+        m = np.asarray(accepted_mask, dtype=np.bool_)
+        if arr.shape[0] == 0 or m.size == 0:
+            return arr[:0]
+
+        k = min(arr.shape[0], m.size)
+        arr = arr[-k:]
+        m = m[-k:]
+
+        return arr[m]
+
+    def _rhs_last_uin_fout(self):
+        uinf = self._rhs_uin_fout
+
+        # Fast-path for sequences (list/tuple/deque)
+        try:
+            return uinf[-1]
+        except Exception:
+            pass
+
+        # Fallback for sets/iterables
+        vals = list(uinf)
+        if not vals:
+            raise RuntimeError('[lb-mask] _rhs_uin_fout is empty')
+
+        # If it is a set with multiple entries, selection is inherently arbitrary;
+        # warn once per call site if you want (optional).
+        return vals[-1]
+
+    def rhs_all_times_median(self, accepted_mask=None):
+        u, f = self._rhs_last_uin_fout()
+        g = tuple(self._rhs_graphs(u, f))[-2]
+
+        t = np.asarray(g.get_all_times(), dtype=np.float64)
+        t = self._apply_tail_mask(t, accepted_mask)
+
+        return float(np.median(t)) if t.size else 0.0
+
+
+    def rhs_wait_times_send_median(self, accepted_mask=None):
+        P = comm['compute'].size
+
+        u, f = self._rhs_last_uin_fout()
+        g = tuple(self._rhs_graphs(u, f))[-2]
+
+        # Reference attempt count for alignment
+        nref = len(g.get_all_times())
+
+        lsts = g.get_wait_times_send()
+        out = np.zeros(P, dtype=np.float64)
+
+        warned = False
+        for j, dt in enumerate(lsts):
+            if not dt:
+                out[j] = 0.0
+                continue
+
+            arr = np.asarray(dt, dtype=np.float64)
+
+            # Mask only if attempt-aligned; otherwise skip mask for this column
+            if accepted_mask is not None and arr.size != nref:
+                if not warned and comm['compute'].rank == 0:
+                    print(f"[lb-mask] NOTE: send[{j}] len(dt)={arr.size} != len(all)={nref}; "
+                        f"skipping mask for this column",
+                        flush=True)
+                    warned = True
+            else:
+                arr = self._apply_tail_mask(arr, accepted_mask)
+
+            out[j] = float(np.median(arr)) if arr.size else 0.0
+
+        return out
+
+
+    def rhs_wait_times_recv_median(self, accepted_mask=None):
+        P = comm['compute'].size
+
+        u, f = self._rhs_last_uin_fout()
+        g = tuple(self._rhs_graphs(u, f))[-2]
+
+        # Reference attempt count for alignment
+        nref = len(g.get_all_times())
+
+        lsts = g.get_wait_times_recv()
+        out = np.zeros(P, dtype=np.float64)
+
+        warned = False
+        for j, dt in enumerate(lsts):
+            if not dt:
+                out[j] = 0.0
+                continue
+
+            arr = np.asarray(dt, dtype=np.float64)
+
+            # Mask only if attempt-aligned; otherwise skip mask for this column
+            if accepted_mask is not None and arr.size != nref:
+                if not warned and comm['compute'].rank == 0:
+                    print(f"[lb-mask] NOTE: recv[{j}] len(dt)={arr.size} != len(all)={nref}; "
+                        f"skipping mask for this column",
+                        flush=True)
+                    warned = True
+            else:
+                arr = self._apply_tail_mask(arr, accepted_mask)
+
+            out[j] = float(np.median(arr)) if arr.size else 0.0
 
         return out
 
