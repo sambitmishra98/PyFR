@@ -3635,9 +3635,9 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
 
 
 class OnlineGlobalPartitioner(OnlinePartitioner):
-    _backend_cls = None          # METISPartitioner or SCOTCHPartitioner
+    _backend_cls = None
     _backend_name = "backend"
-    _backend_strat = None        # SCOTCH only; e.g. "quality"
+    _backend_strat = None
     name = None
 
     def __init__(self, mesh, cfg):
@@ -3964,4 +3964,4 @@ class OnlineSCOTCHPartitioner(OnlineGlobalPartitioner):
     name = "scotch"
     _backend_cls = SCOTCHPartitioner
     _backend_name = "scotch"
-    _backend_strat = "quality"
+    _backend_strat = "default"

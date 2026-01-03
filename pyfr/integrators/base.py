@@ -521,7 +521,7 @@ class BaseIntegrator:
 
     def load_balance(self):
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
-        if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
+        if self.nsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
             if rank['world'] == root['world']: print('Switching, nacptsteps = ', self.nacptsteps)
             wallt_start = time.perf_counter_ns()
 
