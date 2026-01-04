@@ -166,6 +166,8 @@ class StdPIController(BaseStdController):
             # Reduce globally (MPI ranks)
             if comm['compute'] != mpi.COMM_NULL:
                 comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            else:
+                err = np.array([0.0], dtype=np.float32)
 
             # Broadcast
             err = comm['world'].bcast(err, root=root['world'])
