@@ -5,7 +5,7 @@ import numpy as np
 from time import perf_counter_ns
 
 from pyfr.integrators.std.base import BaseStdIntegrator
-from pyfr.mpiutil import (mpi, comm, execute)
+from pyfr.mpiutil import (mpi, comm, rank, root, execute)
 
 class BaseStdController(BaseStdIntegrator):
     def __init__(self, *args, **kwargs):
@@ -147,7 +147,14 @@ class StdPIController(BaseStdController):
             err = np.array([sum(v for k in ekerns for v in k.retval)])
 
             # Reduce globally (MPI ranks)
-            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
+            if comm['compute'] != mpi.COMM_NULL:
+                comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
+            else:
+                err = np.array([0.0], dtype=np.float32)
+
+            # Broadcast
+            #comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            err = comm['world'].bcast(err, root=root['world'])
 
             # Normalise
             err = math.sqrt(float(err) / self._gndofs)
@@ -157,7 +164,11 @@ class StdPIController(BaseStdController):
             err = np.array([max(v for k in ekerns for v in k.retval)])
 
             # Reduce globally (MPI ranks)
-            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            if comm['compute'] != mpi.COMM_NULL:
+                comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+
+            # Broadcast
+            err = comm['world'].bcast(err, root=root['world'])
 
             # Normalise
             err = math.sqrt(float(err))

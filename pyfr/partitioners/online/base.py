@@ -1574,7 +1574,13 @@ class WaitsToTargetsModelMixin:
 
         # Get median of tdiff across all the collected timesteps for this rank.
         tdiff_median = np.median(np.asarray(list(tdiff_hist), dtype=float))
-        tdiff_median_allgathered = comm['world'].allgather(tdiff_median)
+        if comm['compute'] != mpi.COMM_NULL:
+            tdiff_median_allgathered = comm['compute'].allgather(tdiff_median)
+        else:
+            tdiff_median_allgathered = None
+            
+        tdiff_median_allgathered = comm['world'].bcast(tdiff_median_allgathered, root=root['compute'])
+
         # tdiff: [np.float64(5418026.0), np.float64(5418206.0), np.float64(5424116.0), np.float64(5426116.0), np.float64(5421775.0), np.float64(5420736.0), np.float64(5423566.0), np.float64(5422726.0), np.float64(5420415.0), np.float64(5419546.0), np.float64(5422876.0), np.float64(5419875.0), np.float64(5418626.0), np.float64(5423316.0), np.float64(5427656.0), np.float64(5426366.0), np.float64(5424876.0), np.float64(5427186.0), np.float64(5426306.0), np.float64(5423726.0), np.float64(5423756.0), np.float64(5426226.0), np.float64(5427336.0), np.float64(5425996.0)]
         # Convert nicely to a numpy of float
         err_diff = np.array(tdiff_median_allgathered, dtype=float)
