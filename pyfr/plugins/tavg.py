@@ -47,7 +47,8 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         self.elementscls = intg.system.elementscls
 
         # Primitive variables
-        self.privars = first(intg.system.ele_map.values()).privars
+        self.privars = self.elementscls.privars(intg.system.mesh.ndims, 
+                                                intg.cfg)
 
         # Averaging mode
         self.mode = self.cfg.get(cfgsect, 'mode', 'windowed')
