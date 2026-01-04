@@ -89,6 +89,7 @@ class BaseIntegrator:
             n = cfg.getint('backend', 'collect-waitsome-times-len', 0)
             if n > 0:
                 self._step_accepted = deque(maxlen=n)
+                self._errest_tdiff_hist = deque(maxlen=n)
 
         self.wallt_end = time.perf_counter_ns()
 
@@ -126,10 +127,10 @@ class BaseIntegrator:
         if hasattr(self, 'convars'):
             return
        
-        if comm['compute'] != mpi.COMM_NULL:
-            convars = list(first(self.system.ele_map.values()).convars)
-        else:
-            convars = []
+        #if comm['compute'] != mpi.COMM_NULL:
+        #    convars = list(first(self.system.ele_map.values()).convars)
+        #else:
+        #    convars = []
 
         convars = execute['compute'](lambda: list(first(self.system.ele_map.values()).convars),
                           default = [])
@@ -576,7 +577,7 @@ class BaseIntegrator:
             mmesh.recheck_online_file()
 
             # Element counts per world rank
-            target = mmesh.calc_target(*self.get_median_matrices())
+            target = mmesh.calc_target(*self.get_median_matrices(), self._errest_tdiff_hist)
 
             self.mmesh.intg_repartition(target)
 

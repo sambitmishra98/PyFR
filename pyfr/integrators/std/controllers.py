@@ -2,6 +2,8 @@ import math
 
 import numpy as np
 
+from time import perf_counter_ns
+
 from pyfr.integrators.std.base import BaseStdIntegrator
 from pyfr.mpiutil import (mpi, comm, execute)
 
@@ -76,6 +78,7 @@ class StdNoneController(BaseStdController):
                                          default=-1)
             idxcurr = comm['world'].allreduce(idxcurr, op=mpi.MAX)
 
+            self._errest_tdiff_hist.append(0)
             # We are not adaptive, so accept every step
             self._accept_step(self.dt, idxcurr)
 
@@ -191,8 +194,14 @@ class StdPIController(BaseStdController):
             idxprev = comm['world'].allreduce(idxprev, op=mpi.MAX)
             idxerr  = comm['world'].allreduce(idxerr,  op=mpi.MAX)
 
+            #self.backend.wait()
+            tstart = perf_counter_ns()
+
             # Estimate the error
             err = self._errest(idxcurr, idxprev, idxerr)
+
+            #self.backend.wait()
+            self._errest_tdiff_hist.append((perf_counter_ns() - tstart)*1e-9)
 
             # Decide if to accept or reject the step
             if err < 1.0:

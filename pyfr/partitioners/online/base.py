@@ -1444,6 +1444,7 @@ class WaitsToTargetsModelMixin:
         self.cost_g1r    = cfg.getfloat('partition', 'cost-coeff-g1r', -1.0)
         self.cost_g1s    = cfg.getfloat('partition', 'cost-coeff-g1s', -1.0)
         self.cost_g1rt   = cfg.getfloat('partition', 'cost-coeff-g1rt', 1.0)
+        self.cost_err    = cfg.getfloat('partition', 'cost-coeff-err', -1.0)
 
         self.cost_g1a_e  = cfg.getfloat('partition', 'cost-exp-g1a',    1.0)
         self.cost_g1r_e  = cfg.getfloat('partition', 'cost-exp-g1r',    1.0)
@@ -1456,7 +1457,8 @@ class WaitsToTargetsModelMixin:
                  f"{self.cost_g1a} x A^{self.cost_g1a_e} + "
                  f"{self.cost_g1r} x R^{self.cost_g1r_e} + "
                  f"{self.cost_g1s} x S^{self.cost_g1s_e} + "
-                f"{self.cost_g1rt} x Rᵀ^{self.cost_g1rt_e}")
+                f"{self.cost_g1rt} x Rᵀ^{self.cost_g1rt_e} + "
+                 f"{self.cost_err} x tdiff-errest", flush=True)
 
         self.lb_iters = cfg.getint('partition', 'lb-outeriterations', 1)
         
@@ -1519,9 +1521,9 @@ class WaitsToTargetsModelMixin:
         _append_csv_row('g1-send-median-ms.csv', mcols, [int(send_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
         _append_csv_row('g1-recv-median-ms.csv', mcols, [int(recv_us_w[i, j]) for i in range(P_world) for j in range(P_world)])
 
-    def calc_target(self, g1a, g1s, g1r):
+    def calc_target(self, g1a, g1s, g1r, tdiff_hist):
 
-        cost = self.compute_cost(g1a, g1s, g1r)   # must return shape (P,)
+        cost = self.compute_cost(g1a, g1s, g1r, tdiff_hist)   # must return shape (P,)
         target = super().calc_target_offline(1/cost)
 
         # ADD (deterministic, device-aware, rank-consistent)
@@ -1562,13 +1564,20 @@ class WaitsToTargetsModelMixin:
 
         return target
 
-
-    def compute_cost(self, g1a, g1s, g1r):
+    def compute_cost(self, g1a, g1s, g1r, tdiff_hist):
 
         # 0. Broadcast g1a, g1s, g1r from compute root to all ranks
         g1a = comm['world'].bcast(g1a, root=root['world'])
         g1s = comm['world'].bcast(g1s, root=root['world'])
         g1r = comm['world'].bcast(g1r, root=root['world'])
+
+
+        # Get median of tdiff across all the collected timesteps for this rank.
+        tdiff_median = np.median(np.asarray(list(tdiff_hist), dtype=float))
+        tdiff_median_allgathered = comm['world'].allgather(tdiff_median)
+        # tdiff: [np.float64(5418026.0), np.float64(5418206.0), np.float64(5424116.0), np.float64(5426116.0), np.float64(5421775.0), np.float64(5420736.0), np.float64(5423566.0), np.float64(5422726.0), np.float64(5420415.0), np.float64(5419546.0), np.float64(5422876.0), np.float64(5419875.0), np.float64(5418626.0), np.float64(5423316.0), np.float64(5427656.0), np.float64(5426366.0), np.float64(5424876.0), np.float64(5427186.0), np.float64(5426306.0), np.float64(5423726.0), np.float64(5423756.0), np.float64(5426226.0), np.float64(5427336.0), np.float64(5425996.0)]
+        # Convert nicely to a numpy of float
+        err_diff = np.array(tdiff_median_allgathered, dtype=float)
 
         # NOTE: g1* are in *compute-comm* index space (Pc or Pc×Pc)
         self.write_g1_median_csvs(g1a, g1s, g1r)
@@ -1581,10 +1590,21 @@ class WaitsToTargetsModelMixin:
         r_in  = g1r.sum(axis=1)
         r_out = g1r.sum(axis=0)
 
+        # Print the 4 cost components for debugging
+        if rank['world'] == root['world']:
+            print(f"g1a  : {g1a}"  , flush=True)
+            print(f"r_in : {r_in}" , flush=True)
+            print(f"s_out: {s_out}", flush=True)
+            print(f"r_out: {r_out}", flush=True)
+
+            # tdiff-median
+            print(f"err_diff: {err_diff}", flush=True)
+
         cost_comp = (  self.cost_g1a  * (g1a  ** self.cost_g1a_e)
                     + self.cost_g1r  * (r_in ** self.cost_g1r_e)
                     + self.cost_g1s  * (s_out** self.cost_g1s_e)
-                    + self.cost_g1rt * (r_out** self.cost_g1rt_e))
+                    + self.cost_g1rt * (r_out** self.cost_g1rt_e)
+                    + self.cost_err * err_diff)
 
         # --- Scatter to WORLD index space ---
         P = int(comm['world'].size)
@@ -3415,7 +3435,7 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         # Initially balance elements aggressively
         self._init_aggr_iters = cfg.getint('partition', 'lb-init-aggressive-iters')
 
-        self.jitter = cfg.getfloat('partition', 'target-jitter')
+        self.jitter = cfg.getfloat('partition', 'target-jitter', 0)
         self.jitter_rank = 0 
         
         # Get solver order from cfg
