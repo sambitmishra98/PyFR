@@ -162,8 +162,8 @@ class MPICommInfo:
         rank = comm.Get_rank()
         rankmap = list(range(size))
 
-        device = None
-        devices = None
+        device = 'cpu'
+        devices = ['cpu',] * size
         if cfg is not None and cfg.hasopt('backend', 'devices'):
             devices = cfg.getliteral('backend', 'devices')
             if len(devices) != size:
