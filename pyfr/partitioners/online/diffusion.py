@@ -1203,8 +1203,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
             #self.smooth_until_stagnates(move_spts_nodes=True)
             self.iterate_till_convergence(base_counts, exec_order, 
-                                          flowmat_relax=0.5, 
-                                          max_iters=3, 
+                                          flowmat_relax=1, max_iters=3, 
                                           smooth=False)
 
             self.remove_outliers()      # Previous order 1
