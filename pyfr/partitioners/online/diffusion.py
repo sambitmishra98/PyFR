@@ -1138,7 +1138,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         moved_local, flow_used, eidxs_diff = self.diffuse(mode=mode,
                                                           threshold=threshold,
                                                           flow_matrix=M_eff,
-                                        move_spts_nodes=True,)#(mode == 'vertices'),)
+                                        move_spts_nodes=mode == 'vertices')
 
         moved_glob = int(comm['world'].allreduce(int(moved_local), op=mpi.SUM))
 
@@ -1146,16 +1146,14 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
     # ----------------- Diffuse + Smooth wrappers ----------------------------
 
-    def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
-        exec_order =(  [(6.0, 'vertices')] + [(2.0, 'faces')]
-                     + [(0.0, 'faces')] * comm['world'].size)
-
+    def iterate(self, target_counts, exec_order, flowmat_relax = 0.5, smooth=True):
         for thr, mode in exec_order:
             M0 = self.element_flow_plan(target_counts)
             self.diffuse_step(M0, thr, flowmat_relax, mode)
-            if smooth==True: self.smooth_until_stagnates(move_spts_nodes=True)
+            if smooth==True: self.smooth_until_stagnates(move_spts_nodes=False)
 
-    def iterate_till_convergence(self, target_counts: List[int], *, flowmat_relax: float = 0.5, 
+    def iterate_till_convergence(self, target_counts: List[int], exec_order,
+                                 *, flowmat_relax: float = 0.5, 
                                  max_iters: int = 1, smooth: bool = True):
 
         if rank['compute'] == root['compute']: print(f"TGT: {target_counts}")
@@ -1170,7 +1168,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             cur0 = self._cur_counts_total
             if rank['compute'] == root['compute']: print(f"CURx: {cur0}")     
 
-            self.iterate(target_counts, flowmat_relax=flowmat_relax, smooth=smooth)
+            self.iterate(target_counts, exec_order, 
+                         flowmat_relax=flowmat_relax, smooth=smooth)
 
             cur1 = self._cur_counts_total
             if cur1 == cur0:
@@ -1180,7 +1179,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
         iters = 0
         base_counts = self._cur_counts_total if target is None else target
 
-        self.remove_outliers()
+        exec_order =( [(6.0, 'vertices')] )
 
         while True:
             if max_iters != -1 and iters >= max_iters:
@@ -1199,13 +1198,20 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             # 3) otherwise remove + do the rest
             self.remove_islands(cluster_gids)
 
-            self.remove_outliers()
-            self.add_ranks(base_counts)
-            
-            self.add_inliers()
+            self.add_inliers()          # Previous order 3
+            self.add_ranks(base_counts) # Previous order 2           
+
             #self.smooth_until_stagnates(move_spts_nodes=True)
-            self.iterate_till_convergence(base_counts, flowmat_relax=0.5, 
-                                          max_iters=comm['world'].size, smooth=True)
+            self.iterate_till_convergence(base_counts, exec_order, 
+                                          flowmat_relax=0.5, 
+                                          max_iters=3, 
+                                          smooth=False)
+
+            self.remove_outliers()      # Previous order 1
+
+            # Re-feed to get benefits of not moving centroids and spts_nodes
+            self.to_mesh(self.i.eidxs)
+            self.restart()
 
             cur1 = self._cur_counts_total
             if cur1 == cur0:
@@ -1218,6 +1224,9 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                                smooth=True):
         drain_ranks = [i for i, (cnt, tgt) in enumerate(zip(self._cur_counts_total, target))
                    if tgt == 0 and cnt > 0]
+
+        exec_order =(  [(6.0, 'vertices')] + [(2.0, 'faces')]
+                     + [(0.0, 'faces')] * comm['world'].size)
 
         # Find all ranks that have elements to drain
         curr0_to_drain = [i for i, cnt in enumerate(self._cur_counts_total) if cnt > 0]
@@ -1244,7 +1253,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                 break   
             iters += 1
 
-            self.iterate(target, flowmat_relax=1.0, smooth=smooth)
+            self.iterate(target, exec_order, flowmat_relax=1.0, smooth=smooth)
 
             cur0 = self._cur_counts_total
             if rank['compute'] == root['compute']: print(f"CURy: {cur0}")     
@@ -1283,15 +1292,17 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
             drain_target = self.int_round(drain_target)
 
             self.drain_till_convergence(drain_target, smooth=False)
-            self.iterate_aggressively(drain_target)
-
             self.reset_perf_state()
 
         else:
-            self.add_ranks(target)
+            self.add_ranks(drain_target)
             self.drain_till_convergence(drain_target, smooth=False)
-            self.remove_islands_till_convergence(target=target)
-            self.iterate_aggressively(target)
+            self.remove_islands_till_convergence(target=drain_target)
+
+        # Re-feed to get benefits of not moving centroids and spts_nodes
+        self.to_mesh(self.i.eidxs)
+        self.restart()
+        self.iterate_aggressively(target)
 
     def startup_make_contiguous(self, *, max_iters: int = 12,
                                 maintain_cluster_by_device_types: bool = False) -> None:
@@ -1317,8 +1328,6 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
             cur = self._cur_counts_total
             tgt = self._cluster_equal_target(cur, self._startup_cluster_ids)
             self.remove_islands_till_convergence(target=tgt)
-            self.i.info()
-            self.iterate_till_convergence(tgt, max_iters=max_iters)
             self.i.info()
         finally:
             self._startup_cluster_ids = None

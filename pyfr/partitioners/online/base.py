@@ -19,6 +19,8 @@ from pyfr.mpiutil import comm, rank, root, mpi, AlltoallMixin, rankmap, get_comm
 from pyfr.shapes import BaseShape
 from pyfr.util import subclass_where
 
+ALWAYS_MOVE_VERTICES=False
+
 @dataclass
 class PartitionState:
     """Data model for a *single-rank* view of a partitioned PyFR mesh.
@@ -3266,7 +3268,6 @@ class CarverMixin:
         *,
         attach_bias: float = 0.0,
         require_nonpos_delta_for_faces: bool = True,
-        move_spts_nodes: bool = True,
         verbose: bool = True,
     ) -> int:
         top  = float(self.outlier_removal_fraction)
@@ -3281,14 +3282,11 @@ class CarverMixin:
         moved_local = 0  # ALWAYS define, ALWAYS participate in allreduce
 
         if top <= 0.0:
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            self._apply_plan_and_commit({}, move_spts_nodes = mode=='vertices')
         else:
             self._cores = self._compute_cores_from_centroids()
             core = np.asarray(self._cores[rnk], dtype=np.float64)
-
             cflat, okc = self._centroids_flat()
-
-            mode = str(self.outlier_removal_mode).lower()
             is_faces = mode.startswith(("f", "e"))
             if is_faces:
                 mode = "faces"
@@ -3326,11 +3324,11 @@ class CarverMixin:
                         do_move = False
                     else:
                         moved_local = self._move_by_best_rank(
-                            chosen_flat, best_nbr, move_spts_nodes=move_spts_nodes
+                            chosen_flat, best_nbr, move_spts_nodes= mode=='vertices'
                         )
 
             if not do_move:
-                self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+                self._apply_plan_and_commit({}, move_spts_nodes= mode=='vertices')
 
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
         if verbose and rnk == root_w:
@@ -3343,7 +3341,6 @@ class CarverMixin:
         self,
         *,
         margin: float = 0.0,
-        move_spts_nodes: bool = True,
         verbose: bool = True,
     ) -> int:
         top  = float(self.inlier_addition_fraction)
@@ -3358,7 +3355,7 @@ class CarverMixin:
         moved_local = 0
 
         if top <= 0.0:
-            self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+            self._apply_plan_and_commit({}, move_spts_nodes=mode=='vertices')
         else:
             self._cores = self._compute_cores_from_centroids()
             cores = np.asarray(self._cores, dtype=np.float64)
@@ -3372,7 +3369,6 @@ class CarverMixin:
                 if not np.all(np.isfinite(core_self)):
                     do_move = False
                 else:
-                    mode = str(self.inlier_addition_mode).lower()
                     if mode.startswith(("f", "e")):
                         mode = "faces"
                     elif mode.startswith(("v",)):
@@ -3406,11 +3402,11 @@ class CarverMixin:
                                 do_move = False
                             else:
                                 moved_local = self._move_by_best_rank(
-                                    chosen_flat, best_dest, move_spts_nodes=move_spts_nodes
+                                    chosen_flat, best_dest, move_spts_nodes=mode=='vertices'
                                 )
 
             if not do_move:
-                self._apply_plan_and_commit({}, move_spts_nodes=move_spts_nodes)
+                self._apply_plan_and_commit({}, move_spts_nodes=mode=='vertices')
 
         moved_glob = int(W.allreduce(int(moved_local), op=mpi.SUM))
         if verbose and rnk == root_w:
