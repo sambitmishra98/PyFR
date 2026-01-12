@@ -1468,7 +1468,7 @@ class WaitsToTargetsModelMixin:
         """
         Snapshot g1 medians to CSV in integer microseconds.
         """
-        if rank['compute'] != root['compute'] and comm['compute'] != mpi.COMM_NULL: return
+        if rank['compute'] != root['compute']: return
 
         # Scale to microseconds and cast to int (compute index space)
         all_us  = np.rint(g1a * 1e6).astype(np.int64)

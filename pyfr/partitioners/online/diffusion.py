@@ -1148,7 +1148,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
 
     def iterate(self, target_counts, flowmat_relax = 0.5, smooth=True):
         exec_order =(  [(6.0, 'vertices')] + [(2.0, 'faces')]
-                     + [(0.0, 'faces')] * comm['world'].size)
+                     + [(0.0, 'faces')] * 10)
 
         for thr, mode in exec_order:
             M0 = self.element_flow_plan(target_counts)
@@ -1205,7 +1205,7 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.add_inliers()
             #self.smooth_until_stagnates(move_spts_nodes=True)
             self.iterate_till_convergence(base_counts, flowmat_relax=0.5, 
-                                          max_iters=comm['world'].size, smooth=True)
+                                          max_iters=10, smooth=True)
 
             cur1 = self._cur_counts_total
             if cur1 == cur0:
