@@ -86,10 +86,17 @@ class BaseIntegrator:
         # Step-attempt acceptance history (align with waitsome timing history)
         self._step_accepted = None
         if cfg.getbool('backend', 'collect-waitsome-times', False):
-            n = cfg.getint('backend', 'collect-waitsome-times-len', 0)
+            n = cfg.getint('backend', 'collect-waitsome-times-len', 1000)
             if n > 0:
                 self._step_accepted = deque(maxlen=n)
                 self._errest_tdiff_hist = deque(maxlen=n)
+            
+        self.lb_outer_iterations = 0
+        self.hard_stop = cfg.getint('partition', 'hard-stop', -1)
+        self.stop_lb = (self.hard_stop == 0)
+
+        self.best_score = -np.inf
+        self.best_eidxs = None
 
         self.wallt_end = time.perf_counter_ns()
 
@@ -566,25 +573,83 @@ class BaseIntegrator:
             sys.exit(comm['world'].allreduce(reason, op=lambda x, y: x or y))
 
     def load_balance(self):
+
+        # If LB is stopped, just emit a periodic heartbeat and return
+        if self.stop_lb:
+            if self.nacptsteps % self.mmesh.lb_iters == 0 and self.mmesh.lb_iters != 1:
+                wallt_now = time.perf_counter_ns()
+
+                if rank['world'] == root['world']:
+                    dt_other = (wallt_now - self.wallt_end) / 1e9
+                    print(f"[lb-stop] LB halted; nacptsteps={self.nacptsteps} "
+                        f"tcurr={self.tcurr:.6f} dt_other={dt_other:.3f}s "
+                        f"best_score={self.best_score:.6e}",
+                        flush=True)
+
+                    # Keep the CSV advancing even when halted
+                    with open('lb_walltimes.csv', 'a') as f:
+                        f.write(f"{self.tcurr:.6f},{dt_other:.6f},0,0\n")
+
+                self.wallt_end = wallt_now
+
+            return
+
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
         if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
             if rank['world'] == root['world']: print(f'We are at {self.nacptsteps = }, \t {self.tcurr = }', flush=True)
             wallt_start = time.perf_counter_ns()
 
-            if self.meshes.get("best-compute") is not None:
+            self.lb_outer_iterations += 1
+            mmesh = self.mmesh ; mmesh.restart()            
+
+            if self.hard_stop > 0 and self.lb_outer_iterations >= self.hard_stop:
+                self.stop_lb = True
+
                 if rank['world'] == root['world']:
-                    with open('lb_walltimes.csv', 'a') as f:
-                        f.write(f"{self.tcurr:.6f},{(wallt_start - self.wallt_end)/1e9},0,0\n")
-                self.wallt_end = time.perf_counter_ns()
+                    print(f"[lb-stop] hard-stop={self.hard_stop} reached at "
+                        f"lb_outer_iterations={self.lb_outer_iterations}; "
+                        f"reverting to best_score={self.best_score:.6e}",
+                        flush=True)
+
+                # Build the best mesh from best_eidxs (world-collective, safe)
+                best_mesh = mmesh.to_mesh(self.best_eidxs)
+
+                # Create newcompute from best partition (not current)
+                ne_loc = int(sum(v.size for v in self.best_eidxs.values()))
+                ne_all = comm['world'].allgather(ne_loc)
+                next_ranklist = [i for i, n in enumerate(ne_all) if n > 0]
+                initialise_new_comm('newcompute', next_ranklist)
+
+                # Relocate soln from CURRENT compute mesh -> best mesh
+                soln = self.reinit_mesh_soln(best_mesh, self.compute_soln)
+                promote_comm('newcompute', 'compute')
+
+                self.reinit_backend_and_system(self.meshes['compute'], soln)
+
+                # Optional: latch for readability/guarding
+                self.meshes['bestcompute'] = self.meshes['compute']
+
                 return
 
-            mmesh = self.mmesh ; mmesh.restart()            
             mmesh.i.info() ; mmesh.i.info_to_csv(tcurr=self.tcurr)
-
             mmesh.recheck_online_file()
 
             # Element counts per world rank
             target = mmesh.calc_target(*self.get_median_matrices(), self._errest_tdiff_hist)
+
+
+            # Update "best so far" using global DoF/s score (not gdofs)
+            try:
+                score = mmesh.dofs_per_sec_global(window=getattr(mmesh, '_perfwin', None))
+            except Exception:
+                score = -np.inf
+
+            if self.best_eidxs is None or score > self.best_score:
+                self.best_score = float(score)
+                self.best_eidxs = {
+                    et: np.array(mmesh.i.eidxs.get(et, ()), dtype=np.int64, copy=True)
+                    for et in mmesh.etypes
+                }
 
             self.mmesh.intg_repartition(target)
 
@@ -640,14 +705,11 @@ class BaseIntegrator:
                 self.pseudointegrator.dtau_upts = [self.backend.matrix(shape, new_dtau, tags={'align'})
                                     for shape, new_dtau in zip(shapes, new_dtaus)]
 
-        # Drop old compute mesh and plugin interconnector
-        del self.meshes['compute']
         del self._plugins_intercon
 
         # Promote newcompute mesh to be the canonical compute mesh
         self.meshes['compute'] = self.meshes['newcompute']
-        # Optionally drop the extra key to avoid confusion
-        # del self.meshes['newcompute']
+        del self.meshes['newcompute']
 
         return soln
 
