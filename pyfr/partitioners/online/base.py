@@ -3439,7 +3439,7 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         RankAllocatorMixin.__init__(self, cfg)
 
         # Initially balance elements aggressively
-        self._init_aggr_iters = cfg.getint('partition', 'lb-init-aggressive-iters')
+        self._init_aggr_iters = cfg.getint('partition', 'lb-init-aggressive-iters',1)
 
         self.jitter = cfg.getfloat('partition', 'target-jitter', 0)
         self.jitter_rank = 0 
@@ -3531,27 +3531,37 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         """
         Local DoF/s over a window of recorded samples (median over samples).
 
-        Returns float. If this rank currently has 0 DoF in all samples -> +inf.
+        `record_perf_sample` stores DoF/s already (DoF * nfevals / cost).
         """
-        if not self.cost_store:
-            raise RuntimeError("No perf samples recorded (cost_store empty).")
+        if not self.dofs_store:
+            raise RuntimeError('No perf samples recorded yet; call record_perf_sample first')
 
-        if window is None:
-            window = len(self.cost_store)
-        window = int(window)
+        w = int(window) if window is not None else len(self.dofs_store)
+        w = max(1, min(w, len(self.dofs_store)))
 
-        costs = list(self.cost_store)[-window:]
-        nevs  = list(self.nfevals_store)[-window:]
-        dofs  = list(self.dofs_store)[-window:]
+        thr = np.asarray(list(self.dofs_store)[-w:], dtype=np.float64)
+        thr = thr[np.isfinite(thr)]
 
-        thr = []
-        for ci, nf, di in zip(costs, nevs, dofs):
-            if di <= 0:
-                thr.append(np.inf)
-            else:
-                thr.append((float(di) * float(nf)) / max(float(ci), 1.0e-15))
+        return float(np.median(thr)) if thr.size else 0.0
 
-        return float(np.median(np.asarray(thr, dtype=np.float64)))
+
+    def dofs_per_sec_global(self, *, window=None, active_mask=None):
+        """
+        Global DoF/s score (sum of per-rank DoF/s), with optional rank masking.
+        """
+        thr_i = self.dofs_per_sec_local(window=window)
+        thr_all = comm['world'].allgather(thr_i)
+        thr = np.asarray(thr_all, dtype=np.float64)
+
+        if active_mask is None:
+            active_mask = (np.asarray(self._cur_counts_total, dtype=np.int64) > 0)
+
+        active_mask = np.asarray(active_mask, dtype=bool)
+        if active_mask.size == thr.size:
+            thr[~active_mask] = 0.0
+
+        return float(np.sum(thr))
+
 
 
     def worst_rank_by_dofs_per_sec(self, *, window=None, active_mask=None):
