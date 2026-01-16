@@ -568,8 +568,15 @@ class BaseIntegrator:
     def load_balance(self):
         # Rebalance every lb_iters accepted steps, unless lb_iters == 1 sentinel
         if self.nacptsteps % self.mmesh.lb_iters == 0 and not self.mmesh.lb_iters == 1:
-            if rank['world'] == root['world']: print('Switching, nacptsteps = ', self.nacptsteps)
+            if rank['world'] == root['world']: print(f'We are at {self.nacptsteps = }, \t {self.tcurr = }', flush=True)
             wallt_start = time.perf_counter_ns()
+
+            if self.meshes.get("best-compute") is not None:
+                if rank['world'] == root['world']:
+                    with open('lb_walltimes.csv', 'a') as f:
+                        f.write(f"{self.tcurr:.6f},{(wallt_start - self.wallt_end)/1e9},0,0\n")
+                self.wallt_end = time.perf_counter_ns()
+                return
 
             mmesh = self.mmesh ; mmesh.restart()            
             mmesh.i.info() ; mmesh.i.info_to_csv(tcurr=self.tcurr)
