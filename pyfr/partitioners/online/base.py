@@ -3458,7 +3458,8 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
 
         # Create a csv 
         self.init_csv()
-        
+        self._lb_stop_hard = cfg.getint('partition', 'stop-hard', 0)
+        self._lb_stop_after_shuffles = cfg.getint('partition', 'stop-after-shuffles', 0)
     def init_csv(self):
         pass
     
@@ -3507,7 +3508,7 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         wi = int(rank['world'])
         ci = float(c[wi])
 
-        dofs_i = int(self.i.get_lndofs(self.order, nvars=nvars)) /ci
+        dofs_i = (int(self.i.get_lndofs(self.order, nvars=nvars)) * int(nfevals)) / ci
 
         # Write as xxx MDoF/s 
         dofs_print = dofs_i // 1_000_000
