@@ -3459,7 +3459,9 @@ class OnlinePartitioner(RankAllocatorMixin, WaitsToTargetsModelMixin, OfflineRep
         # Create a csv 
         self.init_csv()
         self._lb_stop_hard = cfg.getint('partition', 'stop-hard', 0)
-        self._lb_stop_after_shuffles = cfg.getint('partition', 'stop-after-shuffles', 0)
+        self._lb_best_score = -np.inf
+
+
     def init_csv(self):
         pass
     

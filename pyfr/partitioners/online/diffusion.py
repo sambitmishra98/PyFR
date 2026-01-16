@@ -1256,15 +1256,12 @@ class OnlineDiffusionPartitioner(DiffusionRepartitioner, OnlinePartitioner):
         DiffusionRepartitioner.__init__(self, mesh, cfg)
 
     def intg_repartition(self, target):
-        self.record_perf_sample(nfevals = 1, nvars = 5)
-
+        self.record_perf_sample(nfevals=1, nvars=5)
         stagnated = self.detect_stagnation()
         worst = None
         if stagnated:
-            # active_mask: exclude ranks you refuse to drain (e.g., GPU rank 0)
             active_mask = (target > 0)
-            worst = self.worst_rank_by_dofs_per_sec(window=None,
-                                                    active_mask=active_mask)
+            worst = self.worst_rank_by_dofs_per_sec(window=None, active_mask=active_mask)
 
         drain_target = target.copy()
 
