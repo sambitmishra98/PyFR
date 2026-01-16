@@ -153,8 +153,8 @@ class StdPIController(BaseStdController):
                 err = np.array([0.0], dtype=np.float32)
 
             # Broadcast
-            #comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
-            err = comm['world'].bcast(err, root=root['world'])
+            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            # err = comm['world'].bcast(err, root=root['world'])
 
             # Normalise
             err = math.sqrt(float(err) / self._gndofs)
@@ -170,7 +170,8 @@ class StdPIController(BaseStdController):
                 err = np.array([0.0], dtype=np.float32)
 
             # Broadcast
-            err = comm['world'].bcast(err, root=root['world'])
+            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            # err = comm['world'].bcast(err, root=root['world'])
 
             # Normalise
             err = math.sqrt(float(err))
