@@ -144,13 +144,14 @@ class StdPIController(BaseStdController):
         # Pseudo L2 norm
         if self._norm == 'l2':
             # Reduce locally (element types + field variables)
-            err = np.array([sum(v for k in ekerns for v in k.retval)])
+            err = np.array([sum(v for k in ekerns for v in k.retval)],
+                           dtype=np.float64)
 
             # Reduce globally (MPI ranks)
             if comm['compute'] != mpi.COMM_NULL:
                 comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
             else:
-                err = np.array([0.0], dtype=np.float32)
+                err = np.array([0.0], dtype=np.float64)
 
             # Broadcast
             comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
@@ -161,13 +162,14 @@ class StdPIController(BaseStdController):
         # Uniform norm
         else:
             # Reduce locally (element types + field variables)
-            err = np.array([max(v for k in ekerns for v in k.retval)])
+            err = np.array([max(v for k in ekerns for v in k.retval)],
+                           dtype=np.float64)
 
             # Reduce globally (MPI ranks)
             if comm['compute'] != mpi.COMM_NULL:
                 comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
             else:
-                err = np.array([0.0], dtype=np.float32)
+                err = np.array([0.0], dtype=np.float64)
 
             # Broadcast
             comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)

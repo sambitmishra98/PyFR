@@ -1187,7 +1187,6 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
                 break
             iters += 1
 
-            cur0 = self._cur_counts_total
 
             # 1) detect first
             cluster_gids, nis_all = self.detect_islands()
@@ -1203,6 +1202,8 @@ class DiffusionRepartitioner(CarverMixin, OfflineRepartitioner):
             self.add_ranks(base_counts)
             
             self.add_inliers()
+
+            cur0 = self._cur_counts_total
             #self.smooth_until_stagnates(move_spts_nodes=True)
             self.iterate_till_convergence(base_counts, flowmat_relax=0.5, 
                                           max_iters=10, smooth=True)
