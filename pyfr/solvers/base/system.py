@@ -464,41 +464,17 @@ class BaseSystem:
     def postproc(self, uinbank):
         pass
 
-    def element_cost_classes(self):
-        etypes = sorted(et for et in self.ele_types if et in self.mesh.spts)
+    def _rhs_main_graph(self):
+        # Main MPI-overlapped RHS graph of the most recent bank pairing
+        u, f = max(self._rhs_uin_fout)
+        graphs = tuple(self._rhs_graphs(u, f))
 
-        names = list(etypes)
-        counts = []
-        static = []
-        for et in etypes:
-            counts.append(len(self.mesh.eidxs[et]))
-            static.append(float(self.ele_shapes[et][0]))
+        return graphs[-2] if len(graphs) > 1 else graphs[-1]
 
-        return names, counts, static
+    def rhs_median_times(self):
+        g = self._rhs_main_graph()
 
-    def pop_wait_time(self):
-        total = 0.0
-        for u, f in self._rhs_uin_fout:
-            for g in self._rhs_graphs(u, f):
-                total += g.pop_wait_time()
-        return total
-
-    def pop_gpu_elapsed(self):
-        total = None
-        for u, f in self._rhs_uin_fout:
-            for g in self._rhs_graphs(u, f):
-                ge = g.pop_gpu_elapsed()
-                if ge is not None:
-                    total = (total or 0.0) + ge
-        return total
-
-    def pop_per_neighbour_wait(self):
-        merged = {}
-        for u, f in self._rhs_uin_fout:
-            for g in self._rhs_graphs(u, f):
-                for peer, t in g.pop_per_neighbour_wait().items():
-                    merged[peer] = merged.get(peer, 0.0) + t
-        return merged
+        return g.median_all_time(), *g.median_nbr_waits()
 
     def set_mpi_timing_mode(self, mode):
         for u, f in self._rhs_uin_fout:

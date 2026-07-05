@@ -37,6 +37,9 @@ class BaseBackend:
     def __init__(self, cfg):
         self.cfg = cfg
 
+        # Peer and direction info for persistent MPI requests
+        self.mpi_req_peers = {}
+
         # Numeric data type
         prec = cfg.get('backend', 'precision', 'double')
         if prec not in {'single', 'double'}:

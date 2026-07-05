@@ -290,10 +290,14 @@ class XchgMatrix(Matrix):
     _base_tags = {'xchg'}
 
     def recvreq(self, comm, pid, tag):
-        return autofree(comm.Recv_init(self.hdata, pid, tag))
+        req = autofree(comm.Recv_init(self.hdata, pid, tag))
+        self.backend.mpi_req_peers[id(req)] = (pid, False)
+        return req
 
     def sendreq(self, comm, pid, tag):
-        return autofree(comm.Send_init(self.hdata, pid, tag))
+        req = autofree(comm.Send_init(self.hdata, pid, tag))
+        self.backend.mpi_req_peers[id(req)] = (pid, True)
+        return req
 
 
 class View:
@@ -407,16 +411,15 @@ class Graph:
         self._wait_times = None
         if backend.cfg.getbool('backend', 'collect-wait-times', False):
             n = backend.cfg.getint('backend', 'collect-wait-times-len', 10000)
-            self._wait_times = wait_times = deque(maxlen=n)
+            self._wait_times = deque(maxlen=n)
 
-            # Wrap the wait all function with a timing variant
-            def waitall(reqs):
-                if reqs:
-                    t = time.perf_counter_ns()
-                    mpi.Prequest.Waitall(reqs)
-                    wait_times.append((time.perf_counter_ns() - t) / 1e9)
+            # Per-run (compute + wait) times and per-peer wait times
+            self._all_times = deque(maxlen=n)
+            self._send_times = defaultdict(lambda: deque(maxlen=n))
+            self._recv_times = defaultdict(lambda: deque(maxlen=n))
+            self._prev_end = time.perf_counter_ns()
 
-            self._waitall = waitall
+            self._waitall = self._waitall_timed
         else:
             self._waitall = mpi.Prequest.Waitall
 
@@ -583,20 +586,74 @@ class Graph:
     def get_wait_times(self):
         return list(self._wait_times or ())
 
-    def pop_wait_time(self):
-        if self._wait_times is None:
-            return 0.0
+    def _waitall_timed(self, reqs):
+        if not reqs:
+            return
 
-        total = sum(self._wait_times)
-        self._wait_times.clear()
+        t = time.perf_counter_ns()
+        mpi.Prequest.Waitall(reqs)
+        tend = time.perf_counter_ns()
 
-        return total
+        self._wait_times.append((tend - t) / 1e9)
+        self._all_times.append((tend - self._prev_end) / 1e9)
+        self._prev_end = tend
 
-    def pop_gpu_elapsed(self):
-        pass
+    def _waitall_detailed(self, reqs):
+        if not reqs:
+            return
 
-    def pop_per_neighbour_wait(self):
-        return {}
+        peers = self.backend.mpi_req_peers
+        lreqs = list(reqs)
+
+        start = time.perf_counter_ns()
+        wait_ns = 0
+
+        while True:
+            t0 = time.perf_counter_ns()
+            idxs = mpi.Prequest.Waitsome(lreqs)
+            t1 = time.perf_counter_ns()
+
+            if idxs is None:
+                break
+
+            wait_ns += t1 - t0
+
+            # Attribute this wait equally to the completed requests
+            share = (t1 - t0) / (1e9*max(len(idxs), 1))
+            for i in idxs:
+                if (pk := peers.get(id(lreqs[i]))) is not None:
+                    peer, send = pk
+                    times = self._send_times if send else self._recv_times
+                    times[peer].append(share)
+
+                lreqs[i] = mpi.REQUEST_NULL
+
+        self._wait_times.append(wait_ns / 1e9)
+        self._all_times.append((start - self._prev_end + wait_ns) / 1e9)
+        self._prev_end = time.perf_counter_ns()
 
     def set_mpi_timing_mode(self, mode):
-        pass
+        if self._wait_times is None:
+            return
+
+        if mode == 'detailed':
+            self._waitall = self._waitall_detailed
+        else:
+            self._waitall = self._waitall_timed
+
+    def median_all_time(self):
+        if self._wait_times is None or not self._all_times:
+            return 0.0
+
+        return float(np.median(self._all_times))
+
+    def median_nbr_waits(self):
+        if self._wait_times is None:
+            return {}, {}
+
+        send = {p: float(np.median(dq))
+                for p, dq in self._send_times.items() if dq}
+        recv = {p: float(np.median(dq))
+                for p, dq in self._recv_times.items() if dq}
+
+        return send, recv
