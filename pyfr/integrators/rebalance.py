@@ -1,230 +1,263 @@
+import os
 import time
+from collections import deque
 
 import numpy as np
 
-from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
+from pyfr.mpiutil import DistributedDirectory, get_comm_rank_root
 from pyfr.readers.native import Solution
-from pyfr.rebalance import DiffusionBalancer, make_exchangers, rebuild_mesh
+from pyfr.rebalance import (DiffusionBalancer, IndexMesh, int_round,
+                            make_exchangers, rebuild_mesh)
+
+
+def _append_csv(fname, header, row):
+    if not os.path.exists(fname):
+        with open(fname, 'w') as f:
+            f.write(','.join(header) + '\n')
+
+    with open(fname, 'a') as f:
+        f.write(','.join(str(v) for v in row) + '\n')
 
 
 class RebalanceMixin:
+    '''
+    Periodically repartitions the mesh to balance a measured per-rank
+    cost.
+
+    Every nsteps accepted steps the per-rank cost is assembled from
+    median RHS times and per-neighbour MPI wait times, targets are set
+    proportional to the current counts over the cost, and a diffusion
+    balancer moves elements accordingly.  The highest-throughput
+    partition seen so far is retained and restored when the hard-stop
+    iteration limit is reached.
+    '''
     def __init__(self, backend, systemcls, mesh, initsoln, cfg):
         sect = 'solver-rebalance'
 
-        # Enable wait-time collection before the system is constructed
-        if cfg.hasopt(sect, 'threshold'):
+        # Enable wait-time collection before the backend builds graphs
+        if cfg.hasopt(sect, 'nsteps'):
             cfg.set('backend', 'collect-wait-times', 'true')
+
+            if not cfg.hasopt('backend', 'collect-wait-times-len'):
+                n = cfg.getint(sect, 'wait-window', 10)
+                cfg.set('backend', 'collect-wait-times-len', str(n))
 
         super().__init__(backend, systemcls, mesh, initsoln, cfg)
 
-        comm, _, _ = get_comm_rank_root()
-        self._rebal_on = comm.size >= 2 and self.cfg.hasopt(sect, 'threshold')
+        comm, rank, root = get_comm_rank_root()
+        self._rebal_on = comm.size >= 2 and cfg.hasopt(sect, 'nsteps')
         if not self._rebal_on:
             return
 
-        self._rebal_threshold = self.cfg.getfloat(sect, 'threshold', 1.3)
-        self._rebal_ewma_alpha = self.cfg.getfloat(sect, 'ewma-alpha', 0.3)
-        self._rebal_base_cd = self.cfg.getint(sect, 'cooldown', 50)
-        self._rebal_max_cd = self.cfg.getint(sect, 'max-cooldown', 5000)
-        self._rebal_nsteps = self.cfg.getint(sect, 'nsteps', 100)
-        self._rebal_detail_window = self.cfg.getint(sect, 'detail-window', 20)
+        self._rebal_nsteps = cfg.getint(sect, 'nsteps')
+        self._rebal_hard_stop = cfg.getint(sect, 'hard-stop', -1)
+        self._rebal_perfwin = cfg.getint(sect, 'perf-window', 1)
+        self._rebal_jitter = cfg.getfloat(sect, 'target-jitter', 0)
+        self._rebal_stagnant = cfg.getint(sect, 'shuffle-if-stagnant', 0)
 
-        # Hardware class identifier for per-class cost estimation
-        self._rebal_cls = f'{self.backend.name}:{self.backend.platform_id}'
+        # Per-rank cost model coefficients and exponents
+        gf = cfg.getfloat
+        self._rebal_coeffs = np.array([
+            gf(sect, 'cost-coeff-compute', 1.0),
+            gf(sect, 'cost-coeff-recv-wait', -1.0),
+            gf(sect, 'cost-coeff-send-wait', -1.0),
+            gf(sect, 'cost-coeff-caused-wait', 1.0)
+        ])
+        self._rebal_exps = np.array([
+            gf(sect, 'cost-exp-compute', 1.0),
+            gf(sect, 'cost-exp-recv-wait', 1.0),
+            gf(sect, 'cost-exp-send-wait', 1.0),
+            gf(sect, 'cost-exp-caused-wait', 1.0)
+        ])
+        self._rebal_cost_err = gf(sect, 'cost-coeff-errest', -1.0)
+
+        self._rebal_balancer = DiffusionBalancer(cfg, sect)
 
         # Runtime state
-        self._rebal_ewma = 0.0
-        self._rebal_last_t = time.perf_counter()
-        self._rebal_cd = self._rebal_base_cd
-        self._rebal_step = 0
-        self._rebal_cycle = 0
-        self._rebal_stall = 0
-        self._rebal_trigger = 0
-        self._rebal_trivial = 0
-        self._rebal_settled = False
-        self._rebal_did_proactive = False
+        self._rebal_iter = 0
+        self._rebal_stopped = self._rebal_hard_stop == 0
+        self._rebal_detailed = False
+        self._rebal_jitter_rank = 0
 
-        # Cache cost class info (refreshed after each rebalance)
-        self._rebal_refresh_costs()
+        self._rebal_best_score = -np.inf
+        self._rebal_best_eidxs = None
 
-    def _rebal_refresh_costs(self):
-        comm, _, _ = get_comm_rank_root()
-        names, counts, static = self.system.element_cost_classes()
-        etypes = self.system.mesh.etypes
-        nmap = {n: i for i, n in enumerate(names)}
+        n = cfg.getint('backend', 'collect-wait-times-len')
+        self._rebal_dofs = deque(maxlen=self._rebal_perfwin)
+        self._rebal_errest = deque(maxlen=n)
 
-        # Fixed-length vectors aligned to global etype order
-        self._rebal_counts = np.zeros(len(etypes), dtype=int)
-        self._rebal_static = np.ones(len(etypes))
-        for i, et in enumerate(etypes):
-            if (j := nmap.get(et)) is not None:
-                self._rebal_counts[i] = counts[j]
-                self._rebal_static[i] = static[j]
+        self._rebal_wend = time.perf_counter_ns()
 
-        # Gather fixed per-rank info: hardware class + counts matrix
-        all_cls = comm.allgather(self._rebal_cls)
-        all_counts = np.array(comm.allgather(self._rebal_counts))
-
-        # Pre-build the lstsq matrix and EWMA buffer for our hardware class
-        self._rebal_cls_mask = [c == self._rebal_cls for c in all_cls]
-        self._rebal_A = all_counts[self._rebal_cls_mask]
-        self._rebal_all_ewma = np.empty(comm.size)
-
-    def _rebal_load_bounds(self, my_load):
-        comm, _, _ = get_comm_rank_root()
-        hi = scal_coll(comm.Allreduce, my_load, op=mpi.MAX)
-        lo = scal_coll(comm.Allreduce, my_load, op=mpi.MIN)
-        return hi, lo
-
-    def _rebal_mode(self, weights):
-        hi, lo = self._rebal_load_bounds(weights.sum())
-
-        # Severe imbalance; full repartition
-        if lo > 0 and hi / lo > 2.0:
-            mode = 'repartition'
-        # First cycle; aggressive diffusion
-        elif self._rebal_cycle == 0:
-            mode = 'aggressive'
-        # Subsequent cycles; fine-grained diffusion
-        else:
-            mode = 'fine'
-
-        return mode, hi, lo
-
-    def _rebal_measure(self):
-        now = time.perf_counter()
-        wall = now - self._rebal_last_t
-        self._rebal_last_t = now
-
-        # Compute time = wall minus MPI and collective waits
-        graph_wait = self.system.pop_wait_time()
-        coll_wait = self.pop_coll_wait()
-        gpu_time = self.system.pop_gpu_elapsed()
-
-        compute = max(wall - graph_wait - coll_wait, gpu_time or 0, 0)
-
-        # Exponentially weighted moving average
-        a = self._rebal_ewma_alpha
-        if self._rebal_ewma == 0:
-            self._rebal_ewma = compute
-        else:
-            self._rebal_ewma = a*compute + (1 - a)*self._rebal_ewma
-
-        self.system.pop_per_neighbour_wait()
-
-        return self._rebal_ewma
-
-    def _rebal_weights(self):
-        counts = self._rebal_counts
-
-        # Before any runtime data, use statistical estimates
-        if self._rebal_ewma <= 0:
-            return np.repeat(self._rebal_static, counts)
-
-        # Gather per-rank EWMA values
-        comm, rank, _ = get_comm_rank_root()
-        ewma = self._rebal_all_ewma
-        ewma[rank] = self._rebal_ewma
-        comm.Allgather(mpi.IN_PLACE, ewma)
-
-        # Solve A*costs = b for our hardware class
-        A, b = self._rebal_A, ewma[self._rebal_cls_mask]
-        costs, _, mrank, _ = np.linalg.lstsq(A, b, rcond=None)
-
-        # Fall back to uniform if rank-deficient or any cost < 1
-        if mrank < A.shape[1] or np.any(costs < 1):
-            s = b.sum() / max(A.sum(), 1)
-            costs = np.full(A.shape[1], max(s, 1.0))
-
-        return np.repeat(costs, counts)
-
-    def _rebal_try_balance(self):
-        comm, _, _ = get_comm_rank_root()
-
-        # Compute per-element weights and check global imbalance
-        weights = self._rebal_weights()
-        mode, hi, lo = self._rebal_mode(weights)
-
-        # Bail if load is balanced within threshold
-        if hi / lo < self._rebal_threshold:
-            return 0
-
-        # Run the diffusion balancer and apply if any elements moved
-        balancer = DiffusionBalancer(self.system.mesh)
-        ownermap, n_moved = balancer.balance(weights, mode=mode,
-                                             mesh=self.system.mesh)
-
-        if (total := scal_coll(comm.Allreduce, n_moved, op=mpi.SUM)):
-            self._rebal_apply(ownermap)
-
-        return total
-
-    def _rebal_proactive_check(self):
-        if self._rebal_try_balance():
-            self._rebal_cycle += 1
-            self._rebal_cd = self._rebal_max_cd
-            self._rebal_step = 0
-            self._rebal_last_t = time.perf_counter()
-
-    def _rebal_finish_cycle(self):
-        self._rebal_cycle += 1
-        self._rebal_stall = 0
-        self._rebal_step = 0
-
-        # Exponential backoff on cooldown
-        self._rebal_cd = min(2*max(self._rebal_cd, self._rebal_base_cd),
-                             self._rebal_max_cd)
+        if rank == root:
+            with open('lb_walltimes.csv', 'a') as f:
+                f.write('tcurr,others,iterate,reinit\n')
 
     def _rebal_check(self):
         if not self._rebal_on:
             return
 
-        # Fire proactive rebalance on first call
-        if not self._rebal_did_proactive:
-            self._rebal_did_proactive = True
-            self._rebal_proactive_check()
-
-        self._rebal_step += 1
-
-        if self._rebal_step == 1:
-            self._rebal_last_t = time.perf_counter()
-
-        # Measurement window logic
-        ns = self._rebal_nsteps
-        phase = self._rebal_step % ns
-
-        # Enable detailed MPI timing near window end
-        if phase == ns - self._rebal_detail_window:
+        # Switch the RHS graphs over to per-neighbour wait timing
+        if not self._rebal_detailed:
             self.system.set_mpi_timing_mode('detailed')
+            self._rebal_detailed = True
 
-        if phase != 0:
+        ns = self._rebal_nsteps
+        if ns == 1 or self.nacptsteps % ns:
             return
 
-        # End of window: measure load and switch back to basic timing
-        self.system.set_mpi_timing_mode('basic')
-        my_load = self._rebal_measure()
-
-        # Respect cooldown period
-        if self._rebal_step <= self._rebal_cd or self._rebal_settled:
-            return
-
-        # Check global imbalance
-        hi, lo = self._rebal_load_bounds(my_load)
-
-        # Balanced: increment stall counter, settle after 3
-        if hi / lo < self._rebal_threshold:
-            self._rebal_stall += 1
-            self._rebal_trigger = 0
-            if self._rebal_stall >= 3:
-                self._rebal_settled = True
-        # Imbalanced: require sustained imbalance before acting
+        if self._rebal_stopped:
+            self._rebal_heartbeat()
         else:
-            self._rebal_stall = 0
-            self._rebal_trigger += 1
+            self._rebal_execute()
 
-            if self._rebal_cycle < 1 or self._rebal_trigger >= 3:
-                self._rebal_trigger = 0
-                self._rebal_execute()
+    def _rebal_heartbeat(self):
+        comm, rank, root = get_comm_rank_root()
+        now = time.perf_counter_ns()
+
+        if rank == root:
+            _append_csv('lb_walltimes.csv',
+                        ['tcurr', 'others', 'iterate', 'reinit'],
+                        [f'{self.tcurr:.6f}',
+                         f'{(now - self._rebal_wend) / 1e9:.6f}', 0, 0])
+
+        self._rebal_wend = now
+
+    def _rebal_execute(self):
+        comm, rank, root = get_comm_rank_root()
+        wstart = time.perf_counter_ns()
+
+        self._rebal_iter += 1
+
+        # On hard stop, revert to the best partition seen and freeze
+        hs = self._rebal_hard_stop
+        if 0 < hs <= self._rebal_iter:
+            self._rebal_stopped = True
+
+            if rank == root:
+                print(f'[rebalance] hard-stop={hs} reached; reverting to '
+                      f'best partition (score={self._rebal_best_score:.6e})',
+                      flush=True)
+
+            if self._rebal_best_eidxs is not None:
+                im = IndexMesh(self.system.mesh)
+                self._rebal_apply(self._rebal_ownermap(
+                    im, self._rebal_best_eidxs
+                ))
+
+            return
+
+        im = IndexMesh(self.system.mesh)
+        self._rebal_dist_csv(im)
+
+        # Per-rank cost and resulting element targets
+        cost = self._rebal_cost(comm)
+        target = self._rebal_target(im, cost)
+
+        # Track the highest-throughput partition seen so far
+        dofs = sum(self.system.ele_ndofs) / cost[rank]
+        self._rebal_dofs.append(dofs)
+
+        score = np.array(comm.allgather(np.median(self._rebal_dofs)))
+        score = score[im.counts() > 0].sum()
+
+        if self._rebal_best_eidxs is None or score > self._rebal_best_score:
+            self._rebal_best_score = score
+            self._rebal_best_eidxs = {
+                et: np.array(v, copy=True)
+                for et, v in self.system.mesh.eidxs.items()
+            }
+
+        # Stagnation-driven rank draining requires rank removal support
+        if self._rebal_stagnant and rank == root and self._rebal_iter == 1:
+            print('[rebalance] shuffle-if-stagnant is not yet supported; '
+                  'ignoring', flush=True)
+
+        # Rebalance in index space and apply
+        self._rebal_balancer.balance(im, target)
+
+        witer = time.perf_counter_ns()
+        self._rebal_apply(self._rebal_ownermap(im, im.eidxs()))
+        self._rebal_detailed = False
+
+        wend = time.perf_counter_ns()
+
+        if rank == root:
+            _append_csv('lb_walltimes.csv',
+                        ['tcurr', 'others', 'iterate', 'reinit'],
+                        [f'{self.tcurr:.6f}',
+                         f'{(wstart - self._rebal_wend) / 1e9:.6f}',
+                         f'{(witer - wstart) / 1e9:.6f}',
+                         f'{(wend - witer) / 1e9:.6f}'])
+
+        self._rebal_wend = time.perf_counter_ns()
+
+    def _rebal_cost(self, comm):
+        n = comm.size
+
+        # Median per-step RHS time and per-neighbour wait times
+        g1a_loc, send_med, recv_med = self.system.rhs_median_times()
+
+        srow, rrow = np.zeros(n), np.zeros(n)
+        for p, v in send_med.items():
+            srow[p] = v
+        for p, v in recv_med.items():
+            rrow[p] = v
+
+        g1a = np.array(comm.allgather(g1a_loc))
+        g1s = np.array(comm.allgather(srow))
+        g1r = np.array(comm.allgather(rrow))
+
+        err = np.median(self._rebal_errest) if self._rebal_errest else 0.0
+        err = np.array(comm.allgather(err))
+
+        # Cost components: own compute, waits we incur on receives and
+        # sends, and receive waits we cause on other ranks
+        comps = np.stack([g1a, g1r.sum(axis=1), g1s.sum(axis=1),
+                          g1r.sum(axis=0)])
+
+        cost = (self._rebal_coeffs @ comps**self._rebal_exps[:, None]
+                + self._rebal_cost_err*err)
+
+        self._rebal_g1_csvs(g1a, g1s, g1r)
+        return cost
+
+    def _rebal_target(self, im, cost):
+        target = int_round(im.counts() / cost, im.nglobal)
+
+        # Optionally perturb one rank per cycle to escape local optima
+        if self._rebal_jitter > 0:
+            target = target.astype(float)
+            target[self._rebal_jitter_rank] *= 1 + self._rebal_jitter
+            self._rebal_jitter_rank = (self._rebal_jitter_rank + 1) % len(target)
+
+            target = int_round(target, im.nglobal)
+
+        return target
+
+    def _rebal_ownermap(self, im, eidxs):
+        # Destination ranks for our current elements, given the desired
+        # global holdings described by eidxs
+        comm, _, _ = get_comm_rank_root()
+        mesh = self.system.mesh
+
+        keys = np.concatenate([
+            im.goff[et] + np.asarray(v, dtype=int)
+            for et, v in eidxs.items()
+        ]) if eidxs else np.empty(0, dtype=int)
+        directory = DistributedDirectory(comm, keys)
+
+        ets = [et for et in mesh.etypes if et in mesh.eidxs]
+        query = np.concatenate([
+            im.goff[et] + np.asarray(mesh.eidxs[et], dtype=int) for et in ets
+        ]) if ets else np.empty(0, dtype=int)
+        dests = directory.lookup(query)
+
+        ownermap, i = {}, 0
+        for et in ets:
+            ownermap[et] = dests[i:i + len(mesh.eidxs[et])]
+            i += len(mesh.eidxs[et])
+
+        return ownermap
 
     def _rebal_apply(self, ownermap):
         comm, _, _ = get_comm_rank_root()
@@ -247,14 +280,13 @@ class RebalanceMixin:
             if recv.shape[-1]:
                 new_soln[et] = recv
 
-        # Replace the solver system and refresh cached cost info.  Boundary
-        # conditions own system-level state, so preserve their serialised data
-        # through the same path used by restart.
+        # Replace the solver system.  Boundary conditions own system-level
+        # state, so preserve their serialised data through the same path
+        # used by restart.
         state = {k: v for k, v in self.serialiser.serialise().items()
                  if k.startswith('bcs/')}
         soln = Solution(self.cfg, None, None, new_soln, state=state)
         self._replace_system(new_mesh, soln)
-        self._rebal_refresh_costs()
 
         self.triggers.post_rebalance(self, exchangers)
         for p in self.plugins:
@@ -262,24 +294,46 @@ class RebalanceMixin:
 
         self._commit_system()
 
-    def _rebal_execute(self):
-        total = self._rebal_try_balance()
+    def _rebal_dist_csv(self, im):
+        comm, rank, root = get_comm_rank_root()
 
-        if total == 0:
-            self._rebal_stall += 1
-            self._rebal_settled = self._rebal_stall >= 3
+        ecnt = im.etype_counts()
+        mout = comm.allgather(im.mpi_out())
+        npairs = len(np.unique(im.fown[(im.fown >= 0)
+                                       & (im.fown != rank)]))
+        npairs = comm.allreduce(npairs) // 2
+
+        if rank != root:
             return
 
-        # Settle if moves are trivial (< 1% of elements)
-        comm, _, _ = get_comm_rank_root()
-        total_neles = scal_coll(comm.Allreduce,
-                                self._rebal_counts.sum(), op=mpi.SUM)
-        if total < total_neles // 100:
-            self._rebal_trivial += 1
-            if self._rebal_trivial >= 3:
-                self._rebal_settled = True
-                return
-        else:
-            self._rebal_trivial = 0
+        header, row = ['tcurr'], [f'{self.tcurr:.6f}']
+        for r in range(comm.size):
+            for i, et in enumerate(im.etypes):
+                header.append(f'w{r}-{et}')
+                row.append(int(ecnt[r, i]))
 
-        self._rebal_finish_cycle()
+        for key, vals in [('total_elems', ecnt.sum(axis=1)),
+                          ('mpi_faces_out', mout)]:
+            for r in range(comm.size):
+                header.append(f'w{r}-{key}')
+                row.append(int(vals[r]))
+
+        header += ['mpi_faces_total', 'mpi_pairs']
+        row += [sum(mout) // 2, npairs]
+
+        _append_csv('lb_elem_dist.csv', header, row)
+
+    def _rebal_g1_csvs(self, g1a, g1s, g1r):
+        comm, rank, root = get_comm_rank_root()
+        if rank != root:
+            return
+
+        n = comm.size
+        us = lambda a: np.rint(a*1e6).astype(int).ravel().tolist()
+
+        _append_csv('g1-all-median-ms.csv',
+                    [f'r{r}' for r in range(n)], us(g1a))
+
+        mcols = [f'i{i}-{j}' for i in range(n) for j in range(n)]
+        _append_csv('g1-send-median-ms.csv', mcols, us(g1s))
+        _append_csv('g1-recv-median-ms.csv', mcols, us(g1r))

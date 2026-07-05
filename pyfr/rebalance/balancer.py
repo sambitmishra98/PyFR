@@ -1,465 +1,559 @@
 import numpy as np
 
-from pyfr.graphutil import (Graph, GraphPartitioner, build_csr, con_to_flat,
-                            dedup_weighted_edges, graph_edge_sources)
-from pyfr.mpiutil import (AlltoallMixin, RootGatherer, autofree,
-                          get_comm_rank_root, mpi, pcg_scalar, scal_coll)
-from pyfr.nputil import range_offsets
-from pyfr.readers.native import build_g2l, parse_codec
-from pyfr.util import DisjointSet
+from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
 
 
-class DiffusionBalancer(AlltoallMixin):
-    def __init__(self, mesh):
-        self.comm, self.rank, _ = get_comm_rank_root()
-        self.neighbours = mesh.neighbours
+def int_round(x, total):
+    # Rescale to the requested total with largest-remainder rounding
+    x = np.asarray(x, dtype=float)
+    xs = x*(total / x.sum())
 
-        # Neighbour communicator for the partition graph
-        self._etype_off, self._neles = range_offsets(
-            sorted(mesh.eidxs.items())
-        )
+    xf = np.floor(xs).astype(int)
+    k = int(total - xf.sum())
 
-        if self._neles == 0:
-            raise ValueError('Rank has no elements')
-
-        if len(self.neighbours):
-            self.ncomm = autofree(self.comm.Create_dist_graph_adjacent(
-                self.neighbours, self.neighbours
-            ))
+    if k:
+        order = np.argsort(xs - xf)
+        if k > 0:
+            xf[order[-k:]] += 1
         else:
-            self.ncomm = None
+            xf[order[:-k]] -= 1
 
-        # Internal face adjacency as CSR
-        if mesh.con:
-            lhs, rhs = mesh.con
-            li = con_to_flat(lhs, self._etype_off)
-            ri = con_to_flat(rhs, self._etype_off)
-        else:
-            li = ri = np.empty(0, dtype=int)
+    return xf
 
-        self._vtab, self._etab, _ = build_csr(self._neles, li, ri,
-                                               symmetrise=True)
-        self._int_deg = np.diff(self._vtab).astype(np.int32)
 
-        # Per-neighbour external face degree (sparse: indices + values)
-        self._ext_deg = {}
-        for nrank, con in mesh.con_p.items():
-            idx = [self._etype_off[et] + eidxs
-                   for et, _, eidxs in con.items()]
-            if idx:
-                flat = np.concatenate(idx)
-                deg = np.bincount(flat, minlength=self._neles).astype(np.int32)
-                nz = np.flatnonzero(deg)
-                self._ext_deg[nrank] = (nz, deg[nz])
-            else:
-                self._ext_deg[nrank] = (np.empty(0, dtype=int),
-                                        np.empty(0, dtype=np.int32))
+def _lap_solve(lap, b, anchor=0):
+    # Solve the anchored graph Laplacian system L p = b
+    n = len(lap)
+    if n < 2:
+        return np.zeros(n)
 
-        self._periodic_groups = _periodic_groups(mesh, self._etype_off)
+    idx = [i for i in range(n) if i != anchor]
+    lr = lap[np.ix_(idx, idx)]
 
-    def compute_flow(self, my_load):
+    try:
+        pr = np.linalg.solve(lr, b[idx])
+    except np.linalg.LinAlgError:
+        lr = lr + 1e-8*np.eye(len(lr))
+        pr = np.linalg.solve(lr, b[idx])
+
+    p = np.zeros(n)
+    p[idx] = pr
+    return p
+
+
+def _distribute_with_caps(excess, deficit, twts, fm):
+    # Split each source's excess over its downhill edges, cap sink columns
+    # at their deficits, relay any leftover, and integerise per source
+    n, eps = len(twts), 1e-12
+    plan = np.zeros((n, n))
+
+    for u in np.flatnonzero(excess > 0):
+        if (s := twts[u].sum()) > eps:
+            plan[u] = excess[u]*(twts[u] / s)
+
+    sinks = np.flatnonzero(deficit > 0)
+    if len(sinks):
+        insum = plan[:, sinks].sum(axis=0)
+        alpha = np.ones_like(insum)
+
+        m = insum > deficit[sinks] + eps
+        alpha[m] = deficit[sinks][m] / insum[m]
+        plan[:, sinks] *= alpha
+
+    for u in np.flatnonzero(excess > 0):
+        if (rem := excess[u] - plan[u].sum()) <= 1e-9:
+            continue
+
+        cand = np.flatnonzero((deficit == 0) & (twts[u] > eps))
+        if len(cand) and (s := fm[u, cand].sum()) > eps:
+            plan[u, cand] += rem*(fm[u, cand] / s)
+
+    iplan = np.zeros((n, n), dtype=int)
+    for u in np.flatnonzero(excess > 0):
+        base = np.floor(plan[u] + 1e-9).astype(int)
+
+        if (left := int(excess[u] - base.sum())) > 0:
+            rema = plan[u] - base
+            order = np.lexsort((np.arange(n), -fm[u], -rema))
+            base[order[:left]] += 1
+
+        iplan[u] = base
+
+    return iplan
+
+
+def _cancel_anti_parallel(m):
+    mc = m.copy()
+    net = mc - mc.T
+
+    mc[net > 0] = net[net > 0]
+    mc[net <= 0] = 0
+
+    return mc
+
+
+class DiffusionBalancer:
+    '''
+    Diffusion-based repartitioner operating on an IndexMesh.
+
+    Each cycle drains any zero-target ranks, removes islands and
+    geometric outliers, and then runs a fixed schedule of capped
+    diffusion passes with greedy smoothing until the per-rank element
+    counts settle on the requested target.
+    '''
+    def __init__(self, cfg, sect):
+        self.comm, self.rank, self.root = get_comm_rank_root()
+
+        # Fraction of non-main islands to evict per healing round
+        self.island_frac = cfg.getfloat(sect, 'island-fraction', 0.5)
+
+        # Outlier eviction and inlier attraction
+        self.outlier_frac = cfg.getfloat(sect, 'outlier-fraction', 0)
+        self.outlier_mode = cfg.get(sect, 'outlier-mode', 'faces')
+        self.inlier_frac = cfg.getfloat(sect, 'inlier-fraction', 0)
+        self.inlier_mode = cfg.get(sect, 'inlier-mode', 'vertices')
+
+        # Flow matrix relaxation and initial aggressive iterations
+        self.flow_relax = cfg.getfloat(sect, 'flow-relax', 0.5)
+        self.aggr_iters = cfg.getint(sect, 'init-aggressive-iters', 1)
+
+    # -- Flow planning
+
+    def flow_plan(self, im, target, max_iters=4):
         comm = self.comm
+        n = comm.size
 
-        if self.ncomm is None or comm.size < 2:
-            return {}
+        cur = im.counts()
+        tgt = np.asarray(target, dtype=int)
 
-        nbrs = self.neighbours
-        mean_load = scal_coll(comm.Allreduce, my_load) / comm.size
+        # Symmetrised MPI face-count matrix
+        row = np.zeros(n, dtype=int)
+        fown = im.fown[(im.fown >= 0) & (im.fown != self.rank)]
+        row += np.bincount(fown, minlength=n)
 
-        # Solve L*phi = b via CG on the partition graph Laplacian
-        diag = float(len(nbrs))
-        nbuf = np.empty(len(nbrs))
+        amat = np.empty((n, n), dtype=int)
+        comm.Allgather(row, amat)
+        fmat = np.minimum(amat, amat.T).astype(float)
 
-        def lap(x):
-            self.ncomm.Neighbor_allgather(np.array([x]), nbuf)
-            return diag*x - nbuf.sum()
+        # Plan on the root rank and broadcast
+        mfull = np.zeros((n, n), dtype=int)
 
-        dinv = 1.0 / max(diag, 1.0)
-        phi = pcg_scalar(comm, lap, lambda r: r*dinv, my_load - mean_load)
+        if self.rank == self.root:
+            active = np.flatnonzero((cur > 0) | (tgt > 0))
+            fm = fmat[np.ix_(active, active)]
+            lap = np.diag(fm.sum(axis=1)) - fm
 
-        # Gather neighbour potentials
-        nbr_phi = np.empty(len(nbrs))
-        self.ncomm.Neighbor_allgather(np.array([phi]), nbr_phi)
+            acur, atgt = cur[active].copy(), tgt[active]
+            msub = np.zeros_like(fm, dtype=int)
 
-        # Only overloaded ranks emit flow
-        excess = my_load - mean_load
-        if excess <= 0:
-            return {}
+            for _ in range(max_iters):
+                diff = acur - atgt
+                excess = np.maximum(diff, 0)
+                deficit = np.maximum(-diff, 0)
 
-        # Compute per-neighbour flow proportional to potential diff
-        diff = phi - nbr_phi
-        mask = diff > 0
-        if not mask.any():
-            return {}
+                if not excess.sum() or not deficit.sum():
+                    break
 
-        # Cap total outflow at our excess load
-        flow = diff[mask]
-        flow *= excess / flow.sum()
+                # Route flow down the potential gradient, weighted by
+                # face counts
+                p = _lap_solve(lap, (excess - deficit).astype(float))
+                twts = fm*np.maximum(p[:, None] - p[None, :], 0)
 
-        return dict(zip(nbrs[mask], flow))
+                step = _distribute_with_caps(excess, deficit, twts, fm)
 
-    def select_elements(self, flow, weights, max_neg_gain=-1, new_owner=None,
-                        check_islands=True):
-        rank, neles = self.rank, self._neles
-        vtab, etab = self._vtab, self._etab
+                acur += step.sum(axis=0) - step.sum(axis=1)
+                msub += step
 
-        if new_owner is None:
-            new_owner = np.full(neles, rank, dtype=int)
+            mfull[np.ix_(active, active)] = msub
+            mfull *= fmat > 0
+            np.fill_diagonal(mfull, 0)
 
-        if not flow:
-            return new_owner, 0
+            mfull = _cancel_anti_parallel(mfull)
 
-        moving = np.zeros(neles, dtype=bool)
-        has_adj = check_islands and len(etab) > 0
-        esrc = graph_edge_sources(vtab)
+        comm.Bcast(mfull, root=self.root)
+        return mfull
 
-        # Process neighbours in order of decreasing flow
-        for nrank in sorted(flow, key=flow.get, reverse=True):
-            remaining = flow[nrank]
-            if remaining <= 0:
+    # -- Affinity
+
+    def _candidates(self, im, mode, thr):
+        '''
+        Affinity candidates as (flat, gid, nbr, score) arrays, where for
+        each boundary element and adjoining rank the score is a - b with
+        a the ties to our own region and b the ties to the neighbour,
+        counted in faces or shared vertices.  Entries with score > thr
+        are dropped.
+        '''
+        rank = self.rank
+        movable = ~im.frozen
+
+        mpi_face = (im.fown >= 0) & (im.fown != rank)
+        nbrs = np.unique(im.fown[mpi_face])
+
+        if mode == 'faces':
+            aown = (im.fown == rank).sum(axis=1)
+        else:
+            # Interface vertex sets per neighbouring rank
+            vsets = {}
+            for nb in nbrs:
+                fv = im.fnodes[im.fown == nb]
+                vsets[nb] = np.unique(fv[fv >= 0])
+
+            vall = (np.unique(np.concatenate(list(vsets.values())))
+                    if vsets else np.empty(0, dtype=int))
+
+            valid = im.nodes >= 0
+            aown = (~np.isin(im.nodes, vall) & valid).sum(axis=1)
+
+        flats, gids, dsts, scores = [], [], [], []
+        for nb in nbrs:
+            if mode == 'faces':
+                b = (im.fown == nb).sum(axis=1)
+                sel = (b > 0) & movable
+            else:
+                b = (np.isin(im.nodes, vsets[nb]) & valid).sum(axis=1)
+                sel = (im.fown == nb).any(axis=1) & (b > 0) & movable
+
+            score = (aown[sel] - b[sel]).astype(float)
+            keep = score <= thr
+
+            flat = np.flatnonzero(sel)[keep]
+            flats.append(flat)
+            gids.append(im.gids[flat])
+            dsts.append(np.full(len(flat), nb, dtype=int))
+            scores.append(score[keep])
+
+        if flats:
+            return tuple(map(np.concatenate, (flats, gids, dsts, scores)))
+        else:
+            z = np.empty(0, dtype=int)
+            return z, z, z, z.astype(float)
+
+    def _best_nbr(self, im, mode, score_max=None):
+        # Per element: adjoining rank with the lowest affinity score
+        flat, _, nbr, score = self._candidates(im, mode, np.inf)
+
+        best_nbr = np.full(im.neles, -1, dtype=int)
+        best_score = np.full(im.neles, np.inf)
+
+        if score_max is not None:
+            keep = score <= score_max
+            flat, nbr, score = flat[keep], nbr[keep], score[keep]
+
+        # Ascending neighbour order makes ties resolve to the lower rank
+        for i in np.argsort(nbr, kind='stable'):
+            if score[i] < best_score[flat[i]]:
+                best_score[flat[i]] = score[i]
+                best_nbr[flat[i]] = nbr[i]
+
+        return best_nbr, best_score
+
+    def _contact_best(self, im):
+        # Per element: adjoining rank with the highest MPI face contact
+        best_nbr = np.full(im.neles, -1, dtype=int)
+        best_cnt = np.zeros(im.neles, dtype=int)
+
+        mpi_face = (im.fown >= 0) & (im.fown != self.rank)
+        for nb in np.unique(im.fown[mpi_face]):
+            cnt = (im.fown == nb).sum(axis=1)
+            better = cnt > best_cnt
+
+            best_cnt[better] = cnt[better]
+            best_nbr[better] = nb
+
+        return best_nbr, best_cnt
+
+    # -- Movement passes
+
+    def _move(self, im, flats, dests):
+        moved = np.full(im.neles, self.rank, dtype=int)
+        moved[flats] = dests
+
+        im.move(moved)
+        return len(flats)
+
+    def smooth(self, im, thr=-1.0):
+        # Move each element with a strictly winning neighbour
+        flat, gid, nbr, score = self._candidates(im, 'faces', thr)
+
+        if len(flat):
+            order = np.lexsort((nbr, gid, score, flat))
+            first = np.unique(flat[order], return_index=True)[1]
+
+            chosen = order[np.sort(first)]
+            return self._move(im, flat[chosen], nbr[chosen])
+        else:
+            im.move(np.full(im.neles, self.rank, dtype=int))
+            return 0
+
+    def smooth_until_stagnant(self, im, max_iters=20):
+        comm, last, stable = self.comm, None, 0
+
+        for _ in range(max_iters):
+            moved = scal_coll(comm.Allreduce, self.smooth(im), op=mpi.SUM)
+
+            stable = stable + 1 if moved == last else 0
+            last = moved
+
+            if not moved or stable >= 1:
+                break
+
+    def diffuse(self, im, caps, thr, mode):
+        # Fill each destination's cap with the best-scoring candidates
+        flat, gid, nbr, score = self._candidates(im, mode, thr)
+
+        order = np.lexsort((gid, score, nbr))
+        flat, gid, nbr = flat[order], gid[order], nbr[order]
+
+        chosen_flat, chosen_nbr = [], []
+        taken = np.empty(0, dtype=int)
+
+        for nb in np.unique(nbr):
+            if nb == self.rank or (cap := int(caps[nb])) <= 0:
                 continue
 
-            # Expand wavefront until flow is satisfied
-            for _wave in range(neles):
-                if remaining <= 0:
-                    break
+            seg = nbr == nb
+            fs, gs = flat[seg], gid[seg]
 
-                # Count adjacency to target rank (MPI + internal)
-                adj = np.zeros(neles, dtype=np.int32)
+            # An element may only be moved once per sweep
+            keep = ~np.isin(gs, taken)
+            fs, gs = fs[keep][:cap], gs[keep][:cap]
 
-                if (sp := self._ext_deg.get(nrank)) is not None:
-                    adj[sp[0]] += sp[1]
+            chosen_flat.append(fs)
+            chosen_nbr.append(np.full(len(fs), nb, dtype=int))
+            taken = np.concatenate([taken, gs])
 
-                np.add.at(adj, esrc[new_owner[etab] == nrank], 1)
+        if chosen_flat:
+            return self._move(im, np.concatenate(chosen_flat),
+                              np.concatenate(chosen_nbr))
+        else:
+            im.move(np.full(im.neles, self.rank, dtype=int))
+            return 0
 
-                # Find owned elements adjacent to target rank
-                mine = new_owner == rank
-                cands = np.flatnonzero(mine & (adj > 0))
-                if len(cands) == 0:
-                    break
+    # -- Schedules
 
-                # Compute gain = faces_to_target - internal_faces
-                gains = adj[cands] - self._int_deg[cands]
+    def iterate(self, im, target, relax=None, smooth=True):
+        relax = self.flow_relax if relax is None else relax
+        schedule = [(6.0, 'vertices'), (2.0, 'faces')] + [(0.0, 'faces')]*10
 
-                # Filter by gain threshold
-                keep = gains >= max_neg_gain
-                cands = cands[keep]
-                gains = gains[keep]
-                if len(cands) == 0:
-                    break
+        for thr, mode in schedule:
+            mflow = self.flow_plan(im, target)
 
-                # Sort by gain descending, select up to flow delta
-                cands = cands[np.argsort(-gains)]
+            caps = np.ceil(mflow[self.rank]*relax).astype(int)
+            self.diffuse(im, np.maximum(caps, 0), thr, mode)
 
-                cut = np.searchsorted(np.cumsum(weights[cands]), remaining)
-                n_move = min(cut + 1, len(cands))
-                batch = cands[:n_move]
+            if smooth:
+                self.smooth_until_stagnant(im)
 
-                # Reject moves that would create islands
-                if has_adj:
-                    moving[batch] = True
-                    safe = _check_islands(batch, moving, vtab, etab)
-                    moving[batch[~safe]] = False
-                    batch = batch[safe]
+    def converge(self, im, target, max_iters=1, smooth=True):
+        for _ in range(max_iters):
+            cur = im.counts()
+            self.iterate(im, target, smooth=smooth)
 
-                new_owner[batch] = nrank
-                remaining -= float(weights[batch].sum())
+            if (im.counts() == cur).all():
+                break
 
-        return new_owner, (new_owner != rank).sum()
+    def drain(self, im, target, max_iters=100):
+        # Empty any ranks with a zero target
+        tgt = np.asarray(target, dtype=int)
 
-    def refine(self, new_owner, weights, nrounds=10):
-        rank = self.rank
-        neles = self._neles
-        nbrs = self.neighbours
-        vtab, etab = self._vtab, self._etab
+        for _ in range(max_iters):
+            if not im.counts()[tgt == 0].sum():
+                break
 
-        if len(etab) == 0 or len(nbrs) == 0:
+            self.iterate(im, target, relax=1.0, smooth=False)
+
+    # -- Island and outlier handling
+
+    def label_islands(self, im):
+        # Connected components of the owned-face subgraph, labelled in
+        # order of decreasing size
+        ne = im.neles
+        own = im.fown == self.rank
+
+        src = np.broadcast_to(np.arange(ne)[:, None], im.fgid.shape)[own]
+
+        order = np.argsort(im.gids)
+        dst = order[np.searchsorted(im.gids[order], im.fgid[own])]
+
+        vtab = np.zeros(ne + 1, dtype=int)
+        vtab[1:] = np.bincount(src, minlength=ne).cumsum()
+        etab = dst[np.argsort(src, kind='stable')]
+
+        labels = np.full(ne, -1, dtype=int)
+        sizes, cid = [], 0
+
+        for s in range(ne):
+            if labels[s] >= 0:
+                continue
+
+            stack, sz = [s], 0
+            labels[s] = cid
+
+            while stack:
+                u = stack.pop()
+                sz += 1
+
+                for v in etab[vtab[u]:vtab[u + 1]]:
+                    if labels[v] < 0:
+                        labels[v] = cid
+                        stack.append(v)
+
+            sizes.append(sz)
+            cid += 1
+
+        sizes = np.array(sizes, dtype=int)
+        order = np.lexsort((np.arange(len(sizes)), -sizes))
+
+        remap = np.empty_like(order)
+        remap[order] = np.arange(len(order))
+
+        return remap[labels] if len(sizes) else labels, sizes[order]
+
+    def detect_islands(self, im):
+        labels, sizes = self.label_islands(im)
+        nis = len(sizes)
+
+        nis_all = self.comm.allgather(nis)
+
+        # Evict a fraction of the smallest non-main islands
+        if nis > 1 and self.island_frac > 0:
+            nrm = int(np.ceil(self.island_frac*(nis - 1)))
+            cluster = im.gids[labels >= nis - min(max(nrm, 1), nis - 1)]
+        else:
+            cluster = np.empty(0, dtype=int)
+
+        return cluster, nis_all
+
+    def remove_islands(self, im, cluster, max_sweeps=50, patience=1):
+        comm, stable = self.comm, 0
+
+        for _ in range(max_sweeps):
+            flat = np.flatnonzero(np.isin(im.gids, cluster))
+
+            if not scal_coll(comm.Allreduce, len(flat), op=mpi.SUM):
+                break
+
+            # Evict boundary cluster elements to their best neighbour
+            best_nbr, best_cnt = self._contact_best(im)
+
+            cand = flat[(best_cnt[flat] > 0) & ~im.frozen[flat]]
+            cand = cand[np.lexsort((im.gids[cand], -best_cnt[cand]))]
+
+            moved = self._move(im, cand, best_nbr[cand])
+            moved = scal_coll(comm.Allreduce, moved, op=mpi.SUM)
+
+            stable = 0 if moved else stable + 1
+            if stable >= patience:
+                break
+
+    def _cores(self, im):
+        # Per-rank arithmetic mean of the owned element centroids
+        nd = im.cents.shape[1]
+
+        sums = np.array(self.comm.allgather(im.cents.sum(axis=0)))
+        cnts = im.counts()
+
+        with np.errstate(invalid='ignore'):
+            return sums / np.where(cnts > 0, cnts, np.nan)[:, None]
+
+    def _top_fraction(self, im, cand, score, frac):
+        nsel = min(max(int(np.ceil(frac*len(cand))), 1), len(cand))
+        order = np.lexsort((im.gids[cand], -score))
+
+        return cand[order[:nsel]]
+
+    def remove_outliers(self, im):
+        # Evict boundary elements far from our own centroid which have a
+        # neighbour they are at least as tied to as ourselves
+        if self.outlier_frac <= 0:
             return
 
-        # Map rank IDs to local column indices
-        nparts = len(nbrs) + 1
-        rank_to_col = {rank: 0}
-        for i, nr in enumerate(nbrs):
-            rank_to_col[nr] = i + 1
+        gate = 0.0 if self.outlier_mode == 'faces' else None
+        best_nbr, _ = self._best_nbr(im, self.outlier_mode, score_max=gate)
 
-        owner_col = np.full(neles, -1, dtype=np.int32)
-        for r, c in rank_to_col.items():
-            owner_col[new_owner == r] = c
+        cores = self._cores(im)
+        cand = np.flatnonzero((best_nbr >= 0) & ~im.frozen)
 
-        parts = owner_col.copy()
-        parts[parts < 0] = 0
+        if len(cand) and np.isfinite(cores[self.rank]).all():
+            d = np.linalg.norm(im.cents[cand] - cores[self.rank], axis=1)
+            z = (d - d.mean()) / d.std() if d.std() > 0 else np.zeros_like(d)
 
-        # Build local CSR including MPI boundary edges
-        vwts = np.maximum(np.rint(weights).astype(np.int32), 1)
-        partwts = np.ones(nparts) / nparts
-
-        GraphPartitioner().refine(parts, vtab, etab, vwts, partwts, nrounds)
-
-        # Map column indices back to rank IDs
-        col_to_rank = np.array([rank] + list(nbrs))
-        new_owner[:] = col_to_rank[parts]
-
-    def _run_sub_iters(self, weights, new_owner, n_sub, neg_gain, islands):
-        comm = self.comm
-        for _ in range(n_sub):
-            cur_load = float(weights[new_owner == self.rank].sum())
-            flow = self.compute_flow(cur_load)
-            new_owner, moved = self.select_elements(
-                flow, weights, max_neg_gain=neg_gain,
-                new_owner=new_owner, check_islands=islands
-            )
-            if not scal_coll(comm.Allreduce, moved, op=mpi.SUM):
-                break
-
-        return new_owner
-
-    def repartition(self, weights, mesh):
-        comm = self.comm
-        rank = self.rank
-        neles = self._neles
-        vtab, etab = self._vtab, self._etab
-
-        new_owner = np.full(neles, rank, dtype=int)
-        if comm.size < 2 or neles == 0:
-            return new_owner, 0
-
-        def gather(arr):
-            return RootGatherer(comm, len(arr))(arr)
-
-        vwts = np.maximum(np.rint(weights).astype(np.int32), 1)
-
-        # Coarsen the local graph to reduce gather size
-        hierarchy, mpi_map = self._local_coarsen(vtab, etab, vwts)
-
-        c_vtab, c_etab, c_ewts, c_vwts = hierarchy[-1][:4]
-        c_nv = len(c_vtab) - 1
-
-        # Compute global offsets for coarse vertex numbering
-        counts = np.empty(comm.size, dtype=int)
-        comm.Allgather(np.array([c_nv]), counts)
-        goff = np.concatenate(([0], counts.cumsum()))
-        my_off = goff[rank]
-
-        # Pack local coarsened edges as (src, dst, weight) triples
-        c_esrc = graph_edge_sources(c_vtab, np.int32)
-        local_triples = np.column_stack([c_esrc + my_off,
-                                         c_etab + my_off, c_ewts])
-
-        # Build weighted MPI edge triples
-        mpi_triples = self._coarse_mpi_edges(mesh, my_off, mpi_map)
-
-        # Gather coarsened graph to root
-        all_local = gather(local_triples)
-        all_mpi = gather(mpi_triples)
-        all_vwts = gather(c_vwts.ravel())
-
-        # Partition the coarsened graph on root and broadcast
-        all_parts = np.empty(goff[-1], dtype=np.int32)
-        if rank == 0:
-            all_parts[:] = _partition_on_root(goff[-1], all_local, all_mpi,
-                                                all_vwts, comm.size)
-        comm.Bcast(all_parts)
-
-        # Project coarse partition back through hierarchy
-        c_parts = all_parts[my_off:my_off + c_nv]
-
-        for _, _, _, _, match, _ in reversed(hierarchy[1:]):
-            c_parts = c_parts[match]
-
-        new_owner[:] = c_parts
-        return new_owner, (new_owner != rank).sum()
-
-    def _local_coarsen(self, vtab, etab, vwts):
-        nv = len(vtab) - 1
-        ewts = np.ones(len(etab), dtype=np.int32)
-        esrc = graph_edge_sources(vtab, np.int32)
-
-        hierarchy = [(vtab, etab, ewts, vwts.reshape(-1, 1), None, esrc)]
-
-        # Coarsen until small enough to gather
-        target = max(20000, 500*self.comm.size)
-        gp = GraphPartitioner(seed=2079 + self.rank)
-
-        while nv > target:
-            cv, ce, cw, cwv = hierarchy[-1][:4]
-            result = gp.coarsen(cv, ce, cw, cwv)
-            if result is None:
-                break
-
-            nv_c = len(result[0]) - 1
-            if nv_c >= 0.8*nv:
-                break
-
-            hierarchy.append(result)
-            nv = nv_c
-
-        # Build fine-to-coarse element mapping for MPI edges
-        mpi_map = np.arange(self._neles, dtype=np.int32)
-        for _, _, _, _, match, _ in hierarchy[1:]:
-            if match is not None:
-                mpi_map = match[mpi_map]
-
-        return hierarchy, mpi_map
-
-    def _coarse_mpi_edges(self, mesh, my_off, mpi_map):
-        nbrs = self.neighbours
-
-        # Map local MPI face elements to coarse global indices
-        my_gidx = {}
-        for nrank, con in mesh.con_p.items():
-            fine = con_to_flat(con, self._etype_off)
-            my_gidx[nrank] = mpi_map[fine] + my_off
-
-        # Exchange coarse indices with neighbours
-        send = [my_gidx.get(nr, np.empty(0, dtype=int)) for nr in nbrs]
-
-        if self.ncomm is not None and len(nbrs):
-            scount = np.array([len(s) for s in send], dtype=int)
-            rcount = np.empty_like(scount)
-            self.ncomm.Neighbor_alltoall(scount, rcount)
-
-            sdisps = self._count_to_disp(scount)
-            rdisps = self._count_to_disp(rcount)
-
-            svals = np.concatenate(send)
-
-            rvals = np.empty(rcount.sum(), dtype=int)
-            self.ncomm.Neighbor_alltoallv((svals, (scount, sdisps)),
-                                          (rvals, (rcount, rdisps)))
-            recv = np.split(rvals, rdisps[1:])
+            chosen = self._top_fraction(im, cand, z, self.outlier_frac)
+            self._move(im, chosen, best_nbr[chosen])
         else:
-            recv = [np.empty(0, dtype=int) for _ in nbrs]
+            im.move(np.full(im.neles, self.rank, dtype=int))
 
-        # Build edge pairs from matched faces
-        pairs = []
-        for mine, theirs in zip(send, recv):
-            if (n := min(len(mine), len(theirs))) > 0:
-                p = np.column_stack([mine[:n], theirs[:n]])
-                keep = p[:, 0] != p[:, 1]
-                if keep.any():
-                    pairs.append(p[keep])
+    def add_inliers(self, im):
+        # Pull boundary elements towards the neighbour with the closest
+        # centroid, when it is closer than our own
+        if self.inlier_frac <= 0:
+            return
 
-        if not pairs:
-            return np.empty((0, 3), dtype=int)
+        flat, _, nbr, _ = self._candidates(im, self.inlier_mode, np.inf)
 
-        edges = np.vstack(pairs)
+        cores = self._cores(im)
+        best_dst = np.full(im.neles, -1, dtype=int)
+        best_d = np.full(im.neles, np.inf)
 
-        # Deduplicate and count parallel edges
-        ones = np.ones(len(edges), dtype=np.int32)
-        s, d, w = dedup_weighted_edges(*edges.T, ones)
-
-        return np.column_stack([s, d, w])
-
-    def balance(self, weights, mode='aggressive', **kwargs):
-        neles = self._neles
-
-        if self.ncomm is None or neles == 0:
-            return np.full(neles, self.rank, dtype=int), 0
-
-        new_owner = np.full(neles, self.rank, dtype=int)
-
-        # Full multilevel repartition via coarsen-gather-partition
-        if mode == 'repartition':
-            new_owner, _ = self.repartition(weights, kwargs['mesh'])
-            do_refine = True
-        # Diffusion with wavefront expansion
-        elif mode == 'aggressive':
-            nf = max(self._vtab[-1] // self._neles + 1, 3)
-            new_owner = self._run_sub_iters(weights, new_owner, 20, -nf, False)
-            do_refine = False
-        # Fine diffusion with island checking
-        else:
-            new_owner = self._run_sub_iters(weights, new_owner, 10, -1, True)
-            do_refine = True
-
-        n_moved = (new_owner != self.rank).sum()
-        if n_moved > 0 and do_refine:
-            self.refine(new_owner, weights)
-            n_moved = (new_owner != self.rank).sum()
-
-        self._align_periodic(new_owner, weights)
-        n_moved = (new_owner != self.rank).sum()
-
-        # Convert flat owner array to per-etype dict
-        etypes = sorted(self._etype_off, key=self._etype_off.get)
-        bounds = [self._etype_off[et] for et in etypes] + [self._neles]
-        ownermap = {et: new_owner[bounds[i]:bounds[i + 1]]
-                     for i, et in enumerate(etypes)}
-
-        return ownermap, n_moved
-
-    def _align_periodic(self, new_owner, weights):
-        for grp in self._periodic_groups:
-            owners = new_owner[grp]
-            if np.all(owners == owners[0]):
+        for i in np.argsort(nbr, kind='stable'):
+            if not np.isfinite(cores[nbr[i]]).all():
                 continue
 
-            uown, inv = np.unique(owners, return_inverse=True)
-            counts = np.bincount(inv)
-            loads = np.bincount(inv, weights=weights[grp], minlength=len(uown))
-            order = np.lexsort((uown, -loads, -counts))
-            new_owner[grp] = uown[order[0]]
+            d = np.linalg.norm(im.cents[flat[i]] - cores[nbr[i]])
+            if d < best_d[flat[i]]:
+                best_d[flat[i]] = d
+                best_dst[flat[i]] = nbr[i]
 
+        cand = np.flatnonzero((best_dst >= 0) & ~im.frozen)
 
-def _partition_on_root(nv, local_triples, mpi_triples, vwts, nparts):
-    src, dst, wts = np.vstack([local_triples, mpi_triples]).T
+        if len(cand) and np.isfinite(cores[self.rank]).all():
+            d_self = np.linalg.norm(im.cents[cand] - cores[self.rank],
+                                    axis=1)
+            score = d_self - best_d[cand]
 
-    vtab, etab, ewts = build_csr(nv, src, dst, wts, symmetrise=True,
-                                 dedup=True)
-    graph = Graph(vtab, etab, vwts.reshape(-1, 1).astype(np.int32), ewts)
+            cand, score = cand[score > 0], score[score > 0]
+            if len(cand):
+                chosen = self._top_fraction(im, cand, score,
+                                            self.inlier_frac)
+                self._move(im, chosen, best_dst[chosen])
+                return
 
-    return GraphPartitioner().partition(graph, np.ones(nparts) / nparts)
+        im.move(np.full(im.neles, self.rank, dtype=int))
 
+    def heal(self, im, target, max_iters=-1):
+        # Alternate island eviction, outlier/inlier moves, and capped
+        # diffusion until every rank is down to one main component
+        self.remove_outliers(im)
 
-def _periodic_groups(mesh, etype_off):
-    if 'periodic' not in mesh.raw:
-        return []
+        iters = 0
+        while max_iters == -1 or iters < max_iters:
+            iters += 1
 
-    cidxmap, _ = parse_codec(mesh.codec, mesh.etypes)
-    g2l = build_g2l(mesh.etypes, mesh.eidxs)
-    ds = DisjointSet()
+            cluster, nis_all = self.detect_islands(im)
+            if all(n == 1 for n in nis_all):
+                break
 
-    def flat_idx(rec):
-        etype, _ = cidxmap[int(rec['cidx'])]
-        if etype not in g2l:
-            return None
+            self.remove_islands(im, cluster)
+            self.remove_outliers(im)
+            self.add_inliers(im)
 
-        ordgi, perm = g2l[etype][1:]
-        pos = np.searchsorted(ordgi, rec['off'])
-        if pos < len(ordgi) and ordgi[pos] == rec['off']:
-            return etype_off[etype] + perm[pos]
+            cur = im.counts()
+            self.converge(im, target, max_iters=10)
+
+            if (im.counts() == cur).all() or all(n <= 2 for n in nis_all):
+                break
+
+    # -- Top level
+
+    def balance(self, im, target):
+        self.drain(im, target)
+        self.heal(im, target)
+
+        # Iterate, aggressively so on early calls
+        if self.aggr_iters > 0:
+            for _ in range(self.aggr_iters):
+                self.iterate(im, target)
+
+            self.aggr_iters -= 1
         else:
-            return None
-
-    for pcon in mesh.raw['periodic'].values():
-        for left, right in pcon[()].reshape(-1, 2):
-            li = flat_idx(left)
-            ri = flat_idx(right)
-
-            if li is None and ri is None:
-                continue
-            elif li is None or ri is None:
-                raise RuntimeError('Periodic elements split across ranks')
-            elif li != ri:
-                ds.union(li, ri)
-
-    groups = {}
-    for child, root in ds.merges().items():
-        groups.setdefault(root, []).append(child)
-
-    return [np.array([root, *children], dtype=int)
-            for root, children in groups.items()]
-
-
-def _check_islands(batch, moving, vtab, etab):
-    safe = np.ones(len(batch), dtype=bool)
-
-    for i, eidx in enumerate(batch):
-        lo, hi = vtab[eidx], vtab[eidx + 1]
-        if lo < hi:
-            nbrs = etab[lo:hi]
-            if np.all(moving[nbrs]):
-                safe[i] = False
-                moving[eidx] = False
-
-    return safe
+            self.iterate(im, target)
