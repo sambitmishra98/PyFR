@@ -140,8 +140,13 @@ class SCOTCHPartitioner(BasePartitioner):
             w.SCOTCH_graphInit(graph_ctx)
             w.SCOTCH_contextBindGraph(context, graph_org, graph_ctx)
 
+            print(f"[scotch.map] begin nverts={len(vtab)-1} nnz={len(etab)} nparts={len(partwts)} ufactor={self.opts['ufactor']}", flush=True)
+
             # Perform the partitioning
             w.SCOTCH_graphMap(graph_ctx, arch, strat, parts.ctypes)
+
+            print("[scotch.map] end", flush=True)
+
         finally:
             if any(v != 0.0 for v in strat):
                 w.SCOTCH_stratExit(strat)
