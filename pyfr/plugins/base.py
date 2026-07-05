@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from pytools import prefork
 
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from pyfr.mpiutil import mpi, comm, rank, root
 from pyfr.regions import parse_region_expr
 from pyfr.writers.csv import CSVStream
 
@@ -49,7 +49,6 @@ def open_hdf5_a(path):
 
 
 def region_data(cfg, cfgsect, mesh, *, rtype=None):
-    comm, rank, root = get_comm_rank_root()
     region = cfg.get(cfgsect, 'region', '*')
 
     # Determine the element types in our partition
@@ -60,7 +59,6 @@ def region_data(cfg, cfgsect, mesh, *, rtype=None):
         return {etype: slice(None) for etype in etypes}
     # All elements inside some region
     else:
-        comm, rank, root = get_comm_rank_root()
 
         # Parse the region expression
         rgn = parse_region_expr(region, mesh.raw.get('regions'))
@@ -77,7 +75,7 @@ def region_data(cfg, cfgsect, mesh, *, rtype=None):
                 raise ValueError('Invalid region type')
 
         # Ensure the region is not empty
-        if not comm.reduce(bool(eset), op=mpi.LOR, root=root) and rank == root:
+        if not comm['plugins'].reduce(bool(eset), op=mpi.LOR, root=root['plugins']) and rank == root['plugins']:
             raise ValueError(f'Empty region {region}')
 
         # If requested, expand the region
@@ -92,14 +90,12 @@ def region_data(cfg, cfgsect, mesh, *, rtype=None):
 def surface_data(cfg, cfgsect, mesh):
     surf = cfg.get(cfgsect, 'surface')
 
-    comm, rank, root = get_comm_rank_root()
-
     # Parse the surface expression and obtain the element set
     rgn = parse_region_expr(surf, mesh.raw.get('regions'))
     eset = rgn.surface_faces(mesh)
 
     # Ensure the surface is not empty
-    if not comm.reduce(bool(eset), op=mpi.LOR, root=root) and rank == root:
+    if not comm['plugins'].reduce(bool(eset), op=mpi.LOR, root=root) and rank['plugins'] == root['plugins']:
         raise ValueError(f'Empty surface {surf}')
 
     return {etype: np.unique(eidxs).astype(int)
@@ -188,10 +184,9 @@ class PostactionMixin:
             prefork.wait(self.postactaid)
 
     def _invoke_postaction(self, intg, **kwargs):
-        comm, rank, root = get_comm_rank_root()
 
         # If we have a post-action and are the root rank then fire it
-        if rank == root and self.postact:
+        if rank['plugins'] == root['plugins'] and self.postact:
             # If a post-action is currently running then wait for it
             if self.postactaid is not None:
                 prefork.wait(self.postactaid)
@@ -211,24 +206,63 @@ class RegionMixin:
     def __init__(self, intg, *args, **kwargs):
         super().__init__(intg, *args, **kwargs)
 
+        pmesh = intg.meshes['plugins']
+
+        # If partition name given for the plugin, use this partitioning instead
+        if 'plugins' in intg.meshes:
+            self._ele_types = (list(pmesh.eidxs) if pmesh.eidxs else [])
+        else:
+            self._ele_types = intg.system.ele_types
+
+        emap = intg.system.ele_map
+
+        nupts = {e: emap[e].nupts if e in emap else 0 for e in pmesh.etypes}
+        
+        if comm['plugins'] != mpi.COMM_NULL:
+            self.nupts = {e: comm['plugins'].allreduce(nupts[e], op=mpi.MAX) for e in nupts}
+
+        self.neles = {e: len(pmesh.eidxs[e]) if e in pmesh.eidxs else 0
+                      for e in pmesh.etypes}
+
         # Parse the region
-        ridxs = region_data(self.cfg, self.cfgsect, intg.system.mesh)
+        ridxs = region_data(self.cfg, self.cfgsect, pmesh)
 
         # Generate the appropriate metadata arrays
         self._ele_regions, self._ele_region_data = [], {}
         for etype, eidxs in ridxs.items():
-            doff = intg.system.ele_types.index(etype)
+            doff = self._ele_types.index(etype)
             self._ele_regions.append((doff, etype, eidxs))
 
             # Obtain the global element numbers
-            geidxs = intg.system.mesh.eidxs[etype][eidxs]
+            geidxs = intg.meshes['plugins'].eidxs[etype][eidxs]
             self._ele_region_data[etype] = geidxs
 
+    def recreate(self, intg):
+        # Shorthand for the mesh
+        pmesh = intg.meshes['plugins']
+
+        self.neles = {e: len(pmesh.eidxs[e]) if e in pmesh.eidxs else 0
+                      for e in pmesh.etypes}
+
+        # Parse the region
+        ridxs = region_data(self.cfg, self.cfgsect, pmesh)
+
+        # Generate the appropriate metadata arrays
+        self._ele_regions, self._ele_region_data = [], {}
+        for etype, eidxs in ridxs.items():
+            doff = self._ele_types.index(etype)
+            self._ele_regions.append((doff, etype, eidxs))
+
+            # Obtain the global element numbers
+            geidxs = intg.meshes['plugins'].eidxs[etype][eidxs]
+            self._ele_region_data[etype] = geidxs
+
+        
 
 class SurfaceRegionMixin:
     def _surf_region(self, intg):
         # Parse the region
-        sidxs = surface_data(intg.cfg, self.cfgsect, intg.system.mesh)
+        sidxs = surface_data(intg.cfg, self.cfgsect, intg.meshes['plugins'])
 
         # Generate the appropriate metadata arrays
         ele_surface, ele_surface_data = [], {}

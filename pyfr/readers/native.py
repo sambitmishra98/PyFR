@@ -5,10 +5,13 @@ import h5py
 import numpy as np
 
 from pyfr.inifile import Inifile
-from pyfr.mpiutil import (Scatterer, SparseScatterer, autofree,
-                          get_comm_rank_root)
+from pyfr.mpiutil import (Scatterer, SparseScatterer, autofree, mpi, 
+                          comm, rank, root, rankmap)
 from pyfr.nputil import iter_struct
 
+# -----------------------------------------------------------------------------
+# Cyclic target jitter ("heartbeat") state
+# -----------------------------------------------------------------------------
 
 @dataclass
 class _Mesh:
@@ -30,24 +33,35 @@ class _Mesh:
     spts_nodes: dict = field(default_factory=dict)
     spts_curved: dict = field(default_factory=dict)
 
+    # Required for relocation only
+    faces_cidxs: dict = field(default_factory=dict)
+    faces_offs: dict = field(default_factory=dict)
+
     con: list = field(default_factory=list)
     con_p: dict = field(default_factory=dict)
     bcon: dict = field(default_factory=dict)
 
-
 class NativeReader:
-    def __init__(self, fname, pname=None, *, construct_con=True):
+    def __init__(self, fname, pname=None, *, construct_con=True,
+                 comm_name='world'):
         self.f = h5py.File(fname, 'r')
         self.mesh = _Mesh(fname=fname, raw=self.f)
 
+        self.comm_name = comm_name
+
+        self.mesh.etypes = sorted(self.f['eles'])
+        self.mesh.ndims = self.f['nodes'].dtype['location'].shape[0]
+
         # Read in and transform the various parts of the mesh
         self._read_metadata()
-        self._read_partitioning(pname)
-        self._read_eles()
-        self._read_nodes()
 
-        if construct_con:
-            self._construct_con()
+        if comm[comm_name] != mpi.COMM_NULL:
+            self._read_partitioning(pname)
+            self._read_eles()
+            self._read_nodes()
+
+            if construct_con:
+                self._construct_con()
 
     def close(self):
         self.f.close()
@@ -62,10 +76,9 @@ class NativeReader:
         return soln
 
     def load_subset_mesh_soln(self, sname, prefix=None):
-        comm, rank, root = get_comm_rank_root()
 
         with h5py.File(sname, 'r') as f:
-            if rank == root:
+            if rank['world'] == root['world']:
                 # Ensure the solution is from the mesh we are using
                 uuid = f['mesh-uuid'][()].decode()
                 if uuid != self.mesh.uuid:
@@ -79,7 +92,7 @@ class NativeReader:
                 soln = None
 
             # Broadcast and parse
-            soln = comm.bcast(soln, root=root)
+            soln = comm['world'].bcast(soln, root=root['world'])
             soln = {k: Inifile(v) for k, v in soln.items()}
 
             # Obtain the polynomial order
@@ -105,7 +118,7 @@ class NativeReader:
                     except KeyError:
                         idxs = np.empty(0, dtype=int)
 
-                    escatter = SparseScatterer(comm, f[ei], idxs)
+                    escatter = SparseScatterer(comm['world'], f[ei], idxs)
                     subset[etype] = escatter.ridx
                 # Complete element present so reuse the elements scatterer
                 else:
@@ -150,9 +163,8 @@ class NativeReader:
 
     def _read_metadata(self):
         mesh = self.mesh
-        comm, rank, root = get_comm_rank_root()
 
-        if rank == root:
+        if rank['world'] == root['world']:
             creator = self.f['creator'][()].decode()
             codec = [c.decode() for c in self.f['codec']]
             uuid = self.f['mesh-uuid'][()].decode()
@@ -162,14 +174,13 @@ class NativeReader:
         else:
             meta = None
 
-        meta = comm.bcast(meta, root=root)
+        meta = comm['world'].bcast(meta, root=root['world'])
         mesh.creator, mesh.codec, mesh.uuid, mesh.version = meta
 
     def _read_with_idxs(self, dset, idxs):
-        comm, rank, root = get_comm_rank_root()
 
         # Construct a Scatterer to read in and distribute the data
-        s = Scatterer(comm, idxs)
+        s = Scatterer(comm[self.comm_name], idxs)
 
         return s(dset), s
 
@@ -194,11 +205,11 @@ class NativeReader:
         return pname, pinfo
 
     def _read_partitioning(self, pname=None):
-        comm, rank, root = get_comm_rank_root()
-        size = comm.size
+
+        size = comm[self.comm_name].size
 
         # Have the root rank read in the partitioning metadata
-        if rank == root:
+        if rank[self.comm_name] == root[self.comm_name]:
             pname, pinfo = self._select_partitioning(size, pname)
 
             # Read the element region data
@@ -214,12 +225,12 @@ class NativeReader:
             pname = einfo = ninfo = None
 
         # Broadcast this metadata
-        ppath = 'partitionings/' + comm.bcast(pname, root=root)
-        einfo = comm.scatter(einfo, root=root)
-        self.neighbours = comm.scatter(ninfo, root=root)
+        ppath = 'partitionings/' + comm[self.comm_name].bcast(pname, root=root[self.comm_name])
+        einfo = comm[self.comm_name].scatter(einfo, root=root[self.comm_name])
+        self.neighbours = comm[self.comm_name].scatter(ninfo, root=root[self.comm_name])
 
         # Determine the element types in the mesh
-        self.mesh.etypes = etypes = sorted(self.f['eles'])
+        etypes = self.mesh.etypes
 
         # Read our portion of the partitioning table
         peles = self.f[f'{ppath}/eles'][einfo[0]:einfo[-1]]
@@ -266,6 +277,8 @@ class NativeReader:
             self.mesh.spts[etype] = spts
             self.mesh.spts_nodes[etype] = einfo['nodes']
             self.mesh.spts_curved[etype] = einfo['curved']
+            self.mesh.faces_cidxs[etype] = einfo['faces']['cidx']
+            self.mesh.faces_offs[etype]  = einfo['faces']['off']
 
     def _construct_con(self):
         codec = self.mesh.codec
@@ -325,10 +338,9 @@ class NativeReader:
             self._construct_mpi_con(glmap, cefidx, resid)
 
     def _construct_mpi_con(self, glmap, cefidx, resid):
-        comm, rank, root = get_comm_rank_root()
 
         # Create a neighbourhood collective communicator
-        ncomm = autofree(comm.Create_dist_graph_adjacent(self.neighbours,
+        ncomm = autofree(comm[self.comm_name].Create_dist_graph_adjacent(self.neighbours,
                                                          self.neighbours))
 
         # Create a list of our unpaired faces
@@ -345,7 +357,7 @@ class NativeReader:
         nmatches = ncomm.neighbor_alltoall(matches)
 
         for nrank, nmatch in zip(self.neighbours, nmatches):
-            if rank < nrank:
+            if rank[self.comm_name] < nrank:
                 ncon = sorted([(resid[m], m) for m in nmatch])
                 ncon = [r for l, r in ncon]
             else:
@@ -358,4 +370,4 @@ class NativeReader:
                 nncon.append((etype, glmap[etidx][off], fidx))
 
             # Add the connectivity to the mesh
-            self.mesh.con_p[nrank] = nncon
+            self.mesh.con_p[rankmap[self.comm_name][nrank]] = nncon

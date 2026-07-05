@@ -4,7 +4,6 @@ from pyfr.inifile import Inifile
 from pyfr.mpiutil import get_comm_rank_root
 from pyfr.plugins.base import BaseSolnPlugin, PostactionMixin, RegionMixin
 from pyfr.writers.native import NativeWriter
-from pyfr.util import first
 
 
 class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
@@ -28,7 +27,7 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         # Figure out the shape of each element type in our region
         nvars = self.nvars + self._write_grads*(self.nvars*self.ndims)
-        ershapes = {etype: (nvars, emap[etype].nupts) for etype in erdata}
+        ershapes = {etype: (nvars, self.nupts[etype]) for etype in erdata}
 
         # Construct the solution writer
         self._writer = NativeWriter.from_integrator(intg, basedir, basename,
@@ -43,7 +42,7 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
         self.tout_last = intg.tcurr
 
         # Output field names
-        self.fields = list(first(intg.system.ele_map.values()).convars)
+        self.fields = intg.convars
         if self._write_grads:
             dims = 'xyz'[:self.ndims]
             self.fields += [f'grad_{f}_{d}' for f in self.fields for d in dims]
@@ -56,8 +55,15 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         # If we're not restarting then make sure we write out the initial
         # solution when we are called for the first time
-        if not intg.isrestart:
+        if intg.called_plugin_dt:
+            self.tout_last = intg.tstart
+            if intg.isrestart:
+                raise RuntimeError('Restarting from a time other '
+                                            'than t=0 is not supported')
+        elif not intg.isrestart:
             self.tout_last -= self.dt_out
+
+        intg.called_plugin_dt = True
 
     def _prepare_metadata(self, intg):
         comm, rank, root = get_comm_rank_root()
@@ -120,7 +126,7 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
         # Prepare a callback to kick off any postactions
         callback = lambda fname, t=intg.tcurr: self._invoke_postaction(
-            intg=intg, mesh=intg.system.mesh.fname, soln=fname, t=t
+            intg=intg, mesh=intg.meshes['plugins'].fname, soln=fname, t=t
         )
 
         # Write out the file

@@ -13,7 +13,8 @@ import numpy as np
 
 from pyfr._version import __version__
 from pyfr.ctypesutil import get_libc_function
-from pyfr.mpiutil import Gatherer, autofree, get_comm_rank_root, mpi, scal_coll
+from pyfr.mpiutil import (Gatherer, autofree, mpi, scal_coll,
+                            comm, rank, root, execute)
 from pyfr.quadrules import get_quadrule
 from pyfr.shapes import BaseShape
 from pyfr.util import file_path_gen, mv, subclass_where
@@ -33,7 +34,6 @@ class NativeWriter:
 
     def __init__(self, mesh, cfg, fpdtype, basedir, basename, prefix, *,
                  extn='.pyfrs', isrestart=False):
-        comm, rank, root = get_comm_rank_root()
 
         self.cfg = cfg
         self.prefix = prefix
@@ -51,12 +51,12 @@ class NativeWriter:
         self.fgen = file_path_gen(basedir, basename, isrestart)
 
         # Temporary file name
-        if rank == root:
+        if rank['world'] == root['world']:
             tname = os.path.join(basedir, f'pyfr-{uuid.uuid4()}{extn}')
         else:
             tname = None
 
-        self.tname = comm.bcast(tname, root=root)
+        self.tname = comm['world'].bcast(tname, root=root['world'])
 
         # Query the file system type
         self.fstype = self._get_fstype(basedir)
@@ -68,7 +68,8 @@ class NativeWriter:
             self._get_writefn = self._get_writefn_serial
 
             # Private communicator for serial writes
-            self._scomm = autofree(comm.Dup())
+            if comm['plugins'] != mpi.COMM_NULL:
+                self._scomm = autofree(comm['plugins'].Dup())
 
         # Current asynchronous writing operation (if any)
         self._awriter = None
@@ -96,9 +97,7 @@ class NativeWriter:
         return None
 
     def _create_file(self, path):
-        comm, rank, root = get_comm_rank_root()
-
-        if self.fstype == 'lustre' and rank == root:
+        if self.fstype == 'lustre' and rank['world'] == root['world']:
             # Lustre pool name
             pool = None
 
@@ -145,20 +144,26 @@ class NativeWriter:
         return f
 
     def set_shapes_eidxs(self, shapes, eidxs):
-        comm, rank, root = get_comm_rank_root()
 
         # Prepare the element information
         self._einfo = {}
         for etype, ecount in self._ecounts.items():
             # See if any ranks want to write elements of this type
-            eshape = comm.allgather(shapes.get(etype))
+            # if comm != mpi.COMM_NULL:
+            #     eshape = comm.allgather(shapes.get(etype))
+            # else:
+            #     eshape = [shapes.get(etype)]
+
+            eshape = execute['plugins'](lambda: comm['plugins'].allgather(shapes.get(etype)),
+                                        default=[shapes.get(etype)])
+
             if any(eshape):
                 # Create a gatherer for this element type
                 idxs = eidxs.get(etype, [])
-                gatherer = Gatherer(comm, idxs)
+                gatherer = Gatherer(comm['plugins'], idxs)
 
                 # Exchange counts and offsets
-                noff = comm.allgather((gatherer.cnt, gatherer.off))
+                noff = comm['plugins'].allgather((gatherer.cnt, gatherer.off))
                 noff = {i: j for i, j in enumerate(noff) if j}
 
                 # Determine the final shape of the element array
@@ -169,7 +174,7 @@ class NativeWriter:
                 order = ecls.order_from_npts(shape[2])
 
                 # See if the element is being subset
-                subset = comm.allreduce(len(idxs) != ecount, op=mpi.LOR)
+                subset = comm['plugins'].allreduce(len(idxs) != ecount, op=mpi.LOR)
 
                 # Also get the associated nodal points
                 rname = self.cfg.get(f'solver-elements-{etype}', 'soln-pts')
@@ -189,7 +194,10 @@ class NativeWriter:
 
     def write(self, data, tcurr, metadata=None, timeout=0, callback=None):
         async_ = bool(timeout)
-        comm, rank, root = get_comm_rank_root()
+
+        # If comm is COMM_NULL then do nothing
+        if comm['plugins'] == mpi.COMM_NULL:
+            return
 
         # Wait for any existing write operations to finish
         if self._awriter is not None:
@@ -197,7 +205,7 @@ class NativeWriter:
             self._awriter = None
 
         if metadata:
-            if rank != root:
+            if rank['plugins'] != root['plugins']:
                 raise ValueError('Metadata must be written by the root rank')
 
             metadata = dict(metadata, creator=f'pyfr {__version__}', version=1)
@@ -235,7 +243,7 @@ class NativeWriter:
 
         def oncomplete():
             # Have the root rank move it into place
-            if rank == root:
+            if rank['plugins'] == root['plugins']:
                 mv(self.tname, path)
 
             # Fire off any user-provided callback
@@ -277,7 +285,6 @@ class NativeWriter:
         return write
 
     def _get_writefn_serial(self, path, data, doffs):
-        comm, rank, root = get_comm_rank_root()
         wbufs = []
 
         # Helper function for extracting data about buffers
@@ -292,9 +299,9 @@ class NativeWriter:
         wbufs.sort()
 
         # Collate this data to the root rank
-        bufs = comm.gather([(off, nb) for off, nb, _ in wbufs], root=root)
+        bufs = comm['plugins'].gather([(off, nb) for off, nb, _ in wbufs], root=root['plugins'])
 
-        if rank == root:
+        if rank['plugins'] == root['plugins']:
             # Open the file for writing
             f = self._open_file(path)
 
@@ -308,7 +315,7 @@ class NativeWriter:
                 with self._lock:
                     # Write the buffers to the file in order
                     for off, nb, r in sorted(bufs):
-                        if r == root:
+                        if r == root['plugins']:
                             b = next(iwbufs)
                         else:
                             b = np.empty(nb, dtype=np.uint8)
@@ -323,19 +330,18 @@ class NativeWriter:
                     # Send each of our buffers to the root rank for writing
                     for _, _, b in wbufs:
                         self._scomm.Send(
-                            np.ascontiguousarray(b.view(np.uint8)), root
+                            np.ascontiguousarray(b.view(np.uint8)), root['plugins']
                         )
 
         return write
 
     def _prepare_file(self, path, metadata):
-        comm, rank, root = get_comm_rank_root()
 
         # Perform any pre-creation activities
         self._create_file(path)
 
         # Have the root rank lay down the structure of the file
-        if rank == root:
+        if rank['plugins'] == root['plugins']:
             doffs = {}
 
             with h5py.File(path, 'w', libver='latest') as f:
@@ -361,9 +367,9 @@ class NativeWriter:
                     v[(-1,)*v.ndim] = 0
                     doffs[k] = v.id.get_offset()
 
-            return comm.bcast(doffs, root=root)
+            return comm['plugins'].bcast(doffs, root=root['plugins'])
         else:
-            return comm.bcast(None, root=root)
+            return comm['plugins'].bcast(None, root=root['plugins'])
 
 
 class _AsyncCompleter:
@@ -376,8 +382,7 @@ class _AsyncCompleter:
         self.start = time.time()
 
     def _test_with_timeout(self, timeout):
-        comm, rank, root = get_comm_rank_root()
-
+        
         if not self.done:
             if time.time() - self.start >= timeout:
                 self.th.join()
@@ -385,7 +390,7 @@ class _AsyncCompleter:
             self.done = not self.th.is_alive()
 
         # See if everyone is done
-        if scal_coll(comm.Allreduce, int(self.done), op=mpi.LAND):
+        if scal_coll(comm['plugins'].Allreduce, int(self.done), op=mpi.LAND):
             self.callback()
 
             return True

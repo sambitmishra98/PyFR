@@ -47,7 +47,8 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         self.elementscls = intg.system.elementscls
 
         # Primitive variables
-        self.privars = first(intg.system.ele_map.values()).privars
+        self.privars = self.elementscls.privars(intg.system.mesh.ndims, 
+                                                intg.cfg)
 
         # Averaging mode
         self.mode = self.cfg.get(cfgsect, 'mode', 'windowed')
@@ -79,7 +80,7 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         emap, erdata = intg.system.ele_map, self._ele_region_data
 
         # Figure out the shape of each element type in our region
-        ershapes = {etype: (nfields, emap[etype].nupts) for etype in erdata}
+        ershapes = {etype: (nfields, self.nupts[etype]) for etype in erdata}
 
         # Construct the file writer
         self._writer = NativeWriter.from_integrator(intg, basedir, basename,
@@ -107,18 +108,24 @@ class TavgPlugin(PostactionMixin, RegionMixin, TavgMixin, BaseSolnPlugin):
         # Get the total number of solution points in the region
         ergns = self._ele_regions
         if self.cfg.get(cfgsect, 'region') == '*':
-            tpts = sum(emap[e].neles*emap[e].nupts for i, e, r in ergns)
+            tpts = sum(self.neles[e]*self.nupts[e] for i, e, r in ergns)
         else:
-            tpts = sum(len(r)*emap[e].nupts for i, e, r in ergns)
+            tpts = sum(len(r)*self.nupts[e] for i, e, r in ergns)
 
         # Reduce
         self.tpts = comm.reduce(tpts, op=mpi.SUM, root=root)
 
+        self.tout_last = intg.tstart
+
         # Check if we are restarting and not before when tavg begins
-        if intg.isrestart and intg.tcurr >= self.tstart:
-            self.tout_last = intg.tcurr
-        else:
-            self.tout_last = None
+        if intg.called_plugin_dt:
+            self.tout_last = intg.tstart
+            if intg.isrestart:
+                raise RuntimeError('Restarting from a time other '
+                                            'than t=0 is not supported')
+        elif not intg.isrestart:
+            pass 
+        # self.tout_last -= self.dt_out
 
     def _prepare_exprs(self):
         cfg, cfgsect = self.cfg, self.cfgsect
