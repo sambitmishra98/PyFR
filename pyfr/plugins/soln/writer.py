@@ -82,7 +82,7 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
         ershapes = {etype: (self.nvars, emap[etype].nupts) for etype in erdata}
 
         self._writer.set_shapes_eidxs(ershapes, erdata, self._field_groups,
-                                      self._aux_fields, ndims=self.ndims)
+                                      self._aux_fields)
 
     def _prepare_metadata(self, intg):
         comm, rank, root = get_comm_rank_root()
