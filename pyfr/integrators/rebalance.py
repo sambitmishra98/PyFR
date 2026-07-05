@@ -82,6 +82,10 @@ class RebalanceMixin:
         self._rebal_best_score = -np.inf
         self._rebal_best_eidxs = None
 
+        # Stagnation tracking for rank shuffling
+        self._rebal_last_cmax = None
+        self._rebal_stag = 0
+
         n = cfg.getint('backend', 'collect-wait-times-len')
         self._rebal_dofs = deque(maxlen=self._rebal_perfwin)
         self._rebal_errest = deque(maxlen=n)
@@ -157,8 +161,9 @@ class RebalanceMixin:
         dofs = sum(self.system.ele_ndofs) / cost[rank]
         self._rebal_dofs.append(dofs)
 
-        score = np.array(comm.allgather(np.median(self._rebal_dofs)))
-        score = score[im.counts() > 0].sum()
+        scores = np.array(comm.allgather(np.median(self._rebal_dofs)))
+        active = im.counts() > 0
+        score = scores[active].sum()
 
         if self._rebal_best_eidxs is None or score > self._rebal_best_score:
             self._rebal_best_score = score
@@ -167,13 +172,25 @@ class RebalanceMixin:
                 for et, v in self.system.mesh.eidxs.items()
             }
 
-        # Stagnation-driven rank draining requires rank removal support
-        if self._rebal_stagnant and rank == root and self._rebal_iter == 1:
-            print('[rebalance] shuffle-if-stagnant is not yet supported; '
-                  'ignoring', flush=True)
+        # Rebalance in index space; shuffle the worst rank if stagnant
+        if self._rebal_stagnated(cost):
+            scores[~active] = np.inf
+            worst = int(np.argmin(scores))
 
-        # Rebalance in index space and apply
-        self._rebal_balancer.balance(im, target)
+            if rank == root:
+                print(f'[rebalance] stagnant; shuffling rank {worst}',
+                      flush=True)
+
+            self._rebal_balancer.shuffle(im, target, cost, worst)
+
+            # Measurements of the shuffled partitioning start afresh
+            self._rebal_dofs.clear()
+            self._rebal_last_cmax = None
+        else:
+            self._rebal_balancer.balance(im, target)
+
+        if not im.counts().all():
+            raise RuntimeError('Rebalancing left a rank with no elements')
 
         witer = time.perf_counter_ns()
         self._rebal_apply(self._rebal_ownermap(im, im.eidxs()))
@@ -218,8 +235,32 @@ class RebalanceMixin:
         cost = (self._rebal_coeffs @ comps**self._rebal_exps[:, None]
                 + self._rebal_cost_err*err)
 
+        # Targets assume positive costs; clamp waits-dominated ranks
+        if (pos := cost[cost > 0]).size:
+            cost = np.maximum(cost, pos.min())
+
         self._rebal_g1_csvs(g1a, g1s, g1r)
         return cost
+
+    def _rebal_stagnated(self, cost):
+        # The partitioning is stagnant when the highest per-rank cost
+        # has not improved for shuffle-if-stagnant successive checks
+        if not self._rebal_stagnant:
+            return False
+
+        cmax = cost[np.isfinite(cost)].max()
+
+        if self._rebal_last_cmax is None or cmax < self._rebal_last_cmax:
+            self._rebal_last_cmax = cmax
+            self._rebal_stag = 0
+        else:
+            self._rebal_stag += 1
+
+            if self._rebal_stag >= self._rebal_stagnant:
+                self._rebal_stag = 0
+                return True
+
+        return False
 
     def _rebal_target(self, im, cost):
         target = int_round(im.counts() / cost, im.nglobal)

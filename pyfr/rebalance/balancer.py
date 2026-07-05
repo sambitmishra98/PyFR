@@ -528,3 +528,55 @@ class DiffusionBalancer:
             self.aggr_iters -= 1
         else:
             self.iterate(im, target)
+
+    def seed(self, im, new_rank, target):
+        # Give an empty rank one element, taken from the interface of
+        # the most overloaded donor rank
+        surplus = im.counts() - np.asarray(target, dtype=int)
+        surplus[new_rank] = np.iinfo(int).min
+        donor = int(np.argmax(surplus))
+
+        dests = np.full(im.neles, self.rank, dtype=int)
+        if self.rank == donor and im.neles:
+            _, contact = self._contact_best(im)
+
+            cand = np.flatnonzero(~im.frozen)
+            if not len(cand):
+                cand = np.arange(im.neles)
+
+            best = cand[np.lexsort((im.gids[cand], -contact[cand]))[0]]
+            dests[best] = new_rank
+
+        im.move(dests)
+
+    def shuffle(self, im, target, cost, worst):
+        '''
+        Escape a local optimum by draining the worst-performing rank
+        into the cheapest one, then re-seeding it with a single element
+        from which subsequent balancing cycles can regrow it.
+        '''
+        cur = im.counts()
+        tgt = np.asarray(target, dtype=int)
+        active = np.flatnonzero((tgt > 0) & (np.arange(len(tgt)) != worst))
+
+        if not len(active):
+            return self.balance(im, target)
+
+        # Rank removal: retarget the worst rank's mass at the cheapest
+        drain = tgt.astype(float)
+        drain[active[np.argmin(cost[active])]] += cur[worst]
+        drain[worst] = 0
+        drain = int_round(drain, im.nglobal)
+
+        self.drain(im, drain)
+        self.iterate(im, drain)
+
+        # Rank addition: mean target, one seed element, short settle
+        readd = drain.astype(float)
+        readd[worst] = readd[active].mean()
+        readd = int_round(readd, im.nglobal)
+
+        if im.counts()[worst] == 0:
+            self.seed(im, worst, readd)
+
+        self.converge(im, readd, max_iters=5)
