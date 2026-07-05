@@ -4,19 +4,18 @@ from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
 
 
 def int_round(x, total):
-    # Rescale to the requested total with largest-remainder rounding
+    # Rescale to the requested total with largest-remainder rounding,
+    # breaking ties stably by rank index
     x = np.asarray(x, dtype=float)
     xs = x*(total / x.sum())
 
     xf = np.floor(xs).astype(int)
     k = int(total - xf.sum())
 
-    if k:
-        order = np.argsort(xs - xf)
-        if k > 0:
-            xf[order[-k:]] += 1
-        else:
-            xf[order[:-k]] -= 1
+    if k > 0:
+        xf[np.argsort(-(xs - xf), kind='stable')[:k]] += 1
+    elif k < 0:
+        xf[np.argsort(xs - xf, kind='stable')[:-k]] -= 1
 
     return xf
 
@@ -24,72 +23,43 @@ def int_round(x, total):
 def _lap_solve(lap, b, anchor=0):
     # Solve the anchored graph Laplacian system L p = b
     n = len(lap)
-    if n < 2:
-        return np.zeros(n)
-
-    idx = [i for i in range(n) if i != anchor]
-    lr = lap[np.ix_(idx, idx)]
-
-    try:
-        pr = np.linalg.solve(lr, b[idx])
-    except np.linalg.LinAlgError:
-        lr = lr + 1e-8*np.eye(len(lr))
-        pr = np.linalg.solve(lr, b[idx])
-
     p = np.zeros(n)
-    p[idx] = pr
+
+    if n > 1:
+        idx = np.arange(n) != anchor
+        lr = lap[np.ix_(idx, idx)]
+        p[idx] = np.linalg.lstsq(lr, b[idx], rcond=None)[0]
+
     return p
 
 
 def _distribute_with_caps(excess, deficit, twts, fm):
     # Split each source's excess over its downhill edges, cap sink columns
-    # at their deficits, relay any leftover, and integerise per source
-    n, eps = len(twts), 1e-12
+    # at their deficits, and integerise per source
+    n = len(twts)
     plan = np.zeros((n, n))
 
-    for u in np.flatnonzero(excess > 0):
-        if (s := twts[u].sum()) > eps:
-            plan[u] = excess[u]*(twts[u] / s)
+    rs = twts.sum(axis=1)
+    np.divide(excess[:, None]*twts, rs[:, None], out=plan,
+              where=rs[:, None] > 0)
 
-    sinks = np.flatnonzero(deficit > 0)
-    if len(sinks):
-        insum = plan[:, sinks].sum(axis=0)
-        alpha = np.ones_like(insum)
-
-        m = insum > deficit[sinks] + eps
-        alpha[m] = deficit[sinks][m] / insum[m]
-        plan[:, sinks] *= alpha
-
-    for u in np.flatnonzero(excess > 0):
-        if (rem := excess[u] - plan[u].sum()) <= 1e-9:
-            continue
-
-        cand = np.flatnonzero((deficit == 0) & (twts[u] > eps))
-        if len(cand) and (s := fm[u, cand].sum()) > eps:
-            plan[u, cand] += rem*(fm[u, cand] / s)
+    inflow = plan.sum(axis=0)
+    m = (deficit > 0) & (inflow > deficit)
+    if m.any():
+        plan[:, m] *= deficit[m] / inflow[m]
 
     iplan = np.zeros((n, n), dtype=int)
     for u in np.flatnonzero(excess > 0):
-        base = np.floor(plan[u] + 1e-9).astype(int)
+        base = np.floor(plan[u]).astype(int)
 
         if (left := int(excess[u] - base.sum())) > 0:
-            rema = plan[u] - base
-            order = np.lexsort((np.arange(n), -fm[u], -rema))
-            base[order[:left]] += 1
+            cand = np.flatnonzero(fm[u])
+            frac = plan[u, cand] - base[cand]
+            base[cand[np.lexsort((cand, -fm[u, cand], -frac))[:left]]] += 1
 
         iplan[u] = base
 
     return iplan
-
-
-def _cancel_anti_parallel(m):
-    mc = m.copy()
-    net = mc - mc.T
-
-    mc[net > 0] = net[net > 0]
-    mc[net <= 0] = 0
-
-    return mc
 
 
 class DiffusionBalancer:
@@ -168,7 +138,8 @@ class DiffusionBalancer:
             mfull *= fmat > 0
             np.fill_diagonal(mfull, 0)
 
-            mfull = _cancel_anti_parallel(mfull)
+            # Cancel anti-parallel flows
+            mfull = np.maximum(mfull - mfull.T, 0)
 
         comm.Bcast(mfull, root=self.root)
         return mfull
