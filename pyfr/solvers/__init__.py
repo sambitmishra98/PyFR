@@ -7,8 +7,8 @@ from pyfr.solvers.navstokes import NavierStokesSystem
 from pyfr.util import subclass_where
 
 
-def get_solver(backend, mesh, initsoln, cfg):
+def get_solver(backend, mmesh, initsoln, cfg):
     systemcls = subclass_where(BaseSystem, name=cfg.get('solver', 'system'))
 
     # Combine with an integrator to yield the solver
-    return get_integrator(backend, systemcls, mesh, initsoln, cfg)
+    return get_integrator(backend, systemcls, mmesh, initsoln, cfg)

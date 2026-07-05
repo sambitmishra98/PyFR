@@ -1,4 +1,4 @@
-from pyfr.mpiutil import get_comm_rank_root
+from pyfr.mpiutil import get_comm_rank_root, rank
 from pyfr.solvers.baseadvec import (BaseAdvectionIntInters,
                                     BaseAdvectionMPIInters,
                                     BaseAdvectionBCInters)
@@ -38,16 +38,14 @@ class BaseAdvectionDiffusionMPIInters(BaseAdvectionMPIInters):
     def __init__(self, be, lhs, rhsrank, elemap, cfg):
         super().__init__(be, lhs, rhsrank, elemap, cfg)
 
-        comm, rank, root = get_comm_rank_root()
-
-        lhsprank = rank
+        lhsprank = rank['compute']
         rhsprank = rhsrank
 
         # Generate second set of view matrices
-        self._vect_lhs = self._vect_xchg_view(lhs, 'get_vect_fpts_for_inter')
-        self._vect_rhs = be.xchg_matrix_for_view(self._vect_lhs)
-        self._comm_lhs = self._scal_xchg_view(lhs, 'get_comm_fpts_for_inter')
-        self._comm_rhs = be.xchg_matrix_for_view(self._comm_lhs)
+        self._vect_lhs = self._vect_xchg_view(lhs, 'get_vect_fpts_for_inter', tags={f'peer={rhsrank}'})
+        self._vect_rhs = be.xchg_matrix_for_view(self._vect_lhs, tags={f'peer={rhsrank}'})
+        self._comm_lhs = self._scal_xchg_view(lhs, 'get_comm_fpts_for_inter', tags={f'peer={rhsrank}'})
+        self._comm_rhs = be.xchg_matrix_for_view(self._comm_lhs, tags={f'peer={rhsrank}'})
 
         # Additional kernel constants
         self.c |= cfg.items_as('solver-interfaces', float)

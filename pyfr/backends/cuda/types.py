@@ -1,3 +1,6 @@
+import os
+from pyfr.mpiutil import comm
+
 from functools import cached_property
 
 import numpy as np

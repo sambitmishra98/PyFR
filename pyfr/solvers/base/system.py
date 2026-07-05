@@ -1,13 +1,14 @@
 from collections import defaultdict
 import inspect
 import itertools as it
+import math
 import statistics
 
 import numpy as np
 
 from pyfr.backends.base import NullKernel
 from pyfr.cache import memoize
-from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
+from pyfr.mpiutil import autofree, mpi, comm, rankmap
 from pyfr.shapes import BaseShape
 from pyfr.util import subclasses
 
@@ -60,16 +61,17 @@ class BaseSystem:
         # Get all the solution point locations for the elements
         self.ele_ploc_upts = [e.ploc_at_np('upts') for e in eles]
 
-        if hasattr(eles[0], '_grad_upts'):
-            self.eles_vect_upts = [e._grad_upts for e in eles]
+        if comm['compute'] != mpi.COMM_NULL and eles:
+            if hasattr(eles[0], '_grad_upts'):
+                self.eles_vect_upts = [e._grad_upts for e in eles]
 
-        if hasattr(eles[0], 'entmin_int'):
-            self.eles_entmin_int = [e.entmin_int for e in eles]
+            if hasattr(eles[0], 'entmin_int'):
+                self.eles_entmin_int = [e.entmin_int for e in eles]
 
-        # Load the interfaces
-        self._int_inters = self._load_int_inters(mesh, elemap)
-        self._mpi_inters = self._load_mpi_inters(mesh, elemap)
-        self._bc_inters, self._bc_prefns = self._load_bc_inters(mesh, elemap)
+            # Load the interfaces
+            self._int_inters = self._load_int_inters(mesh, elemap)
+            self._mpi_inters = self._load_mpi_inters(mesh, elemap)
+            self._bc_inters, self._bc_prefns = self._load_bc_inters(mesh, elemap)
         backend.commit()
 
     def commit(self):
@@ -82,45 +84,54 @@ class BaseSystem:
         self.has_src_macros = any(eles.has_src_macros
                                   for eles in self.ele_map.values())
 
-        # Delete the memory-intensive ele_map
-        del self.ele_map
-
-        # Save the BC interfaces, but delete the memory-intensive elemap
-        for b in self._bc_inters:
-            del b.elemap
+#         # Delete the memory-intensive ele_map
+#         del self.ele_map
+# 
+#         # Save the BC interfaces, but delete the memory-intensive elemap
+#         for b in self._bc_inters:
+#             del b.elemap
 
         # Observed input/output bank numbers
         self._rhs_uin_fout = set()
 
-    def _load_eles(self, mesh, initsoln, nregs, nonce):
+    def _setup_elemap(self, mesh):
         basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
 
         # Load the elements
         elemap = {etype: self.elementscls(basismap[etype], spts, self.cfg)
                   for etype, spts in mesh.spts.items()}
 
+        return elemap
+
+    def _load_eles(self, mesh, initsoln, nregs, nonce):
+
+        elemap = self._setup_elemap(mesh)
         eles = list(elemap.values())
 
         # Set the initial conditions
         if initsoln:
-            # Load the config and stats files from the solution
-            solncfg = initsoln['config']
-            solnsts = initsoln['stats']
+            if isinstance(initsoln, list):
+                for ele, soln in zip(eles, initsoln):
+                    ele.recreate_soln(soln)
+            else:
+                # Load the config and stats files from the solution
+                solncfg = initsoln['config']
+                solnsts = initsoln['stats']
 
-            # Get the names of the conserved variables (fields)
-            solnfields = solnsts.get('data', 'fields').split(',')
-            currfields = eles[0].convars
+                # Get the names of the conserved variables (fields)
+                solnfields = solnsts.get('data', 'fields').split(',')
+                currfields = eles[0].convars
 
-            # Construct a mapping between the solution file and the system
-            try:
-                smap = [solnfields.index(cf) for cf in currfields]
-            except ValueError:
-                raise RuntimeError('Invalid solution for system')
+                # Construct a mapping between the solution file and the system
+                try:
+                    smap = [solnfields.index(cf) for cf in currfields]
+                except ValueError:
+                    raise RuntimeError('Invalid solution for system')
 
-            # Process the solution
-            for etype, ele in elemap.items():
-                soln = initsoln[etype][:, smap, :]
-                ele.set_ics_from_soln(soln, solncfg)
+                # Process the solution
+                for etype, ele in elemap.items():
+                    soln = initsoln[etype][:, smap, :]
+                    ele.set_ics_from_soln(soln, solncfg)
         else:
             for ele in eles:
                 ele.set_ics_from_cfg()
@@ -143,14 +154,14 @@ class BaseSystem:
     def _load_mpi_inters(self, mesh, elemap):
         mpi_inters = []
         for p, con in mesh.con_p.items():
-            mpiiface = self.mpiinterscls(self.backend, con, p, elemap,
+            mpiiface = self.mpiinterscls(self.backend, con, 
+                                         rankmap['compute'].index(p), elemap,
                                          self.cfg)
             mpi_inters.append(mpiiface)
 
         return mpi_inters
 
     def _load_bc_inters(self, mesh, elemap):
-        comm, rank, root = get_comm_rank_root()
 
         bccls = self.bbcinterscls
         bcmap = {b.type: b for b in subclasses(bccls, just_leaf=True)}
@@ -164,7 +175,7 @@ class BaseSystem:
             # Construct an MPI communicator for this boundary
             bname = c.removeprefix('bc/')
             localbc = bname in mesh.bcon
-            bccomm = autofree(comm.Split(1 if localbc else mpi.UNDEFINED))
+            bccomm = autofree(comm['compute'].Split(1 if localbc else mpi.UNDEFINED))
 
             # Get the class
             cfgsect = f'soln-bcs-{bname}'
@@ -322,6 +333,289 @@ class BaseSystem:
             stats.append((mean, stdev, median))
 
         return stats
+
+    def rhs_wait_times(self):
+        # Only consider n-1 graph execution across all stages in a time-step
+
+        pairs = list(self._rhs_uin_fout)
+        nstages = len(pairs) or 1
+        ngraphs = int(sum(len(self._rhs_graphs(u, f)) for u, f in pairs) / nstages)
+
+        if ngraphs <= 0: return [(0.0, 0.0, 0.0)]
+
+        u, f = pairs[-1]
+        g_list = tuple(self._rhs_graphs(u, f))
+        if not g_list: return [(0.0, 0.0, 0.0)] * ngraphs
+
+        pick_idx = len(g_list) - 2
+        t = g_list[pick_idx].get_wait_times()
+
+        mean = statistics.mean(t) if t else 0.0
+        stdev = statistics.stdev(t) if len(t) >= 2 else 0.0
+        median = statistics.median(t) if t else 0.0
+
+        out = [(0.0, 0.0, 0.0)] * ngraphs
+        out[pick_idx] = (mean, stdev, median)
+
+        return out
+
+    def rhs_compute_times(self):
+        # Group together timings for graphs which are semantically equivalent
+        times = defaultdict(list)
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                times[i].extend(g.get_compute_times())
+
+        # Compute all statistics
+        stats = []
+        for t in times.values():
+            mean = statistics.mean(t) if t else 0
+            stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
+            median = statistics.median(t) if t else 0
+
+            stats.append((mean, stdev, median))
+
+        return stats
+
+    def rhs_all_times(self):
+        # Group together timings for graphs which are semantically equivalent
+        times = defaultdict(list)
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                times[i].extend(g.get_all_times())
+
+        # Compute all statistics
+        stats = []
+        for t in times.values():
+            mean = statistics.mean(t) if t else 0
+            stdev = statistics.stdev(t, mean) if len(t) >= 2 else 0
+            median = statistics.median(t) if t else 0
+
+            stats.append((mean, stdev, median))
+
+        return stats
+
+    @property
+    def nbytes_send(self):
+        out = {}
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                out.setdefault(i, g.get_nbytes_send())
+        return out
+
+    @property
+    def nbytes_recv(self):
+        out = {}
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                out.setdefault(i, g.get_nbytes_recv())
+        return out
+
+    def rhs_wait_times_send(self):
+
+        # times_send[i][j] = list of dt ...
+        # ... for sends (local rank -> rank j) at stage i
+        times_send = defaultdict(lambda: [[] for _ in range(comm['compute'].size)])
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_send()  
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_send[i][rank_j].extend(dt_list)
+
+        stage_stats = []
+        num_stages = max(times_send.keys())+1 if times_send else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((comm['compute'].size, 3), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_send[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = s = d = 0
+                arr[rank_j] = [m, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats
+
+    def rhs_wait_times_recv(self):
+
+        times_recv = defaultdict(lambda: [[] for _ in range(comm['compute'].size)])
+
+        # Collect all per-stage data
+        for u, f in self._rhs_uin_fout:
+            for i, g in enumerate(self._rhs_graphs(u, f)):
+                list_of_lists = g.get_wait_times_recv()  
+                for rank_j, dt_list in enumerate(list_of_lists):
+                    times_recv[i][rank_j].extend(dt_list)
+
+        stage_stats = []
+        num_stages = max(times_recv.keys())+1 if times_recv else 0
+
+        for i in range(num_stages):
+            arr = np.zeros((comm['compute'].size, 3), dtype=np.float64)
+
+            for rank_j, dt_list in enumerate(times_recv[i]):
+                if dt_list:
+                    m = statistics.mean(dt_list)
+                    s = statistics.stdev(dt_list) if len(dt_list) >= 2 else 0
+                    d = statistics.median(dt_list)
+                else:
+                    m = s = d = 0
+                arr[rank_j] = [m, s, d]
+
+            stage_stats.append(arr)
+
+        return stage_stats
+
+    def rhs_all_times_median(self):
+        u, f = list(self._rhs_uin_fout)[-1]
+        g_list = tuple(self._rhs_graphs(u, f))
+        t = g_list[-2].get_all_times()
+        return statistics.median(t)
+
+    def rhs_wait_times_send_median(self):
+        P = comm['compute'].size
+
+        u, f = list(self._rhs_uin_fout)[-1]
+
+        # Per-destination medians
+        lsts = tuple(self._rhs_graphs(u, f))[-2].get_wait_times_send()
+        out = np.zeros(P, dtype=np.float64)
+        for j, dt in enumerate(lsts):
+            out[j] = statistics.median(dt) if dt else 0.0
+
+        return out
+
+    def rhs_wait_times_recv_median(self):
+        P = comm['compute'].size
+
+        u, f = list(self._rhs_uin_fout)[-1]
+
+        # Per-destination medians
+        lsts = tuple(self._rhs_graphs(u, f))[-2].get_wait_times_recv()
+        out = np.zeros(P, dtype=np.float64)
+        for j, dt in enumerate(lsts):
+            out[j] = statistics.median(dt) if dt else 0.0
+
+        return out
+
+    def _apply_tail_mask(self, arr: np.ndarray, accepted_mask) -> np.ndarray:
+        if accepted_mask is None:
+            return arr
+
+        m = np.asarray(accepted_mask, dtype=np.bool_)
+        if arr.shape[0] == 0 or m.size == 0:
+            return arr[:0]
+
+        k = min(arr.shape[0], m.size)
+        arr = arr[-k:]
+        m = m[-k:]
+
+        return arr[m]
+
+    def _rhs_last_uin_fout(self):
+        uinf = self._rhs_uin_fout
+
+        # Fast-path for sequences (list/tuple/deque)
+        try:
+            return uinf[-1]
+        except Exception:
+            pass
+
+        # Fallback for sets/iterables
+        vals = list(uinf)
+        if not vals:
+            raise RuntimeError('[lb-mask] _rhs_uin_fout is empty')
+
+        # If it is a set with multiple entries, selection is inherently arbitrary;
+        # warn once per call site if you want (optional).
+        return vals[-1]
+
+    def rhs_all_times_median(self, accepted_mask=None):
+        u, f = self._rhs_last_uin_fout()
+        g = tuple(self._rhs_graphs(u, f))[-2]
+
+        t = np.asarray(g.get_all_times(), dtype=np.float64)
+        t = self._apply_tail_mask(t, accepted_mask)
+
+        return float(np.median(t)) if t.size else 0.0
+
+
+    def rhs_wait_times_send_median(self, accepted_mask=None):
+        P = comm['compute'].size
+
+        u, f = self._rhs_last_uin_fout()
+        g = tuple(self._rhs_graphs(u, f))[-2]
+
+        # Reference attempt count for alignment
+        nref = len(g.get_all_times())
+
+        lsts = g.get_wait_times_send()
+        out = np.zeros(P, dtype=np.float64)
+
+        warned = False
+        for j, dt in enumerate(lsts):
+            if not dt:
+                out[j] = 0.0
+                continue
+
+            arr = np.asarray(dt, dtype=np.float64)
+
+            # Mask only if attempt-aligned; otherwise skip mask for this column
+            if accepted_mask is not None and arr.size != nref:
+                if not warned and comm['compute'].rank == 0:
+                    print(f"[lb-mask] NOTE: send[{j}] len(dt)={arr.size} != len(all)={nref}; "
+                        f"skipping mask for this column",
+                        flush=True)
+                    warned = True
+            else:
+                arr = self._apply_tail_mask(arr, accepted_mask)
+
+            out[j] = float(np.median(arr)) if arr.size else 0.0
+
+        return out
+
+
+    def rhs_wait_times_recv_median(self, accepted_mask=None):
+        P = comm['compute'].size
+
+        u, f = self._rhs_last_uin_fout()
+        g = tuple(self._rhs_graphs(u, f))[-2]
+
+        # Reference attempt count for alignment
+        nref = len(g.get_all_times())
+
+        lsts = g.get_wait_times_recv()
+        out = np.zeros(P, dtype=np.float64)
+
+        warned = False
+        for j, dt in enumerate(lsts):
+            if not dt:
+                out[j] = 0.0
+                continue
+
+            arr = np.asarray(dt, dtype=np.float64)
+
+            # Mask only if attempt-aligned; otherwise skip mask for this column
+            if accepted_mask is not None and arr.size != nref:
+                if not warned and comm['compute'].rank == 0:
+                    print(f"[lb-mask] NOTE: recv[{j}] len(dt)={arr.size} != len(all)={nref}; "
+                        f"skipping mask for this column",
+                        flush=True)
+                    warned = True
+            else:
+                arr = self._apply_tail_mask(arr, accepted_mask)
+
+            out[j] = float(np.median(arr)) if arr.size else 0.0
+
+        return out
+
 
     def _compute_grads_graph(self, t, uinbank):
         raise NotImplementedError(f'Solver "{self.name}" does not compute '

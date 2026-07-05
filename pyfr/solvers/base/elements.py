@@ -107,6 +107,28 @@ class BaseElements:
         for i, v in enumerate(self.pri_to_con(ics, self.cfg)):
             self.scal_upts[:, i, :] = m8 @ v if m8 is not None else v
 
+    def recreate_soln(self, solnmat):
+
+        # If super-order exists, replace order with super-order in cfg
+        if self.cfg.hasopt('solver', 'super-order'):
+            self.cfg.set('solver', 'order',
+                         self.cfg.getint('solver', 'super-order'))
+
+        # Recreate the existing solution basis
+        solnb = self.basis.__class__(None, self.cfg)
+
+        # Form the interpolation operator
+        interp = solnb.ubasis.nodal_basis_at(self.basis.upts)
+
+        # Sizes
+        nupts, neles, nvars = self.nupts, self.neles, self.nvars
+
+        # Apply and reshape
+        self.scal_upts = interp @ solnmat.reshape(solnb.nupts, -1)
+        self.scal_upts = self.scal_upts.reshape(nupts, nvars, neles)
+
+        #self.scal_upts = solnmat.reshape(self.nupts, self.nvars, self.neles)
+
     def set_ics_from_soln(self, solnmat, solncfg):
         # Recreate the existing solution basis
         solnb = self.basis.__class__(None, solncfg)

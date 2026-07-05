@@ -66,6 +66,20 @@ class BaseBackend:
         # Mapping from backend objects to memory extents
         self._obj_extents = WeakKeyDictionary()
 
+    def __call__(self):
+
+        # Allocated matrices
+        self.mats = WeakValueDictionary()
+        self._mat_counter = count()
+
+        # Aliases and extents
+        self._pend_aliases = {}
+        self._pend_extents = defaultdict(list)
+        self._comm_extents = set()
+
+        # Mapping from backend objects to memory extents
+        self._obj_extents = WeakKeyDictionary()
+
     @cached_property
     def lookup(self):
         pkg = f'pyfr.backends.{self.name}.kernels'
@@ -187,8 +201,8 @@ class BaseBackend:
         return self.view_cls(self, matmap, rmap, cmap, rstridemap, vshape,
                              tags)
 
-    def xchg_view(self, matmap, rmap, cmap, rstridemap=None, vshape=(),
-                  tags=set()):
+    def xchg_view(self, matmap, rmap, cmap, rstridemap=None, vshape=(), tags=None):
+        tags=set(tags or ())
         return self.xchg_view_cls(self, matmap, rmap, cmap, rstridemap,
                                   vshape, tags)
 
