@@ -95,11 +95,7 @@ class TurbulencePlugin(BaseSolverPlugin):
             'beta2': beta2, 'beta3': beta3, 'rot': rot, 'shift': shift
         }
 
-        self.vortexbuf = self._get_vortex_buf()
-        self.vortexdata = self._get_vortex_data(intg)
-
-        if not self.vortexdata:
-            self.tnext = float('inf')
+        self._bind_system(intg)
 
     def __call__(self, intg):
         if intg.tcurr + intg.dt < self.tnext:
@@ -224,6 +220,9 @@ class TurbulencePlugin(BaseSolverPlugin):
 
             # Find (vortex, element) pairs whose bounding boxes overlap
             nvort = len(self.vortexbuf)
+            if not nvort:
+                continue
+
             vy, vz = self.vortexbuf.yinit, self.vortexbuf.zinit
             vmins = np.column_stack([np.full(nvort, -2*ls), vy - ls, vz - ls])
             vmaxs = np.column_stack([np.full(nvort, 2*ls), vy + ls, vz + ls])
@@ -237,6 +236,9 @@ class TurbulencePlugin(BaseSolverPlugin):
 
             # x-extent of interior points determines convection window
             ok = np.any(in_box, axis=0)
+            if not np.any(ok):
+                continue
+
             xm = np.where(in_box, pp[:, :, 0], np.nan)
             xvmin = np.nanmin(xm[:, ok], axis=0)
             xvmax = np.nanmax(xm[:, ok], axis=0)
@@ -249,8 +251,12 @@ class TurbulencePlugin(BaseSolverPlugin):
                               tinit + 2*ls / avgu)
             te = np.maximum(ts, tend)
 
+            # Discard element-local events which have already expired
+            live = te > self.tbegin
+            elarr = eids[ids[ok]][live]
+            tinit, state, ts, te = (a[live] for a in [tinit, state, ts, te])
+
             # Group events by element into sorted stream arrays
-            elarr = eids[ids[ok]]
             order = np.argsort(elarr, kind='stable')
             elarr, tinit, state, ts, te = (a[order] for a in
                                            [elarr, tinit, state, ts, te])
@@ -268,6 +274,20 @@ class TurbulencePlugin(BaseSolverPlugin):
             data[etype] = self._commit_vortex_data(intg.backend, eles, strms)
 
         return data
+
+    def _bind_system(self, intg):
+        self.vortexbuf = self._get_vortex_buf()
+        self.vortexdata = self._get_vortex_data(intg)
+
+        if self.vortexdata:
+            self.tnext = intg.tcurr
+            self(intg)
+        else:
+            self.tnext = float('inf')
+
+    def post_rebalance(self, intg, exchangers):
+        self.tbegin = intg.tcurr
+        self._bind_system(intg)
 
     def _commit_vortex_data(self, backend, eles, strms):
         neles = eles.neles

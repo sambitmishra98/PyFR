@@ -9,7 +9,7 @@ from pyfr.backends.base import NullKernel
 from pyfr.cache import memoize
 from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
 from pyfr.shapes import BaseShape
-from pyfr.util import subclasses
+from pyfr.util import subclass_where, subclasses
 
 
 class BaseSystem:
@@ -25,7 +25,8 @@ class BaseSystem:
     _extra_kern_parts = {}
     _extra_mpi_parts = []
 
-    def __init__(self, backend, mesh, initsoln, registers, cfg, serialiser):
+    def __init__(self, backend, mesh, initsoln, registers, cfg, serialiser,
+                 *, bases=None):
         self.backend = backend
         self.mesh = mesh
         self.cfg = cfg
@@ -50,7 +51,7 @@ class BaseSystem:
         self.nonce = nonce = str(next(self._nonce_seq))
 
         # Load the elements
-        eles, elemap, ics = self._load_eles(mesh, initsoln, nonce)
+        eles, elemap, ics = self._load_eles(mesh, initsoln, nonce, bases)
         backend.commit()
 
         # Retain the element map; this may be deleted by clients
@@ -61,6 +62,12 @@ class BaseSystem:
         self.ele_ndofs = [e.neles*e.nupts*e.nvars for e in eles]
         self.ele_shapes = {etype: (e.nupts, e.nvars, e.neles)
                            for etype, e in elemap.items()}
+
+        # Also obtain the shapes of element types not in our rank
+        for etype in [et for et in mesh.etypes if et not in elemap]:
+            shapecls = subclass_where(BaseShape, name=etype)
+            nupts = shapecls.npts_from_order(cfg.getint('solver', 'order'))
+            self.ele_shapes[etype] = (nupts, self.nvars, 0)
 
         # Get all the solution point locations for the elements
         self.ele_ploc_upts = [e.ploc_at_np('upts') for e in eles]
@@ -211,6 +218,10 @@ class BaseSystem:
         self.has_src_macros = any(eles.has_src_macros
                                   for eles in self.ele_map.values())
 
+        # Cache the bases before deleting ele_map
+        self.ele_bases = {et: e.basis
+                          for et, e in self.ele_map.items()}
+
         # Delete the memory-intensive ele_map and interface objects
         del self.ele_map
         del self._int_inters
@@ -222,11 +233,20 @@ class BaseSystem:
         # Observed input/output bank numbers
         self._rhs_uin_fout = set()
 
-    def _load_eles(self, mesh, initsoln, nonce):
-        basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
+    def _load_eles(self, mesh, initsoln, nonce, bases=None):
+        basisclsmap = {b.name: b for b in subclasses(BaseShape,
+                                                     just_leaf=True)}
+        bases = bases or {}
+
+        def basis_for(etype, spts):
+            if etype in bases:
+                return bases[etype]
+            else:
+                return basisclsmap[etype](spts.shape[0], self.cfg)
 
         # Load the elements
-        elemap = {etype: self.elementscls(basismap[etype], spts, self.cfg)
+        elemap = {etype: self.elementscls(basis_for(etype, spts), spts,
+                                          self.cfg)
                   for etype, spts in mesh.spts.items()}
 
         eles = list(elemap.values())
@@ -443,6 +463,47 @@ class BaseSystem:
 
     def postproc(self, uinbank):
         pass
+
+    def element_cost_classes(self):
+        etypes = sorted(et for et in self.ele_types if et in self.mesh.spts)
+
+        names = list(etypes)
+        counts = []
+        static = []
+        for et in etypes:
+            counts.append(len(self.mesh.eidxs[et]))
+            static.append(float(self.ele_shapes[et][0]))
+
+        return names, counts, static
+
+    def pop_wait_time(self):
+        total = 0.0
+        for u, f in self._rhs_uin_fout:
+            for g in self._rhs_graphs(u, f):
+                total += g.pop_wait_time()
+        return total
+
+    def pop_gpu_elapsed(self):
+        total = None
+        for u, f in self._rhs_uin_fout:
+            for g in self._rhs_graphs(u, f):
+                ge = g.pop_gpu_elapsed()
+                if ge is not None:
+                    total = (total or 0.0) + ge
+        return total
+
+    def pop_per_neighbour_wait(self):
+        merged = {}
+        for u, f in self._rhs_uin_fout:
+            for g in self._rhs_graphs(u, f):
+                for peer, t in g.pop_per_neighbour_wait().items():
+                    merged[peer] = merged.get(peer, 0.0) + t
+        return merged
+
+    def set_mpi_timing_mode(self, mode):
+        for u, f in self._rhs_uin_fout:
+            for g in self._rhs_graphs(u, f):
+                g.set_mpi_timing_mode(mode)
 
     def rhs_wait_times(self):
         # Group together timings for graphs which are semantically equivalent

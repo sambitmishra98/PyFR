@@ -46,6 +46,12 @@ class Mesh:
     node_locs: np.ndarray = None
     shared_nodes: object = None
 
+    # Raw per-element structured arrays
+    eles: dict = field(default_factory=dict)
+
+    # MPI topology for this rank
+    neighbours: object = None
+
 
 @dataclass
 class Solution:
@@ -86,6 +92,251 @@ class Connectivity:
         for etype, fidx, eidxs, mask in self.foreach():
             result[mask] = data[etype][eidxs]
         return result
+
+
+def parse_codec(codec, etypes):
+    cidxmap = {}
+    cetmap = np.full(len(codec), -1, dtype=np.int16)
+
+    for cidx, c in enumerate(codec):
+        if (m := re.match(r'eles/(\w+)/face/(\d+)$', c)):
+            cidxmap[cidx] = etype, fidx = m[1], int(m[2])
+            cetmap[cidx] = etypes.index(etype)
+
+    return cidxmap, cetmap
+
+
+def build_g2l(etypes, eidxs):
+    g2l = {}
+    for etype in etypes:
+        if (gi := eidxs.get(etype)) is not None:
+            perm = np.argsort(gi)
+            g2l[etype] = (gi, gi[perm], perm)
+    return g2l
+
+
+def flatten_faces(codec, eles, g2l):
+    parts = []
+    for etype, einfo in eles.items():
+        gi = g2l[etype][0]
+        for fidx, eface in enumerate(einfo['faces'].T):
+            efcidx = codec.index(f'eles/{etype}/face/{fidx}')
+            n = len(eface)
+            parts.append((np.broadcast_to(np.int16(efcidx), n),
+                          np.arange(n), gi, eface['cidx'], eface['off']))
+
+    if not parts:
+        empty = np.array([], dtype=int)
+        return empty, empty, empty, empty, empty
+    else:
+        return tuple(map(np.concatenate, zip(*parts)))
+
+
+def _pair_finder(lhs, stride):
+    keys = lhs.cidx.astype(int)*stride + lhs.idx
+    sord = np.argsort(keys)
+
+    def find(rec):
+        qkeys = rec['cidx'].astype(int)*stride + rec['idx']
+        pos = np.searchsorted(keys, qkeys, sorter=sord)
+        idx = np.take(sord, pos, mode='clip')
+        return idx[keys[idx] == qkeys]
+
+    return find
+
+
+def read_eles(comm, f, etypes, eidxs):
+    eles = {}
+    for etype in etypes:
+        idxs = np.asarray(eidxs.get(etype, []), dtype=int)
+        einfo = Scatterer(comm, idxs)(f[f'eles/{etype}'])
+        if len(idxs):
+            eles[etype] = einfo
+    return eles
+
+
+def read_nodes(comm, f, mesh, eles):
+    if not eles:
+        return
+
+    enodes = [eles[et]['nodes'] for et in eles]
+    idxs = np.concatenate([en.ravel() for en in enodes])
+    nodes = Scatterer(comm, idxs)(f['nodes'])
+
+    unique_idxs, first_occ = np.unique(idxs, return_index=True)
+    mesh.node_idxs = unique_idxs
+    mesh.node_valency = nodes['valency'][first_occ]
+    mesh.node_locs = nodes['location'][first_occ]
+
+    eoffs = np.cumsum([eles[et]['nodes'].size for et in eles])
+    for (etype, einfo), n in zip(eles.items(),
+                                 np.split(nodes['location'], eoffs[:-1])):
+        spts = n.reshape(*einfo['nodes'].shape, -1).swapaxes(0, 1)
+        mesh.spts[etype] = spts
+        mesh.spts_nodes[etype] = einfo['nodes']
+        mesh.spts_curved[etype] = einfo['curved']
+        mesh.colours[etype] = einfo['colour']
+        mesh.tags[etype] = einfo['tags']
+
+
+def sort_eles(mesh, eles):
+    _, cetmap = parse_codec(mesh.codec, mesh.etypes)
+    g2l = build_g2l(mesh.etypes, mesh.eidxs)
+
+    perm = {}
+    for etype, einfo in eles.items():
+        neles = len(einfo)
+        internal = np.ones(neles, dtype=bool)
+
+        for eface in einfo['faces'].T:
+            rcidx, rgidx = eface['cidx'], eface['off']
+            non_bnd = rgidx != -1
+            local = np.zeros(neles, dtype=bool)
+
+            for etidx, et in enumerate(mesh.etypes):
+                if et not in g2l:
+                    continue
+                m = (cetmap[rcidx] == etidx) & non_bnd
+                if not np.any(m):
+                    continue
+                ordgi = g2l[et][1]
+                pos = np.searchsorted(ordgi, rgidx[m])
+                pos = np.clip(pos, 0, max(len(ordgi) - 1, 0))
+                local[m] = ordgi[pos] == rgidx[m]
+
+            internal[non_bnd & ~local] = False
+
+        order = np.lexsort((~einfo['curved'], internal))
+        if not np.array_equal(order, np.arange(neles)):
+            eles[etype] = einfo[order]
+            mesh.eidxs[etype] = mesh.eidxs[etype][order]
+            perm[etype] = order
+
+    return perm
+
+
+def construct_con(mesh, eles, *, neighbours=None, etype_owner=None):
+    comm, rank, root = get_comm_rank_root()
+
+    cidxmap, cetmap = parse_codec(mesh.codec, mesh.etypes)
+    mesh.cidxmap = cidxmap
+
+    g2l = build_g2l(mesh.etypes, mesh.eidxs)
+    lcidx, leidx, lgidx, rcidx, rgidx = flatten_faces(
+        mesh.codec, eles, g2l
+    )
+
+    # Global-to-local lookup for rhs element-neighbour faces
+    reidx = np.full(len(lcidx), -1)
+    for etidx, etype in enumerate(mesh.etypes):
+        if etype not in g2l:
+            continue
+        ordgi, perm = g2l[etype][1:]
+        mask = cetmap[rcidx] == etidx
+        offs = rgidx[mask]
+        pos = np.searchsorted(ordgi, offs)
+        pos = np.clip(pos, 0, len(ordgi) - 1)
+        reidx[mask] = np.where(ordgi[pos] == offs, perm[pos], -1)
+
+    # Classify interfaces
+    is_boundary, is_local = rgidx == -1, reidx >= 0
+    is_mpi = ~(is_boundary | is_local)
+
+    # Deduplicate internal interfaces
+    lkey = lcidx[is_local].astype(int)
+    rkey = rcidx[is_local].astype(int)
+    if len(lkey):
+        stride = max(leidx[is_local].max(),
+                     reidx[is_local].max()) + 1
+        lkey = lkey*stride + leidx[is_local]
+        rkey = rkey*stride + reidx[is_local]
+    iidxs = np.flatnonzero(is_local)[lkey < rkey]
+
+    con = lambda c, e: Connectivity(c, e, cidxmap)
+    mesh.con = (con(lcidx[iidxs], leidx[iidxs]),
+                con(rcidx[iidxs], reidx[iidxs]))
+
+    # Boundary connectivity
+    for bccidx in np.unique(rcidx[is_boundary]):
+        name = mesh.codec[bccidx][3:]
+        bmask = rcidx == bccidx
+        mesh.bcon[name] = con(lcidx[bmask], leidx[bmask])
+
+    # MPI connectivity
+    if np.any(is_mpi) and comm.size > 1:
+        # Discover neighbours if not already known
+        if neighbours is None:
+            nbr_set = set()
+            mpi_rcidx = rcidx[is_mpi]
+            mpi_rgidx = rgidx[is_mpi]
+
+            for etype in mesh.etypes:
+                emask = np.zeros(len(mpi_rcidx), dtype=bool)
+                for cidx_val, (et, _) in cidxmap.items():
+                    if et == etype:
+                        emask |= mpi_rcidx == cidx_val
+
+                qidxs = mpi_rgidx[emask] if np.any(emask) else (
+                    np.empty(0, dtype=int)
+                )
+                owners = etype_owner[etype].lookup(qidxs)
+                nbr_set.update(owners[owners >= 0].tolist())
+
+            nbr_set.discard(rank)
+            neighbours = np.sort(
+                np.array(list(nbr_set), dtype=int)
+            )
+
+        mesh.neighbours = neighbours
+
+        dt = [('cidx', np.int16), ('idx', int)]
+        lhs = np.rec.fromarrays(
+            [lcidx[is_mpi], lgidx[is_mpi]], dtype=dt
+        )
+        rhs = np.rec.fromarrays(
+            [rcidx[is_mpi], rgidx[is_mpi]], dtype=dt
+        )
+        stride = max(
+            len(mesh.raw[f'eles/{et}']) for et in mesh.etypes
+        )
+
+        _construct_mpi_con(mesh, g2l, cetmap, cidxmap, lhs, rhs,
+                           stride, neighbours)
+    else:
+        mesh.neighbours = np.array([], dtype=int)
+
+
+def _construct_mpi_con(mesh, g2l, cetmap, cidxmap, lhs, rhs,
+                       stride, neighbours):
+    comm, rank, root = get_comm_rank_root()
+
+    ncomm = autofree(
+        comm.Create_dist_graph_adjacent(neighbours, neighbours)
+    )
+
+    find = _pair_finder(lhs, stride)
+
+    matches = [rhs[find(u)] for u in ncomm.neighbor_allgather(rhs)]
+    nmatches = ncomm.neighbor_alltoall(matches)
+
+    etypes = mesh.etypes
+    for nrank, nmatch in zip(neighbours, nmatches):
+        idx = find(nmatch)
+
+        ref = rhs if rank < nrank else lhs
+        idx = idx[np.lexsort((ref.idx[idx], ref.cidx[idx]))]
+
+        cidxs = lhs.cidx[idx]
+        etidxs = cetmap[lhs.cidx[idx]]
+
+        eidxs = np.empty(len(idx), dtype=int)
+        for ti in np.unique(etidxs):
+            ordgi, perm = g2l[etypes[ti]][1:]
+            mask = etidxs == ti
+            pos = np.searchsorted(ordgi, lhs.idx[idx[mask]])
+            eidxs[mask] = perm[pos]
+
+        mesh.con_p[nrank] = Connectivity(cidxs, eidxs, cidxmap)
 
 
 class NativeReader:
@@ -345,199 +596,26 @@ class NativeReader:
         self.mesh.eidxs = {et: pe for et, pe in zip(etypes, peles) if pe.size}
 
     def _read_eles(self):
-        self.eles, self.escatter = eles, escatter = {}, {}
+        comm, rank, root = get_comm_rank_root()
+        self.mesh.eles = read_eles(comm, self.f, self.mesh.etypes,
+                                   self.mesh.eidxs)
+        self.eles = self.mesh.eles
 
-        # Collectively read in and distribute each element array
+        # Also build per-etype scatterers for solution loading
+        self.escatter = {}
         for etype in self.mesh.etypes:
-            dset = self.f[f'eles/{etype}']
             idxs = self.mesh.eidxs.get(etype, [])
-            einfo, escatter[etype] = self._read_with_idxs(dset, idxs)
-
-            # If we have any elements of this type then save the einfo
-            if len(idxs):
-                eles[etype] = einfo
+            self.escatter[etype] = Scatterer(comm, idxs)
 
     def _read_nodes(self):
-        enodes = [einfo['nodes'] for einfo in self.eles.values()]
-
-        # Determine the overall set of nodes across all element types
-        idxs = np.concatenate([en.ravel() for en in enodes])
-
-        # Note how many dimensions we have
+        comm, rank, root = get_comm_rank_root()
         self.mesh.ndims = self.f['nodes'].dtype['location'].shape[0]
-
-        # Read in these nodes
-        nodes = self._read_with_idxs(self.f['nodes'], idxs.ravel())[0]
-
-        # Store unique node indices, valency, and locations for vertices
-        unique_idxs, first_occ = np.unique(idxs, return_index=True)
-        self.mesh.node_idxs = unique_idxs
-        self.mesh.node_valency = nodes['valency'][first_occ]
-        self.mesh.node_locs = nodes['location'][first_occ]
-
-        # Determine where each element type is in the nodes array
-        eoffs = np.cumsum([en.size for en in enodes])
-
-        # Use this to split the nodes array back up
-        locs = np.split(nodes['location'], eoffs[:-1])
-
-        # Reshape and add to the mesh
-        for (etype, einfo), n in zip(self.eles.items(), locs):
-            spts = n.reshape(*einfo['nodes'].shape, -1).swapaxes(0, 1)
-
-            self.mesh.spts[etype] = spts
-            self.mesh.spts_nodes[etype] = einfo['nodes']
-            self.mesh.spts_curved[etype] = einfo['curved']
-            self.mesh.colours[etype] = einfo['colour']
-            self.mesh.tags[etype] = einfo['tags']
-
-    def _parse_codec(self):
-        codec = self.mesh.codec
-        ncodec = len(codec)
-
-        cidxmap = {}
-        cetmap = np.full(ncodec, -1, dtype=np.int16)
-
-        for cidx, c in enumerate(codec):
-            if (m := re.match(r'eles/(\w+)/face/(\d+)$', c)):
-                cidxmap[cidx] = etype, fidx = m[1], int(m[2])
-                cetmap[cidx] = self.mesh.etypes.index(etype)
-
-        self.mesh.cidxmap = cidxmap
-        return cidxmap, cetmap
-
-    @staticmethod
-    def _pack_pairs(*pairs):
-        stride = max(o.max(initial=-1) for _, o in pairs) + 1
-        return [c*stride + o for c, o in pairs]
-
-    @staticmethod
-    def _pair_finder(lhs, stride):
-        # Pack (cidx, idx) pairs into flat keys for binary search
-        keys = lhs.cidx.astype(int)*stride + lhs.idx
-        sord = np.argsort(keys)
-
-        def find(rec):
-            qkeys = rec['cidx'].astype(int)*stride + rec['idx']
-            pos = np.searchsorted(keys, qkeys, sorter=sord)
-            idx = np.take(sord, pos, mode='clip')
-            return idx[keys[idx] == qkeys]
-
-        return find
-
-    def _build_g2l(self):
-        g2l = {}
-
-        for etype in self.mesh.etypes:
-            if (gi := self.mesh.eidxs.get(etype)) is not None:
-                perm = np.argsort(gi)
-                g2l[etype] = (gi, gi[perm], perm)
-
-        return g2l
-
-    def _flatten_faces(self, g2l):
-        codec = self.mesh.codec
-        parts = []
-        for etype, einfo in self.eles.items():
-            gi = g2l[etype][0]
-            for fidx, eface in enumerate(einfo['faces'].T):
-                n = len(eface)
-                efcidx = codec.index(f'eles/{etype}/face/{fidx}')
-                parts.append((np.broadcast_to(np.int16(efcidx), n),
-                              np.arange(n), gi, eface['cidx'], eface['off']))
-
-        return map(np.concatenate, zip(*parts))
+        read_nodes(comm, self.f, self.mesh, self.eles)
 
     def _construct_con(self):
-        cidxmap, cetmap = self._parse_codec()
-        g2l = self._build_g2l()
-        lcidx, leidx, lgidx, rcidx, rgidx = self._flatten_faces(g2l)
-
-        # Global-to-local lookup for rhs element-neighbour faces
-        reidx = np.full(len(lcidx), -1)
-        for etidx, etype in enumerate(self.mesh.etypes):
-            if etype not in g2l:
-                continue
-
-            ordgi, perm = g2l[etype][1:]
-
-            # Select rhs faces whose neighbour is this element type
-            mask = cetmap[rcidx] == etidx
-            offs = rgidx[mask]
-
-            # Map global element numbers to partition local numbers
-            pos = np.searchsorted(ordgi, offs)
-            pos = np.clip(pos, 0, len(ordgi) - 1)
-            reidx[mask] = np.where(ordgi[pos] == offs, perm[pos], -1)
-
-        # Classify interfaces
-        is_boundary, is_local = rgidx == -1, reidx >= 0
-        is_mpi = ~(is_boundary | is_local)
-
-        # Deduplicate internal interfaces
-        lkey, rkey = self._pack_pairs((lcidx[is_local], leidx[is_local]),
-                                      (rcidx[is_local], reidx[is_local]))
-        iidxs = np.flatnonzero(is_local)[lkey < rkey]
-
-        con = lambda c, e: Connectivity(c, e, cidxmap)
-        self.mesh.con = (con(lcidx[iidxs], leidx[iidxs]),
-                         con(rcidx[iidxs], reidx[iidxs]))
-
-        # Boundary connectivity
-        for bccidx in np.unique(rcidx[is_boundary]):
-            name = self.mesh.codec[bccidx][3:]
-            bmask = rcidx == bccidx
-            self.mesh.bcon[name] = con(lcidx[bmask], leidx[bmask])
-
-        # MPI connectivity
-        if np.any(is_mpi):
-            dt = [('cidx', np.int16), ('idx', int)]
-            lhs = np.rec.fromarrays([lcidx[is_mpi], lgidx[is_mpi]], dtype=dt)
-            rhs = np.rec.fromarrays([rcidx[is_mpi], rgidx[is_mpi]], dtype=dt)
-
-            # Stride for packing (cidx, idx) into collision-free keys
-            stride = max(len(self.f[f'eles/{et}']) for et in self.mesh.etypes)
-
-            self._construct_mpi_con(g2l, cetmap, cidxmap, lhs, rhs, stride)
-
-    def _construct_mpi_con(self, g2l, cetmap, cidxmap, lhs, rhs, stride):
-        comm, rank, root = get_comm_rank_root()
-
-        # Create a neighbourhood collective communicator
-        ncomm = autofree(comm.Create_dist_graph_adjacent(self.neighbours,
-                                                         self.neighbours))
-
-        # Build a lookup to match (cidx, offset) pairs against lhs faces
-        find = self._pair_finder(lhs, stride)
-
-        # See which of our neighbours' unpaired faces we have
-        matches = [rhs[find(u)] for u in ncomm.neighbor_allgather(rhs)]
-
-        # Distribute this information back to our neighbours
-        nmatches = ncomm.neighbor_alltoall(matches)
-
-        etypes = self.mesh.etypes
-        for nrank, nmatch in zip(self.neighbours, nmatches):
-            # Find which of our lhs faces match this neighbour
-            idx = find(nmatch)
-
-            # Both ranks must agree on face ordering; sort by the
-            # lower-ranked side so each rank's pairing is consistent
-            ref = rhs if rank < nrank else lhs
-            idx = idx[np.lexsort((ref.idx[idx], ref.cidx[idx]))]
-
-            # Codec and element type indices for matched faces
-            cidxs, etidxs = lhs.cidx[idx], cetmap[lhs.cidx[idx]]
-
-            # Convert global element offsets to partition-local indices
-            eidxs = np.empty(len(idx), dtype=int)
-            for ti in np.unique(etidxs):
-                ordgi, perm = g2l[etypes[ti]][1:]
-                mask = etidxs == ti
-                pos = np.searchsorted(ordgi, lhs.idx[idx[mask]])
-                eidxs[mask] = perm[pos]
-
-            self.mesh.con_p[nrank] = Connectivity(cidxs, eidxs, cidxmap)
+        self.mesh.neighbours = np.asarray(self.neighbours)
+        construct_con(self.mesh, self.eles,
+                      neighbours=self.mesh.neighbours)
 
     def _construct_shared_nodes(self):
         snf = SharedNodesFinder(self.eles, self.mesh.node_idxs,

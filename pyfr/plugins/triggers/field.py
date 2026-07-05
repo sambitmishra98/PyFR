@@ -32,12 +32,17 @@ class FieldTriggerSource(BaseTriggerSource):
         if red == 'l2norm':
             expr = f'({expr})*({expr})'
 
-        self._freduce = BackendFieldReducer(intg.backend, cfg, cfgsect, intg,
-                                            [expr], reduceop)
+        self._expr = expr
+        self._reduceop = reduceop
+        self._bind_system(intg)
         self._last_result = False
 
-        # Precompute the global total volume for avg reductions
-        if red == 'avg':
+    def _bind_system(self, intg):
+        self._freduce = BackendFieldReducer(intg.backend, self.cfg,
+                                            self.cfgsect, intg, [self._expr],
+                                            self._reduceop)
+
+        if self._red_name == 'avg':
             comm, _, _ = get_comm_rank_root()
             local_vol = self._freduce.total_volume()
             self._total_vol = scal_coll(comm.Allreduce, local_vol)
@@ -60,3 +65,6 @@ class FieldTriggerSource(BaseTriggerSource):
 
         self._last_result = self._cmp(val, self._threshold)
         return self._last_result
+
+    def post_rebalance(self, intg, exchangers):
+        self._bind_system(intg)

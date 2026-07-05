@@ -1,9 +1,10 @@
 from pyfr.integrators.base import StepInfo
 from pyfr.integrators.controllers import CFLControllerMixin, PIControllerMixin
 from pyfr.integrators.explicit.base import BaseExplicitIntegrator
+from pyfr.integrators.rebalance import RebalanceMixin
 
 
-class BaseExplicitController(BaseExplicitIntegrator):
+class BaseExplicitController(RebalanceMixin, BaseExplicitIntegrator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -25,6 +26,9 @@ class BaseExplicitController(BaseExplicitIntegrator):
 
         # Run any plugins
         self._run_plugins()
+
+        # Check for rebalance
+        self._rebal_check()
 
         # Clear the step info
         self.stepinfo = []

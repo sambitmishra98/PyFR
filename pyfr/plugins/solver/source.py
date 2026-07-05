@@ -20,12 +20,21 @@ class SourcePlugin(BaseSolverPlugin):
         subs |= dict(abs='fabs', pi=math.pi)
         subs |= {v: f'u[{i}]' for i, v in enumerate(convars)}
 
-        src_exprs = [self.cfg.getexpr(cfgsect, v, subs=subs) for v in convars]
+        self.src_exprs = [self.cfg.getexpr(cfgsect, v, subs=subs)
+                          for v in convars]
 
-        ploc_in_src = any(re.search(r'\bploc\b', ex) for ex in src_exprs)
-        soln_in_src = any(re.search(r'\bu\b', ex) for ex in src_exprs)
+        self.ploc_in_src = any(re.search(r'\bploc\b', ex)
+                               for ex in self.src_exprs)
+        self.soln_in_src = any(re.search(r'\bu\b', ex)
+                               for ex in self.src_exprs)
 
+        self._bind_system(intg)
+
+    def _bind_system(self, intg):
         for etype, eles in intg.system.ele_map.items():
             eles.add_src_macro('pyfr.plugins.solver.kernels.source', 'source',
-                               {'src_exprs': src_exprs}, ploc=ploc_in_src,
-                               soln=soln_in_src)
+                               {'src_exprs': self.src_exprs},
+                               ploc=self.ploc_in_src, soln=self.soln_in_src)
+
+    def post_rebalance(self, intg, exchangers):
+        self._bind_system(intg)

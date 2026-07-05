@@ -4,7 +4,7 @@ import numpy as np
 from rtree.index import Index, Property
 
 from pyfr.cache import memoize
-from pyfr.mpiutil import autofree, get_comm_rank_root, get_start_end_csize, mpi
+from pyfr.mpiutil import get_comm_rank_root, get_start_end_csize, mpi
 from pyfr.polys import get_polybasis
 from pyfr.shapes import BaseShape
 from pyfr.util import subclass_where
@@ -135,21 +135,24 @@ class PointLocator:
 
         return lmask
 
-    @memoize
     def _get_minloc_op(self, dtype, ndim):
         def op(pmem, qmem, dt):
             p = np.frombuffer(pmem, dtype=dtype)
             q = np.frombuffer(qmem, dtype=dtype)
-            m = self._minloc_mask(p, q, ndim)
+            m = PointLocator._minloc_mask(p, q, ndim)
             q[m] = p[m]
 
-        return autofree(mpi.Op.Create(op, commute=False))
+        return mpi.Op.Create(op, commute=False)
 
     def _minloc(self, coll, x, y, ndim=None):
         sbuf = (x, mpi.BYTE) if x is not mpi.IN_PLACE else x
         rbuf = (y, mpi.BYTE)
+        op = self._get_minloc_op(y.dtype, ndim)
 
-        coll(sbuf, rbuf, op=self._get_minloc_op(y.dtype, ndim))
+        try:
+            coll(sbuf, rbuf, op=op)
+        finally:
+            op.free()
 
     @memoize
     def _get_nodes_off_tree(self):

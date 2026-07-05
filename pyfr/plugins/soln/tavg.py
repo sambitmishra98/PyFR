@@ -41,8 +41,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
     def __init__(self, intg, cfgsect, suffix=None):
         super().__init__(intg, cfgsect, suffix)
 
-        comm, rank, root = get_comm_rank_root()
-
         # Initialise backend infrastructure
         self._init_backend(intg)
 
@@ -70,20 +68,14 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
             raise ValueError('Invalid floating point data type')
 
         # Base output directory and file name
-        basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
-        basename = self.cfg.get(cfgsect, 'basename')
-
-        # Get the element map and region data
-        emap, erdata = intg.system.ele_map, self._ele_region_data
-
-        # Figure out the shape of each element type in our region
-        ershapes = {etype: (nfields, emap[etype].nupts) for etype in erdata}
+        self.basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
+        self.basename = self.cfg.get(cfgsect, 'basename')
 
         # Construct the file writer
         self._writer = NativeWriter.from_integrator(
-            intg, basedir, basename, 'tavg', fpdtype=self.fpdtype
+            intg, self.basedir, self.basename, 'tavg',
+            fpdtype=self.fpdtype
         )
-        self._writer.set_shapes_eidxs(ershapes, erdata, self.field_groups)
 
         # Asynchronous output options
         self._async_timeout = self.cfg.getfloat(cfgsect, 'async-timeout', 60)
@@ -92,6 +84,8 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
         self._has_grads = bool(set().union(*(
             re.findall(r'\bgrad_(.+?)_[xyz]\b', ex) for ex in self.aexprs
         )))
+
+        self._bind_system(intg)
 
         # Time averaging parameters
         self.dtout = self.cfg.getfloat(cfgsect, 'dt-out')
@@ -104,15 +98,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
         # Mark ourselves as not currently averaging
         self._started = False
 
-        # Determine total region points and per-type view usage
-        self.tpts, self._use_views = 0, {}
-        for etype, eidxs in self._ele_region_data.items():
-            self.tpts += len(eidxs)*emap[etype].nupts
-            self._use_views[etype] = len(eidxs) < emap[etype].neles
-
-        # Reduce
-        self.tpts = comm.reduce(self.tpts, op=mpi.SUM, root=root)
-
         # Check if we are restarting
         if intg.isrestart:
             self.tout_last = intg.tcurr
@@ -121,6 +106,26 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
 
         # Initialize JIT kernel infrastructure
         self._init_kernels(intg)
+
+    def _bind_system(self, intg):
+        comm, _, root = get_comm_rank_root()
+
+        self._init_region(intg)
+        emap, erdata = intg.system.ele_map, self._ele_region_data
+
+        # Figure out the shape of each element type in our region
+        nfields = sum(len(v) for v in self.field_groups.values())
+        ershapes = {etype: (nfields, emap[etype].nupts) for etype in erdata}
+        self._writer.set_shapes_eidxs(ershapes, erdata, self.field_groups)
+
+        # Determine total region points and per-type view usage
+        self.tpts, self._use_views = 0, {}
+        for etype, eidxs in self._ele_region_data.items():
+            self.tpts += len(eidxs)*emap[etype].nupts
+            self._use_views[etype] = len(eidxs) < emap[etype].neles
+
+        # Reduce
+        self.tpts = comm.reduce(self.tpts, op=mpi.SUM, root=root)
 
     def _prepare_exprs(self):
         cfg, cfgsect = self.cfg, self.cfgsect
@@ -233,11 +238,62 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
         if self._started or self.tout_last is None:
             self.tout_last = intg.tcurr
 
+        self._init_accum_buffers()
+
+    def _init_accum_buffers(self):
         # Initialize host arrays for output processing
         nexprs = len(self.aexprs)
         self.accex = [np.zeros((nexprs, d['nupts'], d['neles']))
                       for d in self._tavg_data.values()]
         self.vaccex = [np.zeros_like(a) for a in self.accex]
+
+    def _get_accum_state(self):
+        state = {}
+
+        for etype, data in self._tavg_data.items():
+            state[etype] = {
+                k: v.get() if v is not None else None
+                for k, v in data.items()
+                if k in {'acc', 'vacc', 'prev', 'acc_comp'}
+            }
+
+        return state
+
+    def _restore_accum_state(self, old_erdata, old_state, exchangers):
+        comm, _, _ = get_comm_rank_root()
+        names = ['acc', 'vacc', 'prev', 'acc_comp']
+
+        for etype in exchangers:
+            oldgeidxs = old_erdata.get(etype, np.empty(0, dtype=int))
+            newgeidxs = self._ele_region_data.get(etype,
+                                                  np.empty(0, dtype=int))
+            rex = exchangers[etype].region_exchanger(oldgeidxs, newgeidxs)
+
+            data = self._tavg_data.get(etype, {})
+            ostate = old_state.get(etype, {})
+
+            for name in names:
+                old = ostate.get(name)
+                new = data.get(name)
+
+                spec = old.shape[:-1] if old is not None else (
+                    new.ioshape[:-1] if new is not None else None
+                )
+                spec = next((s for s in comm.allgather(spec)
+                             if s is not None), None)
+                if spec is None:
+                    continue
+
+                dtype = old.dtype if old is not None else (
+                    new.dtype if new is not None else self._acc_dtype
+                )
+
+                if old is None:
+                    old = np.empty((*spec, 0), dtype=dtype)
+
+                restored = rex.Exchange(old, axis=-1)
+                if new is not None:
+                    new.set(restored)
 
     def _eval_fun_avg(self, avars):
         subs = dict(zip(self.anames, avars))
@@ -417,6 +473,20 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, TavgMixin,
             for src, dst in [(d['acc'], self.accex), (d['vacc'], self.vaccex)]:
                 if src is not None:
                     dst[i][:] = src.get().transpose(1, 0, 2)
+
+    def post_rebalance(self, intg, exchangers):
+        self._writer.flush()
+
+        old_erdata = self._ele_region_data
+        old_state = self._get_accum_state() if self._started else None
+
+        self._init_backend(intg)
+        self._bind_system(intg)
+        self._init_kernels(intg)
+
+        if self._started:
+            self._init_accum_buffers()
+            self._restore_accum_state(old_erdata, old_state, exchangers)
 
     def finalise(self, intg):
         super().finalise(intg)

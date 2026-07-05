@@ -9,8 +9,9 @@ class BaseAdvectionSystem(BaseSystem):
     _shock_capturing_modes = {'none', 'entropy-filter'}
 
     def __init__(self, backend, mesh, initsoln, registers, cfg, serialiser,
-                 *, needs_cfl=False):
-        super().__init__(backend, mesh, initsoln, registers, cfg, serialiser)
+                 *, needs_cfl=False, **kwargs):
+        super().__init__(backend, mesh, initsoln, registers, cfg, serialiser,
+                         **kwargs)
         self._needs_cfl = needs_cfl
 
         if needs_cfl:

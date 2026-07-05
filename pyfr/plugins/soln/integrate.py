@@ -46,8 +46,8 @@ class IntegratePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
             reduceop = 'sum'
 
         # Backend field evaluation and reduction
-        self._freduce = BackendFieldReducer(self.backend, self.cfg, cfgsect,
-                                            intg, self.exprs, reduceop)
+        self._reduceop = reduceop
+        self._bind_system(intg)
 
         # The root rank needs to open the output file
         if rank == root:
@@ -76,3 +76,12 @@ class IntegratePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
 
             # Publish integral values
             self._publish(intg, **dict(zip(self._inames, iintex)))
+
+    def _bind_system(self, intg):
+        self._freduce = BackendFieldReducer(self.backend, self.cfg,
+                                            self.cfgsect, intg, self.exprs,
+                                            self._reduceop)
+
+    def post_rebalance(self, intg, exchangers):
+        self._init_backend(intg)
+        self._bind_system(intg)

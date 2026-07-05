@@ -5,7 +5,7 @@ from pyfr.integrators.base import (BaseIntegrator, _common_plugin_prop,
 from pyfr.integrators.implicit.precond import Preconditioner
 from pyfr.integrators.implicit.tolerance import get_linear_tol_controller
 from pyfr.integrators.registers import DynamicScalarRegister
-from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
+from pyfr.mpiutil import coll_timed, get_comm_rank_root, mpi, scal_coll_timed
 from pyfr.nputil import bfloat16, is_bf16
 from pyfr.progress import format_s
 from pyfr.util import subclass_where
@@ -30,6 +30,7 @@ class BaseImplicitIntegrator(BaseIntegrator):
     def __init__(self, backend, systemcls, mesh, initsoln, cfg):
         super().__init__(backend, mesh, initsoln, cfg)
 
+        self.systemcls = systemcls
         sect = 'solver-time-integrator'
 
         # Sanity checks
@@ -197,16 +198,18 @@ class BaseImplicitIntegrator(BaseIntegrator):
         return dt_soln
 
     def _norm2(self, r, *, weights=(), norm_gndofs=False):
-        comm, rank, root = get_comm_rank_root()
+        comm, _, _ = get_comm_rank_root()
 
         # Run the kernels
         kerns = self._get_norm2_kerns(r, weights=tuple(weights))
         self.backend.run_kernels(kerns, wait=True)
 
         # Reduce over element types and ranks
-        norm = scal_coll(comm.Allreduce, sum(k.retval[0] for k in kerns))
-        scale = self.gndofs if norm_gndofs else 1
+        norm, dt = scal_coll_timed(comm.Allreduce,
+                                   sum(k.retval[0] for k in kerns))
+        self._coll_wait += dt
 
+        scale = self.gndofs if norm_gndofs else 1
         return (norm / scale)**0.5
 
     @kernel_getter
@@ -220,14 +223,14 @@ class BaseImplicitIntegrator(BaseIntegrator):
         return float(self._multidot(a, b)[0])
 
     def _multidot(self, a, b0, *bn):
-        comm, rank, root = get_comm_rank_root()
+        comm, _, _ = get_comm_rank_root()
         kerns = self._get_multidot_kerns(a, b0, *bn)
 
         self.backend.run_kernels(kerns, wait=True)
 
         # Reduce over element types and ranks and return
-        results = sum([k.retval.astype(float) for k in kerns])
-        comm.Allreduce(mpi.IN_PLACE, results)
+        results = sum(k.retval.astype(float) for k in kerns)
+        self._coll_wait += coll_timed(comm.Allreduce, mpi.IN_PLACE, results)
         return results
 
     @kernel_getter

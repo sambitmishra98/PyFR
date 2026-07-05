@@ -103,6 +103,9 @@ class RegionMixin:
     def __init__(self, intg, *args, **kwargs):
         super().__init__(intg, *args, **kwargs)
 
+        self._init_region(intg)
+
+    def _init_region(self, intg):
         # Parse the region
         ridxs = region_data(self.cfg, self.cfgsect, intg.system.mesh)
 

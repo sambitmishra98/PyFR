@@ -1,4 +1,5 @@
 from collections import defaultdict, deque, namedtuple
+import gc
 import itertools as it
 import re
 import sys
@@ -6,7 +7,7 @@ import time
 
 import numpy as np
 
-from pyfr.cache import memoize
+from pyfr.cache import clear_memoize, memoize
 from pyfr.integrators.registers import (RegisterMeta, ScalarRegister,
                                         VectorRegister)
 from pyfr.mpiutil import get_comm_rank_root, mpi, scal_coll
@@ -76,6 +77,9 @@ class BaseIntegrator(metaclass=RegisterMeta):
         self.nrjctsteps = 0
         self.nrhsevals = 0
 
+        # Collective wait accumulator for rebalancing
+        self._coll_wait = 0.0
+
         # Current and minimum time steps
         self.dt = cfg.getfloat('solver-time-integrator', 'dt')
         self.dtmin = cfg.getfloat('solver-time-integrator', 'dt-min', 1e-12)
@@ -124,6 +128,11 @@ class BaseIntegrator(metaclass=RegisterMeta):
     def _rhs(self, t, uin, uout):
         self.system.rhs(t, uin, uout)
         self.nrhsevals += 1
+
+    def pop_coll_wait(self):
+        t = self._coll_wait
+        self._coll_wait = 0.0
+        return t
 
     def plugin_abort(self, reason):
         self._abort = True
@@ -294,6 +303,36 @@ class BaseIntegrator(metaclass=RegisterMeta):
         self._curr_grad_soln = None
         self._curr_dt_soln = None
         self._grads_current = False
+
+    def _replace_system(self, new_mesh, soln):
+        bases = self.system.ele_bases
+
+        for obj in [self] + self.plugins:
+            clear_memoize(obj)
+
+        del self.system
+        gc.collect()
+
+        self.system = self.systemcls(
+            self.backend, new_mesh, soln,
+            self._registers, self.cfg, self.serialiser,
+            needs_cfl=self.controller_needs_cfl,
+            bases=bases
+        )
+
+        self._post_replace_system()
+
+    def _post_replace_system(self):
+        pass
+
+    def _commit_system(self):
+        self.system.commit()
+
+        self.idxcurr = 0
+        self._invalidate_caches()
+        self.system.preproc(self.tcurr, self.idxcurr)
+
+        gc.collect()
 
     def compute_grads(self):
         if not self._grads_current:

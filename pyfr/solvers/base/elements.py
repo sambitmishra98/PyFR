@@ -34,7 +34,7 @@ def inters_map(meth):
 
 
 class BaseElements:
-    def __init__(self, basiscls, eles, cfg):
+    def __init__(self, basis, eles, cfg):
         self._be = None
 
         self.eles = eles
@@ -56,14 +56,14 @@ class BaseElements:
         self.export_fields = []
 
         # Check the dimensionality of the problem
-        if ndims != basiscls.ndims:
+        if ndims != basis.ndims:
             raise ValueError('Invalid element matrix dimensions')
 
         # Determine the number of dynamical variables
         self.nvars = len(self.convars)
 
-        # Instantiate the basis class
-        self.basis = basis = basiscls(nspts, cfg)
+        # Store the basis instance
+        self.basis = basis
         self.name = basis.name
 
         # See what kind of projection the basis is using

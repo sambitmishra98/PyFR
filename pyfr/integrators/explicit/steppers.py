@@ -141,8 +141,9 @@ class RKVdH2RStepper(BaseExplicitStepper):
             'nvars': self.system.nvars, 'errest': rold is not None
         }
 
-        for dims, em in zip(self.system.ele_shapes.values(),
-                            self.system.ele_banks):
+        for et, em in zip(self.system.ele_types,
+                          self.system.ele_banks):
+            dims = self.system.ele_shapes[et]
             if rold is not None:
                 kern = self.backend.kernel(
                     'rkvdh2', tplargs=tplargs, dims=[dims[0], dims[2]],

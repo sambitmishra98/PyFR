@@ -60,6 +60,9 @@ class BaseTriggerSource:
     def evaluate(self, intg):
         raise NotImplementedError
 
+    def post_rebalance(self, intg, exchangers):
+        pass
+
 
 class TriggerManager:
     def __init__(self):
@@ -132,6 +135,10 @@ class TriggerManager:
 
         for name, active in zip(names, sv):
             self._states[name] = active
+
+    def post_rebalance(self, intg, exchangers):
+        for src in self._triggers.values():
+            src.post_rebalance(intg, exchangers)
 
     def _check_name(self, name):
         if name not in self._triggers:

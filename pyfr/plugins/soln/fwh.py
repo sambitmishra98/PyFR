@@ -77,8 +77,9 @@ class FWHPlugin(SurfaceRegionMixin, BaseSolnPlugin):
 
         self.t_last = -np.inf
         self.dt = self.cfg.getfloat(cfgsect, 'dt')
-        obsv_pts = np.array(self.cfg.getliteral(self.cfgsect, 'observer-pts'))
-        self.nobvs = len(obsv_pts)
+        self.obsv_pts = np.array(self.cfg.getliteral(self.cfgsect,
+                                                     'observer-pts'))
+        self.nobvs = len(self.obsv_pts)
 
         # Initialise data file
         if rank == root:
@@ -91,23 +92,16 @@ class FWHPlugin(SurfaceRegionMixin, BaseSolnPlugin):
         self._pidx = privars.index('p')
         self.consts = self.cfg.items_as('constants', float)
 
-        qinf = {k: npeval(self.cfg.getexpr(cfgsect, k), self.consts)
-                for k in privars}
-        self.uinf = np.array([[qinf[k]] for k in 'uvw'[:self.ndims]])
+        self.qinf = {k: npeval(self.cfg.getexpr(cfgsect, k), self.consts)
+                     for k in privars}
+        self.uinf = np.array([[self.qinf[k]] for k in 'uvw'[:self.ndims]])
 
         gamma = self.consts['gamma']
-        qinf['c'] = (gamma * qinf['p'] / qinf['rho'])**0.5
+        self.qinf['c'] = (gamma * self.qinf['p'] / self.qinf['rho'])**0.5
         self._ridx = privars.index('rho')
 
-        qinf['M'] = np.array([qinf[k] / qinf['c'] for k in 'uvw'[:self.ndims]])
-
-        # Initialise surface data
-        ele_map = intg.system.ele_map
-        self.emap = {k: i for i, k in enumerate(ele_map)}
-        con, _ = self._surf_region(intg)
-
-        self.fwh_int = FWHIntegrator(self.cfg, cfgsect, self.ndims, obsv_pts,
-                                     qinf, ele_map, con)
+        self.qinf['M'] = np.array([self.qinf[k] / self.qinf['c']
+                                   for k in 'uvw'[:self.ndims]])
 
         # Get boundary type info
         sname = self.cfg.get(cfgsect, 'surface')
@@ -115,6 +109,16 @@ class FWHPlugin(SurfaceRegionMixin, BaseSolnPlugin):
             self.bctype = self.cfg.get(f'soln-bcs-{sname}', 'type')
         else:
             self.bctype = None
+
+        self._bind_system(intg)
+
+    def _bind_system(self, intg):
+        ele_map = intg.system.ele_map
+        self.emap = {k: i for i, k in enumerate(ele_map)}
+        con, _ = self._surf_region(intg)
+
+        self.fwh_int = FWHIntegrator(self.cfg, self.cfgsect, self.ndims,
+                                     self.obsv_pts, self.qinf, ele_map, con)
 
     def _enforce_noslip_bc(self, pris):
         vmag = np.sum(pris[self._vidx]**2, axis=0)
@@ -203,3 +207,6 @@ class FWHPlugin(SurfaceRegionMixin, BaseSolnPlugin):
 
                 for x, p in zip(self.fwh_int.obsv_pts, o_vals):
                     self.csv(intg.tcurr, *x, p)
+
+    def post_rebalance(self, intg, exchangers):
+        self._bind_system(intg)

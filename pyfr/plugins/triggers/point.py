@@ -30,10 +30,15 @@ class PointTriggerSource(BaseTriggerSource):
         self._elementscls = system.elementscls
         self._privars = first(system.ele_map.values()).privars
 
-        self._psampler = PointSampler(system.mesh,
-                                      cfg.getliteral(cfgsect, 'pts'))
-        self._psampler.configure_with_intg_nvars(intg, system.nvars)
+        self._pts = cfg.getliteral(cfgsect, 'pts')
+        self._init_sampler(intg)
         self._last_result = False
+
+    def _init_sampler(self, intg):
+        self._psampler = PointSampler(intg.system.mesh, self._pts,
+                                      getattr(self, '_locs', None))
+        self._locs = self._psampler.locs
+        self._psampler.configure_with_intg_nvars(intg, intg.system.nvars)
 
     def evaluate(self, intg):
         if intg.nacptsteps % self._nsteps != 0:
@@ -62,3 +67,6 @@ class PointTriggerSource(BaseTriggerSource):
 
         self._last_result = comm.bcast(self._last_result, root=root)
         return self._last_result
+
+    def post_rebalance(self, intg, exchangers):
+        self._init_sampler(intg)

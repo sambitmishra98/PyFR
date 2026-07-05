@@ -15,41 +15,25 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
         super().__init__(intg, cfgsect, suffix)
 
         # Base output directory and file name
-        basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
-        basename = self.cfg.get(cfgsect, 'basename')
-
-        # Get the element map and region data
-        emap, erdata = intg.system.ele_map, self._ele_region_data
+        self.basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
+        self.basename = self.cfg.get(cfgsect, 'basename')
 
         # Decide if gradients should be written or not
         self._write_grads = self.cfg.getbool(cfgsect, 'write-gradients', False)
 
         # Output field names
-        self.fields = list(first(emap.values()).convars)
+        self.fields = list(first(intg.system.ele_map.values()).convars)
 
         # Build the field groups for the nested dtype
-        field_groups = {'soln': list(self.fields)}
+        self._field_groups = field_groups = {'soln': list(self.fields)}
         if self._write_grads:
             field_groups['grad'] = list(self.fields)
 
-        # Extract auxiliary field info and getters from elements
-        self._aux_fields, self._aux_getters = {}, {}
-        for etype, eles in emap.items():
-            if eles.export_fields:
-                self._aux_fields[etype] = [(ef.name, ef.shape, ef.dtype)
-                                           for ef in eles.export_fields]
-                if etype in erdata:
-                    self._aux_getters[etype] = [(ef.name, ef.getter)
-                                                for ef in eles.export_fields]
-
-        # Figure out the shape of each element type in our region
-        ershapes = {etype: (self.nvars, emap[etype].nupts) for etype in erdata}
-
         # Construct the solution writer
-        self._writer = NativeWriter.from_integrator(intg, basedir, basename,
-                                                    'soln')
-        self._writer.set_shapes_eidxs(ershapes, erdata, field_groups,
-                                      self._aux_fields)
+        self._writer = NativeWriter.from_integrator(
+            intg, self.basedir, self.basename, 'soln'
+        )
+        self._bind_system(intg)
 
         # Asynchronous output options
         self._async_timeout = self.cfg.getfloat(cfgsect, 'async-timeout', 60)
@@ -77,6 +61,28 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
             # initial solution when we are called for the first time
             if not intg.isrestart:
                 self.tout_last -= self.dt_out
+
+    def _bind_system(self, intg):
+        self._init_region(intg)
+
+        # Get the element map and region data
+        emap, erdata = intg.system.ele_map, self._ele_region_data
+
+        # Extract auxiliary field info and getters from elements
+        self._aux_fields, self._aux_getters = {}, {}
+        for etype, eles in emap.items():
+            if eles.export_fields:
+                self._aux_fields[etype] = [(ef.name, ef.shape, ef.dtype)
+                                           for ef in eles.export_fields]
+                if etype in erdata:
+                    self._aux_getters[etype] = [(ef.name, ef.getter)
+                                                for ef in eles.export_fields]
+
+        # Figure out the shape of each element type in our region
+        ershapes = {etype: (self.nvars, emap[etype].nupts) for etype in erdata}
+
+        self._writer.set_shapes_eidxs(ershapes, erdata, self._field_groups,
+                                      self._aux_fields, ndims=self.ndims)
 
     def _prepare_metadata(self, intg):
         comm, rank, root = get_comm_rank_root()
@@ -150,6 +156,10 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
 
     def trigger_write(self, intg):
         self._do_write(intg)
+
+    def post_rebalance(self, intg, exchangers):
+        self._writer.flush()
+        self._bind_system(intg)
 
     def finalise(self, intg):
         super().finalise(intg)

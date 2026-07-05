@@ -1,13 +1,13 @@
 import atexit
 import ctypes
+from functools import lru_cache
 import math
 import os
 import sys
+import time
 import weakref
 
 import numpy as np
-
-from pyfr.cache import memoize
 
 
 def init_mpi():
@@ -103,6 +103,109 @@ def scal_coll(colfn, v, *args, **kwargs):
     return dtype(v[0])
 
 
+def scal_coll_timed(colfn, v, *args, **kwargs):
+    t = time.perf_counter_ns()
+    r = scal_coll(colfn, v, *args, **kwargs)
+    return r, (time.perf_counter_ns() - t) / 1e9
+
+
+def coll_timed(fn, *args, **kwargs):
+    t = time.perf_counter_ns()
+    fn(*args, **kwargs)
+    return (time.perf_counter_ns() - t) / 1e9
+
+
+@lru_cache(maxsize=64)
+def _get_mpi_dtype(np_dtype, shape):
+    if np_dtype.names is None and not shape:
+        return None
+
+    from mpi4py.util.dtlib import from_numpy_dtype
+
+    dtype = np_dtype
+    if shape:
+        dtype = [('', dtype, shape)]
+
+    return autofree(from_numpy_dtype(dtype).Commit())
+
+
+def _count_to_disp(count):
+    disp = np.empty(len(count), dtype=count.dtype)
+    disp[0] = 0
+    np.cumsum(count[:-1], out=disp[1:])
+    return disp
+
+
+def pcg_scalar(comm, matvec, precond, b, tol=1e-8, max_iter=200):
+    # Standard preconditioned conjugate gradient iteration
+    r = b - matvec(0.0)
+    z = precond(r)
+    p, x = z, 0.0
+    rz = scal_coll(comm.Allreduce, r*z)
+
+    for _ in range(max_iter):
+        ap = matvec(p)
+
+        pap = scal_coll(comm.Allreduce, p*ap)
+        if abs(pap) < 1e-30:
+            break
+
+        alpha = rz / pap
+        x += alpha*p
+        r -= alpha*ap
+
+        # Stop once the global residual norm is small enough
+        if scal_coll(comm.Allreduce, r*r) < tol*tol:
+            break
+
+        z = precond(r)
+        rz_new = scal_coll(comm.Allreduce, r*z)
+
+        beta = rz_new / max(rz, 1e-30)
+        p = z + beta*p
+        rz = rz_new
+
+    return float(x)
+
+
+class RootGatherer:
+    def __init__(self, comm, nsend, root=0):
+        self.comm = comm
+        self.nsend = nsend
+        self.root = root
+
+        counts = np.empty(comm.size, dtype=int)
+        counts[comm.rank] = self.nsend
+        comm.Allgather(mpi.IN_PLACE, counts)
+
+        self.counts = counts
+        self.disps = _count_to_disp(counts)
+        self.nrecv = counts.sum()
+
+    def __call__(self, arr):
+        arr = np.ascontiguousarray(arr)
+        shape = arr.shape[1:]
+
+        if self.comm.rank == self.root:
+            recv = np.empty((self.nrecv, *shape), dtype=arr.dtype)
+        else:
+            recv = None
+
+        dtype = _get_mpi_dtype(arr.dtype, shape)
+        if dtype is None:
+            self.comm.Gatherv(arr, (recv, (self.counts, self.disps)),
+                              root=self.root)
+        else:
+            if self.comm.rank == self.root:
+                rbuf = (recv, self.counts, self.disps, dtype)
+            else:
+                rbuf = None
+
+            self.comm.Gatherv((arr, dtype), rbuf, root=self.root)
+
+        return recv
+
+
 def home_rank(gidxs, size):
     h = np.uint64(2654435761)*np.asarray(gidxs).view(np.uint64)
     return (h % size).astype(np.int32)
@@ -121,31 +224,15 @@ def get_start_end_csize(comm, n):
 class AlltoallMixin:
     @staticmethod
     def _count_to_disp(count):
-        disp = np.empty(len(count), dtype=count.dtype)
-        disp[0] = 0
-        np.cumsum(count[:-1], out=disp[1:])
-        return disp
+        return _count_to_disp(count)
 
     @staticmethod
     def _disp_to_count(disp, n):
         return np.diff(disp, append=n)
 
-    @memoize
-    def _get_mpi_dtype(self, np_dtype, shape):
-        if np_dtype.names is None and not shape:
-            return None
-
-        from mpi4py.util.dtlib import from_numpy_dtype
-
-        dtype = np_dtype
-        if shape:
-            dtype = [('', dtype, shape)]
-
-        return autofree(from_numpy_dtype(dtype).Commit())
-
     def _alltoallv_bufs(self, sbuf, rbuf):
         svals = sbuf[0]
-        dtype = self._get_mpi_dtype(svals.dtype, svals.shape[1:])
+        dtype = _get_mpi_dtype(svals.dtype, svals.shape[1:])
 
         if dtype is None:
             return sbuf, rbuf
@@ -238,6 +325,48 @@ class DistributedDirectory(AlltoallMixin):
         result = np.empty_like(keys)
         result[sord] = ret
         return result
+
+
+class DestExchanger(AlltoallMixin):
+    def __init__(self, comm, dests):
+        self.comm = comm
+        self.sdst = np.asarray(dests)
+        self.sinv = np.argsort(self.sdst)
+        sdest = self.sdst[self.sinv]
+
+        # Count how many entries go to each rank
+        if len(self.sdst):
+            self.scount = np.bincount(sdest, minlength=comm.size)
+        else:
+            self.scount = np.zeros(comm.size, dtype=int)
+
+        self.rcount = np.empty_like(self.scount)
+        comm.Alltoall(self.scount, self.rcount)
+
+        # Convert counts into displacements
+        self.sdisps = self._count_to_disp(self.scount)
+        self.rdisps = self._count_to_disp(self.rcount)
+        self.nrecv = self.rcount.sum()
+
+    def exchange(self, items):
+        send = [[] for _ in range(self.comm.size)]
+        for item, dst in zip(items, self.sdst):
+            send[dst].append(item)
+
+        return [r for sub in self.comm.alltoall(send) for r in sub]
+
+    def Exchange(self, arr, axis=0):
+        arr = np.moveaxis(arr, axis, 0)
+        shape = arr.shape[1:]
+        ncols = int(np.prod(shape)) or 1
+        arr = arr.reshape(arr.shape[0], ncols)
+
+        send = arr[self.sinv]
+        recv = np.empty((self.nrecv, ncols), dtype=arr.dtype)
+        self._alltoallv(self.comm, (send, (self.scount, self.sdisps)),
+                        (recv, (self.rcount, self.rdisps)))
+
+        return np.moveaxis(recv.reshape(-1, *shape), 0, axis)
 
 
 class AlltoallFuture:

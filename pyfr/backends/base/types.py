@@ -404,6 +404,7 @@ class Graph:
         # MPI wrappers
         self._startall = mpi.Prequest.Startall
 
+        self._wait_times = None
         if backend.cfg.getbool('backend', 'collect-wait-times', False):
             n = backend.cfg.getint('backend', 'collect-wait-times-len', 10000)
             self._wait_times = wait_times = deque(maxlen=n)
@@ -580,4 +581,22 @@ class Graph:
         pass
 
     def get_wait_times(self):
-        return list(self._wait_times)
+        return list(self._wait_times or ())
+
+    def pop_wait_time(self):
+        if self._wait_times is None:
+            return 0.0
+
+        total = sum(self._wait_times)
+        self._wait_times.clear()
+
+        return total
+
+    def pop_gpu_elapsed(self):
+        pass
+
+    def pop_per_neighbour_wait(self):
+        return {}
+
+    def set_mpi_timing_mode(self, mode):
+        pass

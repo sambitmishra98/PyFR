@@ -47,6 +47,8 @@ class FluidForcePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
             if len(morigin) != self.ndims:
                 raise ValueError(f'morigin must have {self.ndims} components')
 
+        self._morigin = morigin
+
         # See which ranks have the boundary
         bcranks = comm.gather(suffix in intg.system.mesh.bcon, root=root)
 
@@ -63,10 +65,6 @@ class FluidForcePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
                 case _:
                     raise ValueError('Invalid file format')
 
-        # Set interpolation matrices and quadrature weights
-        self.ff_int = FluidForceIntegrator(self.cfg, cfgsect, intg.system,
-                                           suffix, morigin)
-
         # Initialise backend infrastructure
         self._init_backend(intg)
 
@@ -74,8 +72,7 @@ class FluidForcePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
         ncomp = self.ndims + self._mcomp
         self._nout = (2 if self._viscous else 1)*ncomp
 
-        # Initialise GPU kernel infrastructure
-        self._init_kernels(intg)
+        self._bind_system(intg)
 
     @property
     def _header(self):
@@ -117,6 +114,11 @@ class FluidForcePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
 
     def _write_hdf5(self, t, forces):
         self._forces(np.concatenate(([t], forces.ravel())))
+
+    def _bind_system(self, intg):
+        self.ff_int = FluidForceIntegrator(self.cfg, self.cfgsect, intg.system,
+                                           self.suffix, self._morigin)
+        self._init_kernels(intg)
 
     def _init_kernels(self, intg):
         backend = self.backend
@@ -223,3 +225,7 @@ class FluidForcePlugin(PublishMixin, BackendMixin, BaseSolnPlugin):
 
     def trigger_write(self, intg):
         self(intg)
+
+    def post_rebalance(self, intg, exchangers):
+        self._init_backend(intg)
+        self._bind_system(intg)

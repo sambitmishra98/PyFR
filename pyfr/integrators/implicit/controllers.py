@@ -4,6 +4,7 @@ from pyfr.integrators.base import StepInfo
 from pyfr.integrators.controllers import CFLControllerMixin, PIControllerMixin
 from pyfr.integrators.implicit.base import BaseImplicitIntegrator
 from pyfr.integrators.implicit.nonlinear import NonlinearDivergenceError
+from pyfr.integrators.rebalance import RebalanceMixin
 from pyfr.nputil import LogGPOptimiser
 
 
@@ -329,7 +330,7 @@ class ThroughputLimitMixin:
         return fac
 
 
-class BaseImplicitController(BaseImplicitIntegrator):
+class BaseImplicitController(RebalanceMixin, BaseImplicitIntegrator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -355,6 +356,9 @@ class BaseImplicitController(BaseImplicitIntegrator):
 
         # Run any plugins
         self._run_plugins()
+
+        # Check for rebalance
+        self._rebal_check()
 
         # Clear step info after plugins have consumed it
         self.stepinfo = []

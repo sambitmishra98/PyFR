@@ -43,6 +43,9 @@ class BasePlugin:
     def setup(self, sdata, prevcfg, serialiser):
         pass
 
+    def post_rebalance(self, intg, exchangers):
+        pass
+
 
 class BaseCLIPlugin:
     name = None

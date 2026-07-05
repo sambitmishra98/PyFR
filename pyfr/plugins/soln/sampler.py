@@ -42,12 +42,14 @@ class SamplerPlugin(BackendMixin, BaseSolnPlugin):
             spts = pdata['ploc']
             locs = pdata[['cidx', 'eidx', 'tloc']]
 
+        self._spts = spts
+        self._locs = locs
+
         # Number of output variables per sample
         self.nsvars = (1 + self.ndims*self._sample_grads)*self.nvars
 
         # Construct and configure the point sampler (for location + MPI)
-        self.psampler = PointSampler(intg.system.mesh, spts, locs)
-        self.psampler.configure_with_intg_nvars(intg, self.nsvars)
+        self._init_sampler(intg, locs)
 
         # Initialise backend and kernel infrastructure
         self._init_backend(intg)
@@ -100,6 +102,12 @@ class SamplerPlugin(BackendMixin, BaseSolnPlugin):
                 'gradu': gradu,
                 'map': smap,
             })
+
+    def _init_sampler(self, intg, locs=None):
+        locs = self._locs if locs is None else locs
+        self.psampler = PointSampler(intg.system.mesh, self._spts, locs)
+        self._locs = self.psampler.locs
+        self.psampler.configure_with_intg_nvars(intg, self.nsvars)
 
     @memoize
     def _get_kerns(self, uidx):
@@ -197,3 +205,8 @@ class SamplerPlugin(BackendMixin, BaseSolnPlugin):
         samps = self.psampler.gather(samples)
         if samps is not None:
             self._write(intg.tcurr, samps)
+
+    def post_rebalance(self, intg, exchangers):
+        self._init_sampler(intg)
+        self._init_backend(intg)
+        self._init_kernels(intg)

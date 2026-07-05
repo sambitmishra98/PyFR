@@ -9,6 +9,8 @@ class BaseExplicitIntegrator(BaseIntegrator):
     def __init__(self, backend, systemcls, mesh, initsoln, cfg):
         super().__init__(backend, mesh, initsoln, cfg)
 
+        self.systemcls = systemcls
+
         # Sanity checks
         if self.controller_needs_errest and not self.stepper_has_errest:
             raise TypeError('Incompatible stepper/controller combination')
