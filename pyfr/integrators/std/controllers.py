@@ -2,9 +2,10 @@ import math
 
 import numpy as np
 
-from pyfr.integrators.std.base import BaseStdIntegrator
-from pyfr.mpiutil import get_comm_rank_root, mpi
+from time import perf_counter_ns
 
+from pyfr.integrators.std.base import BaseStdIntegrator
+from pyfr.mpiutil import (mpi, comm, rank, root, execute)
 
 class BaseStdController(BaseStdIntegrator):
     def __init__(self, *args, **kwargs):
@@ -24,6 +25,7 @@ class BaseStdController(BaseStdIntegrator):
             self._run_plugins()
 
     def _accept_step(self, dt, idxcurr, err=None):
+        self._note_step_accepted(True)
         self.tcurr += dt
         self.nacptsteps += 1
         self.nacptchain += 1
@@ -44,6 +46,7 @@ class BaseStdController(BaseStdIntegrator):
         self.stepinfo = []
 
     def _reject_step(self, dt, idxold, err=None):
+        self._note_step_accepted(False)
         if dt <= self.dtmin:
             raise RuntimeError('Minimum sized time step rejected')
 
@@ -67,14 +70,19 @@ class StdNoneController(BaseStdController):
             raise ValueError('Advance time is in the past')
 
         while self.tcurr < t:
+
             # Decide on the time step
-            dt = max(min(t - self.tcurr, self._dt), self.dtmin)
+            self.adjust_dt(t)
 
-            # Take the step
-            idxcurr = self.step(self.tcurr, dt)
+            idxcurr = execute['compute'](lambda: self.step(self.tcurr, self.dt),
+                                         default=-1)
+            idxcurr = comm['world'].allreduce(idxcurr, op=mpi.MAX)
 
+            self._errest_tdiff_hist.append(0)
             # We are not adaptive, so accept every step
-            self._accept_step(dt, idxcurr)
+            self._accept_step(self.dt, idxcurr)
+
+            self.load_balance()
 
 
 class StdPIController(BaseStdController):
@@ -85,9 +93,6 @@ class StdPIController(BaseStdController):
         super().__init__(*args, **kwargs)
 
         sect = 'solver-time-integrator'
-
-        # Maximum time step
-        self.dtmax = self.cfg.getfloat(sect, 'dt-max', 1e2)
 
         # Error tolerances
         self._atol = self.cfg.getfloat(sect, 'atol')
@@ -124,7 +129,6 @@ class StdPIController(BaseStdController):
         return True
 
     def _errest(self, rcurr, rprev, rerr):
-        comm, rank, root = get_comm_rank_root()
 
         # Get a set of kernels to estimate the integration error
         ekerns = self._get_reduction_kerns(rcurr, rprev, rerr, method='errest',
@@ -140,20 +144,36 @@ class StdPIController(BaseStdController):
         # Pseudo L2 norm
         if self._norm == 'l2':
             # Reduce locally (element types + field variables)
-            err = np.array([sum(v for k in ekerns for v in k.retval)])
+            err = np.array([sum(v for k in ekerns for v in k.retval)],
+                           dtype=np.float64)
 
             # Reduce globally (MPI ranks)
-            comm.Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
+            if comm['compute'] != mpi.COMM_NULL:
+                comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.SUM)
+            else:
+                err = np.array([0.0], dtype=np.float64)
+
+            # Broadcast
+            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            # err = comm['world'].bcast(err, root=root['world'])
 
             # Normalise
             err = math.sqrt(float(err) / self._gndofs)
         # Uniform norm
         else:
             # Reduce locally (element types + field variables)
-            err = np.array([max(v for k in ekerns for v in k.retval)])
+            err = np.array([max(v for k in ekerns for v in k.retval)],
+                           dtype=np.float64)
 
             # Reduce globally (MPI ranks)
-            comm.Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            if comm['compute'] != mpi.COMM_NULL:
+                comm['compute'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            else:
+                err = np.array([0.0], dtype=np.float64)
+
+            # Broadcast
+            comm['world'].Allreduce(mpi.IN_PLACE, err, op=mpi.MAX)
+            # err = comm['world'].bcast(err, root=root['world'])
 
             # Normalise
             err = math.sqrt(float(err))
@@ -174,25 +194,43 @@ class StdPIController(BaseStdController):
         expb = self._beta / sord
 
         while self.tcurr < t:
+            # Adjust current time step per target t
+            self.adjust_dt(t)
+
+            self.dt = max(self.dt, self.dtmin)
+
             # Decide on the time step
-            dt = max(min(t - self.tcurr, self._dt, self.dtmax), self.dtmin)
+            dt = max(min(t - self.tcurr, self.dt), self.dtmin)
 
             # Take the step
-            idxcurr, idxprev, idxerr = self.step(self.tcurr, dt)
+            idxcurr, idxprev, idxerr = execute['compute'](lambda: self.step(self.tcurr, dt),
+                                                          default=(-1, -1, -1))
+
+            idxcurr = comm['world'].allreduce(idxcurr, op=mpi.MAX)
+            idxprev = comm['world'].allreduce(idxprev, op=mpi.MAX)
+            idxerr  = comm['world'].allreduce(idxerr,  op=mpi.MAX)
+
+            #self.backend.wait()
+            tstart = perf_counter_ns()
 
             # Estimate the error
             err = self._errest(idxcurr, idxprev, idxerr)
 
-            # Determine time step adjustment factor
-            fac = err**-expa * self._errprev**expb
-            fac = min(maxf, max(minf, saff*fac))
-
-            # Compute the size of the next step
-            self._dt = fac*dt
+            #self.backend.wait()
+            self._errest_tdiff_hist.append((perf_counter_ns() - tstart)*1e-9)
 
             # Decide if to accept or reject the step
             if err < 1.0:
                 self._errprev = err
-                self._accept_step(dt, idxcurr, err=err)
+                self._accept_step(self.dt, idxcurr, err=err)
+                self.load_balance()
             else:
-                self._reject_step(dt, idxprev, err=err)
+                self._reject_step(self.dt, idxprev, err=err)
+
+            # Adjust time step per PI controller
+            fac = err**-expa * self._errprev**expb
+            fac = min(maxf, max(minf, saff*fac))
+
+            # Compute the next time step
+            self.dt_fallback = fac*self.dt
+
