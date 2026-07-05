@@ -7,8 +7,259 @@ import weakref
 
 import numpy as np
 
+from typing import List, Optional
 
-def init_mpi():
+comm_rank_roots = {}  # will now store MPICommInfo objects
+
+class MPICommInfo:
+    """
+    Thin wrapper around an MPI communicator plus rank-map and device tags.
+
+    Attributes
+    ----------
+    name : str
+        Logical name ('world', 'compute', 'newcompute', ...).
+    comm : mpi4py.MPI.Comm or MPI.COMM_NULL
+    rank : Optional[int]
+        Local rank in 'comm' or None if COMM_NULL.
+    root : Optional[int]
+        Designated root rank in 'comm' or None if COMM_NULL.
+    rankmap : Optional[List[int]]
+        List of world ranks in communicator order. For 'world' this is
+        [0, 1, ..., size-1].
+    devices : Optional[List[str]]
+        Device tags per *local* rank in this communicator,
+        e.g. ['gpu', 'cpu', 'cpu', ...].
+    """
+
+    # ---- per-PROCESS state (same across comms) ----
+    _device: Optional[str] = None
+    _etype_order: Optional[List[str]] = None
+    _devices_world: Optional[List[str]] = None
+
+    def __init__(self, name: str, comm,
+                 rank: Optional[int], root: Optional[int],
+                 rankmap: Optional[List[int]] = None,
+                 ):
+        from mpi4py import MPI
+
+        self.name = name
+        self.comm = comm
+        self.rank = rank
+        self.root = root
+        self.rankmap = list(rankmap) if rankmap is not None else None
+
+        # Normalise COMM_NULL <-> inactive ranks
+        if comm is None or comm == MPI.COMM_NULL:
+            self.comm = MPI.COMM_NULL
+            self.rank = None
+            self.root = 0
+
+    # ---------------- basic properties ----------------
+
+    @property
+    def device(self) -> Optional[str]:
+        return type(self)._device
+
+    @property
+    def etype_order(self) -> Optional[List[str]]:
+        eo = type(self)._etype_order
+        return list(eo) if eo is not None else None
+
+    @property
+    def active(self) -> bool:
+        from mpi4py import MPI
+        return self.comm is not None and self.comm != MPI.COMM_NULL
+
+    @property
+    def size(self) -> int:
+        return self.comm.Get_size() if self.active else 0
+
+    @property
+    def local_rank(self) -> Optional[int]:
+        return self.rank
+
+    def local_to_world(self, local_rank: Optional[int] = None) -> Optional[int]:
+        """Map local rank -> world rank using rankmap."""
+        if self.rankmap is None:
+            return None
+        if local_rank is None:
+            local_rank = self.rank
+        if local_rank is None:
+            return None
+        if 0 <= local_rank < len(self.rankmap):
+            return self.rankmap[local_rank]
+        return None
+
+    def world_to_local(self, world_rank: int) -> Optional[int]:
+        """Slow O(P) lookup; sufficient for small partitions."""
+        if self.rankmap is None:
+            return None
+        try:
+            return self.rankmap.index(world_rank)
+        except ValueError:
+            return None
+
+    # ---------------- safe collectives ----------------
+
+    def barrier(self):
+        """Barrier that is a no-op on COMM_NULL."""
+        if self.active:
+            self.comm.Barrier()
+
+    def allgather(self, value, default=None):
+        """
+        Safe allgather: if COMM_NULL returns 'default' on this rank.
+        Intended for patterns where only participating ranks use the result.
+        """
+        if not self.active:
+            return default
+        return self.comm.allgather(value)
+
+    def allreduce(self, value, op=None, default=None):
+        """
+        Safe allreduce wrapper. If COMM_NULL, returns 'default'.
+        """
+        if not self.active:
+            return default
+
+        return self.comm.allreduce(value, op=op)
+
+    def bcast(self, value, root: int = 0, default=None):
+        """
+        Safe broadcast. On COMM_NULL ranks, returns 'default'.
+        """
+        if not self.active:
+            return default
+        return self.comm.bcast(value, root=root)
+
+    def gather(self, value, root: int = 0, default=None):
+        """
+        Safe gather: returns list on root, default elsewhere for COMM_NULL.
+        """
+        if not self.active:
+            return default
+        return self.comm.gather(value, root=root)
+
+    # ---------------- constructors / factories ----------------
+
+    @property
+    def devices_world(self) -> Optional[List[str]]:
+        dv = type(self)._devices_world
+        return list(dv) if dv is not None else None
+
+    def device_of_world_rank(self, world_rank: int) -> Optional[str]:
+        dv = type(self)._devices_world
+        if dv is None:
+            return None
+        if 0 <= int(world_rank) < len(dv):
+            return dv[int(world_rank)]
+        return None
+
+    @classmethod
+    def world(cls, comm, cfg):
+        size = comm.Get_size()
+        rank = comm.Get_rank()
+        rankmap = list(range(size))
+
+        device = 'cpu'
+        devices = ['cpu',] * size
+        if cfg is not None and cfg.hasopt('backend', 'devices'):
+            devices = cfg.getliteral('backend', 'devices')
+            if len(devices) != size:
+                raise ValueError(f"devices count {len(devices)} != {size}")
+            device = devices[rank]
+
+        cls._device = device
+        cls._devices_world = list(devices) if devices is not None else None  # NEW
+
+        etype_order = None
+        if cfg is not None and device is not None:
+            key = f'device-preference-{device}'
+            if cfg.hasopt('backend', key):
+                etype_order = cfg.getliteral('backend', key)
+
+        if etype_order is None:
+            etype_order = ['hex', 'pyr', 'tet']
+        cls._etype_order = list(etype_order)
+
+        return cls('world', comm, rank, root=0, rankmap=rankmap)
+    @classmethod
+    def from_ranklist(cls, name: str, ranklist_world: List[int]):
+        """
+        Build a new communicator as a subset of MPI.COMM_WORLD,
+        with rank order given by 'ranklist_world'.
+        Per-process device/etype_order are inherited automatically
+        via the class-level fields.
+        """
+        from mpi4py import MPI
+
+        world = MPI.COMM_WORLD
+        w_rank = world.Get_rank()
+
+        # Decide if this world rank participates.
+        if w_rank not in ranklist_world:
+            color = MPI.UNDEFINED
+            key = MPI.UNDEFINED
+        else:
+            color = 0
+            key = ranklist_world.index(w_rank)
+
+        new_comm = world.Split(color, key=key)
+
+        if new_comm == MPI.COMM_NULL:
+            new_rank = None
+            root = 0
+        else:
+            new_rank = new_comm.Get_rank()
+            root = 0
+
+        info = cls(
+            name=name,
+            comm=new_comm,
+            rank=new_rank,
+            root=root,
+            rankmap=ranklist_world
+        )
+        comm_rank_roots[name] = info
+        return info
+
+    def run(self, fn, default=None):
+        """
+        Execute `fn()` only if this rank is active in this communicator.
+        Otherwise return `default`.
+        """
+        if self.active:
+            return fn()
+        else:
+            return default
+
+
+def promote_comm(src_name: str, dest_name: str) -> None:
+    """
+    Atomically replace logical communicator 'dest_name' with 'src_name'.
+
+    After this call:
+        - comm[dest_name], rank[dest_name], rankmap[dest_name], etc.
+        all refer to the communicator that was previously 'src_name'.
+        - The mapping under 'src_name' is removed.
+
+    All world ranks must call this collectively.
+    """
+    src_info = get_comm_info(src_name)
+
+    # Rebind: dest_name now points at src_info.
+    comm_rank_roots[dest_name] = src_info
+    src_info.name = dest_name
+
+    # Remove the old src_name key to avoid accidental reuse.
+    if src_name in comm_rank_roots and src_name != dest_name:
+        del comm_rank_roots[src_name]
+
+def init_mpi(cfg=None):
+
+    global comm_rank_roots
+
     import mpi4py.rc
     from mpi4py import MPI
 
@@ -23,6 +274,10 @@ def init_mpi():
 
     # Prevent mpi4py from calling MPI_Finalize
     mpi4py.rc.finalize = False
+
+    comm = MPI.COMM_WORLD
+
+    comm_rank_roots['world'] = MPICommInfo.world(comm, cfg)
 
     # Intercept any uncaught exceptions
     class ExceptHook:
@@ -47,8 +302,9 @@ def init_mpi():
         exc = excepthook.exception
 
         # If we are exiting normally then call MPI_Finalize
-        if (MPI.COMM_WORLD.size == 1 or exc is None or
-            isinstance(exc, (KeyboardInterrupt, SystemExit))):
+        if (comm.size == 1 or exc is None or
+            isinstance(exc, KeyboardInterrupt) or
+            (isinstance(exc, SystemExit) and exc.code == 0)):
             import gc
             gc.collect()
 
@@ -70,11 +326,102 @@ def autofree(obj):
     return obj
 
 
-def get_comm_rank_root():
-    from mpi4py import MPI
+class _CommView:
+    def __getitem__(self, name):
+        return comm_rank_roots[name].comm
 
-    comm = MPI.COMM_WORLD
-    return comm, comm.rank, 0
+    def __getattr__(self, name: str):
+        return self[name]
+
+
+class _RankView:
+    """
+    View over MPICommInfo.rank
+
+    rank['world']      -> int world-local rank
+    rank['compute']    -> int local rank in 'compute', or None if COMM_NULL
+    rank.world         -> same as rank['world']
+    """
+    def __getitem__(self, name):
+        return comm_rank_roots[name].rank
+
+    def __getattr__(self, name: str):
+        return self[name]
+
+
+class _RootView:
+    """
+    View over MPICommInfo.root
+
+    root['world']      -> root rank for 'world' (typically 0)
+    root['compute']    -> root for 'compute', or None if COMM_NULL
+    root.world         -> same as root['world']
+    """
+    def __getitem__(self, name: str):
+        return comm_rank_roots[name].root
+
+    def __getattr__(self, name: str):
+        return self[name]
+
+
+class _RankMapView:
+    """
+    View over MPICommInfo.rankmap (list of world ranks in communicator order).
+
+    rankmap['world']      -> [0, 1, 2, ..., size-1]
+    rankmap['compute']    -> e.g. [0, 2, 4]
+    rankmap.world         -> same as rankmap['world']
+    """
+    def __getitem__(self, name: str):
+        return comm_rank_roots[name].rankmap
+
+    def __getattr__(self, name: str):
+        return self[name]
+
+
+class _ExecView:
+    """
+    executor['compute'](lambda: fn(...), default=...)
+    executes fn() only on ranks active in communicator 'compute'.
+    """
+    def __getitem__(self, name: str):
+        info = comm_rank_roots[name]
+
+        def _run(fn, default=None):
+            if info.active:
+                return fn()
+            else:
+                return default
+
+        return _run
+
+
+def get_comm_rank_root():
+
+    info = comm_rank_roots.get('world')
+
+    return info.comm, info.rank, info.root
+
+
+def append_comm_rank_root(comm_name, comm, rank, root, rank_mapping):
+    """
+    Low-level hook used in some places. Now stores an MPICommInfo.
+    Per-process device / etype_order are taken from MPICommInfo class.
+    """
+    comm_rank_roots[comm_name] = MPICommInfo(
+        name=comm_name,
+        comm=comm,
+        rank=rank,
+        root=root,
+        rankmap=rank_mapping
+    )
+
+def get_comm_info(comm_name='world') -> MPICommInfo:
+    """Return the MPICommInfo object for a logical communicator."""
+    info = comm_rank_roots.get(comm_name)
+    if info is None:
+        raise KeyError(f"Unknown MPI communicator name '{comm_name}'")
+    return info
 
 
 def get_local_rank():
@@ -306,6 +653,12 @@ class SparseScatterer(AlltoallMixin):
 
         return rvals
 
+def initialise_new_comm(comm_name, rank_mapping):
+    """
+    Create / update a logical communicator as a subset of MPI.COMM_WORLD.
+    """
+    MPICommInfo.from_ranklist(comm_name, rank_mapping)
+
 
 class Sorter(AlltoallMixin):
     typemap = {
@@ -454,3 +807,9 @@ class _MPI:
 
 
 mpi = _MPI()
+
+comm = _CommView()
+rank = _RankView()
+root = _RootView()
+rankmap = _RankMapView()
+execute = _ExecView()
