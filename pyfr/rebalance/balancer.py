@@ -518,7 +518,21 @@ class DiffusionBalancer:
 
     def balance(self, im, target):
         self.drain(im, target)
-        self.heal(im, target)
+
+        # KNOWN BUG (found 2026-07-27, newversion-rebased validation on
+        # Grace + Launch): heal()'s island count (nis_all) is not
+        # guaranteed to monotonically converge to 1 per rank -- observed
+        # oscillating (e.g. 48 -> 107 -> 64 -> plateau) and then
+        # plateauing indefinitely above 1, so with the default
+        # max_iters=-1 this loops forever (100% CPU, no output, looks
+        # like a hang after the mesh's real cost-driven target differs
+        # enough from the initial equibalanced partition). Hard-capping
+        # here is a stopgap to unblock validation runs, not a fix -- the
+        # underlying island/diffusion interaction (remove_islands /
+        # add_inliers / converge) needs a real redesign with an actual
+        # stagnation criterion on nis_all itself, not just on total
+        # element movement. See rebalance-heal-redesign branch.
+        self.heal(im, target, max_iters=200)
 
         # Iterate, aggressively so on early calls
         if self.aggr_iters > 0:
