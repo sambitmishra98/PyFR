@@ -258,21 +258,54 @@ class IndexMesh:
 
 
 def _exchange_eles_spts(old_mesh, exchangers):
+    comm, rank, root = get_comm_rank_root()
+
     eles, spts, nvals = {}, {}, {}
 
     # Build a lookup for node valency from the old mesh
     oidxs, ovals = old_mesh.node_idxs, old_mesh.node_valency
 
+    # Exchange() is collective, so every rank has to take part for every
+    # etype.  A rank can legitimately own zero elements of an etype (the
+    # balancer drains them) and yet still be a destination for that etype,
+    # so we can not simply skip the ones missing from our local mesh.
+    # Agree on the array metadata first so absent ranks can join in with
+    # empty buffers of the right dtype and shape.
+    local_meta = {et: (old_mesh.eles[et].dtype, old_mesh.spts[et].dtype,
+                       old_mesh.spts[et].shape[0], ovals.dtype)
+                  for et in exchangers if et in old_mesh.eles}
+
+    meta = {}
+    for rmeta in comm.allgather(local_meta):
+        for et, m in rmeta.items():
+            if et in meta and meta[et] != m:
+                raise RuntimeError(
+                    f'Ranks disagree on exchange schema for etype {et!r}: '
+                    f'{meta[et]} vs {m} -- refusing to silently pick one'
+                )
+            meta[et] = m
+
     for et, etex in exchangers.items():
-        if et not in old_mesh.eles:
+        # Absent from every rank; all ranks agree to skip it
+        if et not in meta:
             continue
 
-        # Exchange element structured arrays, geometry, and valency
-        new_e = etex.Exchange(old_mesh.eles[et])
-        new_s = etex.Exchange(old_mesh.spts[et], axis=1)
+        edtype, sdtype, nspts, vdtype = meta[et]
 
-        old_enodes = old_mesh.eles[et]['nodes']
-        new_v = etex.Exchange(ovals[np.searchsorted(oidxs, old_enodes)])
+        if et in old_mesh.eles:
+            old_e = old_mesh.eles[et]
+            old_s = old_mesh.spts[et]
+            old_v = ovals[np.searchsorted(oidxs, old_e['nodes'])]
+        else:
+            nenodes = edtype['nodes'].shape[0]
+            old_e = np.empty(0, dtype=edtype)
+            old_s = np.empty((nspts, 0, old_mesh.ndims), dtype=sdtype)
+            old_v = np.empty((0, nenodes), dtype=vdtype)
+
+        # Exchange element structured arrays, geometry, and valency
+        new_e = etex.Exchange(old_e)
+        new_s = etex.Exchange(old_s, axis=1)
+        new_v = etex.Exchange(old_v)
 
         if len(new_e):
             eles[et] = new_e

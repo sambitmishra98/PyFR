@@ -19,6 +19,63 @@ def _append_csv(fname, header, row):
         f.write(','.join(str(v) for v in row) + '\n')
 
 
+# Post-rebuild physical-mesh integrity check, independent of IndexMesh.
+#
+# IndexMesh.etype_counts() (as logged to lb_elem_dist.csv) tracks ownership
+# bookkeeping, not the physical mesh actually reconstructed by rebuild_mesh.
+# A rebalance bug can silently drop elements during the collective exchange
+# while IndexMesh still believes them conserved (this happened for real --
+# see the 2026-08-09 collective-mismatch bug).  This check instead sums the
+# ACTUAL per-etype element counts held in old_mesh.eles / new_mesh.eles on
+# every rank, before and after rebuild_mesh, and asserts the global total
+# per etype is unchanged.  A rebalance only moves ownership; it must never
+# create or destroy elements.
+#
+# Enabled by default for calibration/investigation runs; set
+# PYFR_REBAL_SKIP_INTEGRITY_CHECK=1 to disable for cheap production runs
+# once the collective fix is fully certified.
+def _assert_physical_conservation(old_mesh, new_mesh, tcurr):
+    if os.environ.get('PYFR_REBAL_SKIP_INTEGRITY_CHECK'):
+        return
+
+    comm, rank, root = get_comm_rank_root()
+
+    # old_mesh.etypes is the GLOBAL etype list (from the mesh codec), the
+    # same on every rank -- must iterate this, not a locally-observed union
+    # of old_mesh.eles/new_mesh.eles keys, or ranks with differing local
+    # etypes would call allreduce a different number of times each and
+    # deadlock. This is exactly the collective-mismatch bug class this
+    # check exists to guard against.
+    etypes = old_mesh.etypes
+    pre = {et: len(old_mesh.eles.get(et, ())) for et in etypes}
+    post = {et: len(new_mesh.eles.get(et, ())) for et in etypes}
+
+    pre_totals = {et: comm.allreduce(pre[et]) for et in etypes}
+    post_totals = {et: comm.allreduce(post[et]) for et in etypes}
+
+    bad = {et: (pre_totals[et], post_totals[et]) for et in etypes
+           if pre_totals[et] != post_totals[et]}
+
+    # comm.allreduce above already guarantees pre_totals/post_totals -- and
+    # therefore `bad` -- are identical on every rank, so every rank raises
+    # together rather than only root dying while its peers hang on the next
+    # collective.
+    if bad:
+        raise RuntimeError(
+            f'Physical mesh integrity check FAILED at tcurr={tcurr:.6f}: '
+            f'per-etype global element counts changed across rebuild_mesh '
+            f'(etype: (pre, post)) -- {bad}. This means the rebalance '
+            f'silently lost or duplicated elements in the physical mesh; '
+            f'IndexMesh bookkeeping (lb_elem_dist.csv) would NOT have '
+            f'caught this.'
+        )
+
+    if rank == root:
+        _append_csv('lb_physical_integrity.csv',
+                    ['tcurr'] + [f'total-{et}' for et in etypes],
+                    [f'{tcurr:.6f}'] + [post_totals[et] for et in etypes])
+
+
 class RebalanceMixin:
     '''
     Periodically repartitions the mesh to balance a measured per-rank
@@ -307,6 +364,11 @@ class RebalanceMixin:
         # Build exchangers and rebuild mesh (returns permuted exchangers)
         exchangers = make_exchangers(comm, mesh.eidxs, ownermap, mesh.etypes)
         new_mesh, exchangers = rebuild_mesh(mesh, exchangers)
+
+        # Physical-mesh integrity check, independent of IndexMesh (see
+        # 2026-08-09 collective-mismatch bug -- lb_elem_dist.csv alone
+        # cannot detect silent element loss during this step)
+        _assert_physical_conservation(mesh, new_mesh, self.tcurr)
 
         # Exchange solution through permuted exchangers
         soln = dict(zip(mesh.eidxs, self.system.ele_scal_upts(self.idxcurr)))
