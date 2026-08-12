@@ -119,14 +119,23 @@ class DiffusionBalancer:
         # fires and the default max_iters=-1 loops forever.  Cap it, and stop
         # once the island count has failed to improve on its best for
         # `heal-patience` consecutive iterations.  0 disables heal entirely.
-        self.heal_maxiters = cfg.getint(sect, 'heal-max-iters', 200)
+        #
+        # Default is 0 (off). heal() runs before iterate(), so the islands
+        # that the final iterate() creates are never seen by it: measured on
+        # c3900 (drift and violent cases, offline and online), enabling or
+        # disabling heal leaves the final partitioning bit-identical (same
+        # cut, same island count) -- it only costs time (~2x on the drift
+        # case offline). Confirmed with Sambit 2026-08-12 to default off;
+        # outlier-fraction and inlier-fraction both default to 0 and so were
+        # never exercised by this measurement, which is the reason this stays
+        # a config option rather than being removed outright.
+        self.heal_maxiters = cfg.getint(sect, 'heal-max-iters', 0)
         self.heal_patience = cfg.getint(sect, 'heal-patience', 3)
 
-        # heal() runs before iterate(), so the islands that the final
-        # iterate() creates are never seen by it: measured on c3900, enabling
-        # or disabling heal leaves the final partitioning bit-identical
-        # (same cut, same island count), it only costs time. Setting this
-        # runs it after iterate() instead, where it can actually act on them.
+        # Moot while heal-max-iters defaults to 0, above. If heal is turned
+        # back on, this runs it after iterate() instead of before, where it
+        # can actually see the islands iterate() creates rather than ones
+        # that no longer exist.
         self.heal_after = cfg.getbool(sect, 'heal-after-iterate', False)
 
     def schedule(self):
