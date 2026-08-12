@@ -84,9 +84,34 @@ class IndexMesh:
     with move(), which physically relocates these index records between
     ranks; the underlying solver mesh is untouched.
     '''
-    def __init__(self, mesh):
+    def __init__(self, mesh, vaff=True, geom=True):
+        '''
+        vaff -- build `nodes` and `fnodes`, the per-element and per-face node
+                id tables.  These are read only by 'vertices'-mode affinity
+                scoring, and are 81 of the 99 values per element that move()
+                migrates, so building them when nothing asks for vertex
+                affinity dominates the cost of a decision for no benefit.
+
+        geom -- build `cents`, the element centroids, read only by the
+                centroid-based outlier and inlier passes.
+
+        Both flags must agree across ranks, since they select which arrays
+        take part in collectives; a mismatch would deadlock or truncate
+        rather than fail cleanly, so it is checked once here.
+        '''
         comm, rank, root = get_comm_rank_root()
         self.comm, self.rank = comm, rank
+
+        self.vaff, self.geom = vaff, geom
+
+        if len(set(comm.allgather((vaff, geom)))) != 1:
+            raise RuntimeError('IndexMesh: ranks disagree on (vaff, geom)')
+
+        # Arrays that move() migrates and reindex() permutes, in one place so
+        # the two can not drift apart
+        self.mvarrays = (['gids', 'eti', 'fgid', 'fown', 'frozen']
+                         + (['cents'] if geom else [])
+                         + (['nodes', 'fnodes'] if vaff else []))
 
         self.etypes = etypes = mesh.etypes
         loc_ets = [et for et in etypes if et in mesh.eidxs]
@@ -117,20 +142,26 @@ class IndexMesh:
         ) if ne else np.empty(0, dtype=np.int16)
 
         # Element node ids, -1 padded to a globally consistent width
-        nn = max((mesh.eles[et]['nodes'].shape[1] for et in loc_ets),
-                 default=0)
-        nn = comm.allreduce(nn, op=mpi.MAX)
+        if vaff:
+            nn = max((mesh.eles[et]['nodes'].shape[1] for et in loc_ets),
+                     default=0)
+            nn = comm.allreduce(nn, op=mpi.MAX)
 
-        self.nodes = np.full((ne, nn), -1, dtype=int)
-        for et in loc_ets:
-            i, enodes = etype_off[et], mesh.eles[et]['nodes']
-            self.nodes[i:i + len(enodes), :enodes.shape[1]] = enodes
+            self.nodes = np.full((ne, nn), -1, dtype=int)
+            for et in loc_ets:
+                i, enodes = etype_off[et], mesh.eles[et]['nodes']
+                self.nodes[i:i + len(enodes), :enodes.shape[1]] = enodes
+        else:
+            nn, self.nodes = 0, None
 
         # Element centroids
-        self.cents = np.empty((ne, mesh.ndims))
-        for et in loc_ets:
-            i, spts = etype_off[et], mesh.spts[et]
-            self.cents[i:i + spts.shape[1]] = spts.mean(axis=0)
+        if geom:
+            self.cents = np.empty((ne, mesh.ndims))
+            for et in loc_ets:
+                i, spts = etype_off[et], mesh.spts[et]
+                self.cents[i:i + spts.shape[1]] = spts.mean(axis=0)
+        else:
+            self.cents = None
 
         # Codec index to face index lookup
         cidxmap, _ = parse_codec(mesh.codec, etypes)
@@ -159,9 +190,10 @@ class IndexMesh:
                 self.fgid[mf, mfidx] = self.gids[of]
                 self.fown[mf, mfidx] = rank
 
-                rec_flat.append(mf)
-                rec_fidx.append(mfidx)
-                rec_other.append(self.nodes[of])
+                if vaff:
+                    rec_flat.append(mf)
+                    rec_fidx.append(mfidx)
+                    rec_other.append(self.nodes[of])
 
         # Exchange ids and node rows across each MPI interface; the face
         # orderings of con_p are symmetric between neighbouring ranks
@@ -169,9 +201,12 @@ class IndexMesh:
         for nrank in sorted(mesh.con_p):
             mf, mfidx = _con_flat(mesh.con_p[nrank], con_off, cfidx)
 
-            send = np.ascontiguousarray(
-                np.hstack([self.gids[mf, None], self.nodes[mf]])
-            )
+            # Column 0 is the neighbour gid, always needed; the rest are its
+            # node ids, needed only for vertex affinity
+            cols = ([self.gids[mf, None], self.nodes[mf]] if vaff
+                    else [self.gids[mf, None]])
+
+            send = np.ascontiguousarray(np.hstack(cols))
             recv = np.empty_like(send)
 
             reqs.append(comm.Isend(send, nrank))
@@ -184,28 +219,80 @@ class IndexMesh:
             self.fgid[mf, mfidx] = recv[:, 0]
             self.fown[mf, mfidx] = nrank
 
-            rec_flat.append(mf)
-            rec_fidx.append(mfidx)
-            rec_other.append(recv[:, 1:])
+            if vaff:
+                rec_flat.append(mf)
+                rec_fidx.append(mfidx)
+                rec_other.append(recv[:, 1:])
 
         # Per-face shared node ids, -1 padded
-        if rec_flat:
-            rflat = np.concatenate(rec_flat)
-            rfidx = np.concatenate(rec_fidx)
-            rother = np.vstack([r[:, :nn] for r in rec_other])
-            shared = _row_intersect(self.nodes[rflat], rother)
+        if vaff:
+            if rec_flat:
+                rflat = np.concatenate(rec_flat)
+                rfidx = np.concatenate(rec_fidx)
+                rother = np.vstack([r[:, :nn] for r in rec_other])
+                shared = _row_intersect(self.nodes[rflat], rother)
+            else:
+                rflat = rfidx = np.empty(0, dtype=int)
+                shared = np.empty((0, 1), dtype=int)
+
+            nfv = comm.allreduce(shared.shape[1], op=mpi.MAX)
+
+            self.fnodes = np.full((ne, nf, nfv), -1, dtype=int)
+            self.fnodes[rflat, rfidx, :shared.shape[1]] = shared
         else:
-            rflat = rfidx = np.empty(0, dtype=int)
-            shared = np.empty((0, 1), dtype=int)
+            self.fnodes = None
 
-        nfv = comm.allreduce(shared.shape[1], op=mpi.MAX)
-
-        self.fnodes = np.full((ne, nf, nfv), -1, dtype=int)
-        self.fnodes[rflat, rfidx, :shared.shape[1]] = shared
+        # Scratch membership bitmap over global element ids, used by move().
+        # Sized nglobal + 1 so that fgid's -1 padding indexes the spare final
+        # slot, which no real gid can set; that removes the need for a
+        # separate validity mask, and hence a whole pass over fgid.
+        self._movemask = np.zeros(self.nglobal + 1, dtype=bool)
 
         # Periodic elements are pinned to their current rank
         self.frozen = np.zeros(ne, dtype=bool)
         self.frozen[_frozen_flat(mesh, etype_off)] = True
+
+    def reindex(self, mesh, check=False):
+        '''
+        Re-order this already up-to-date index mesh into the element ordering
+        of `mesh`, instead of rebuilding it from scratch.
+
+        After a rebalance is applied, rebuild_mesh and sort_eles re-order
+        elements within each rank, but the set of elements a rank owns is
+        exactly the set move() already gave it.  So the carried index mesh
+        differs from a freshly built one by a pure permutation.
+
+        Global per-etype element counts are conserved by a rebalance, so the
+        goff table computed at construction stays valid and no collective is
+        needed here.
+        '''
+        loc_ets = [et for et in self.etypes if et in mesh.eidxs]
+
+        tgids = np.concatenate(
+            [self.goff[et] + np.asarray(mesh.eidxs[et], dtype=int)
+             for et in loc_ets]
+        ) if loc_ets else np.empty(0, dtype=int)
+
+        if len(tgids) != self.neles:
+            raise RuntimeError(
+                f'IndexMesh.reindex: element count changed '
+                f'({self.neles} -> {len(tgids)}); the carried index mesh is '
+                f'stale, not merely re-ordered'
+            )
+
+        po = np.argsort(self.gids, kind='stable')
+        io = np.argsort(tgids, kind='stable')
+
+        if check and not np.array_equal(self.gids[po], tgids[io]):
+            raise RuntimeError('IndexMesh.reindex: gid sets differ')
+
+        perm = np.empty(self.neles, dtype=np.int64)
+        perm[io] = po
+
+        for nm in self.mvarrays:
+            setattr(self, nm, getattr(self, nm)[perm])
+
+        return self
 
     def counts(self):
         return np.array(self.comm.allgather(self.neles))
@@ -239,22 +326,46 @@ class IndexMesh:
         if not len(pairs):
             return
 
-        ex = DestExchanger(comm, dests)
-        for name in ('gids', 'eti', 'nodes', 'cents', 'fgid', 'fown',
-                     'fnodes', 'frozen'):
-            setattr(self, name, ex.Exchange(getattr(self, name)))
+        # Exchange only the elements that actually change rank.  Exchange()
+        # gathers and then alltoallv's the whole array, so passing it the full
+        # `dests` -- which is np.full(ne, rank) with a few entries changed --
+        # sends nearly the entire partition through MPI to itself, once per
+        # array, once per move.  Restricting it to the movers leaves only a
+        # local gather of the stayers.
+        #
+        # This reorders the local arrays, stayers first and then incomers by
+        # source rank.  Nothing depends on that ordering: diffuse() sorts by
+        # (nbr, score, gid), smooth() groups by flat but selects within a
+        # group by (score, gid, nbr), eidxs() sorts, and reindex() handles an
+        # arbitrary permutation.
+        ex = DestExchanger(comm, dests[mv])
+        stay = ~mv
+
+        for name in self.mvarrays:
+            a = getattr(self, name)
+            setattr(self, name, np.concatenate([a[stay], ex.Exchange(a[mv])]))
 
         self.neles = len(self.gids)
 
-        # Retag the owners of faces adjoining moved elements
+        # Retag the owners of faces adjoining moved elements.  Searchsorting
+        # the whole fgid array pays a binary search per face slot when the
+        # movers are a tiny fraction of it, so nearly every search is a miss;
+        # mark the movers in a bitmap, test membership with a single gather,
+        # and search only the slots that hit.
         mgid, mdst = pairs[:, 0], pairs[:, 1]
         order = np.argsort(mgid)
         mgid, mdst = mgid[order], mdst[order]
 
-        pos = np.searchsorted(mgid, self.fgid)
-        np.clip(pos, 0, len(mgid) - 1, out=pos)
-        hit = (mgid[pos] == self.fgid) & (self.fgid >= 0)
-        self.fown[hit] = mdst[pos[hit]].astype(self.fown.dtype)
+        mask = self._movemask
+        mask[mgid] = True
+
+        hit = mask[self.fgid]
+
+        mask[mgid] = False
+
+        if hit.any():
+            pos = np.searchsorted(mgid, self.fgid[hit])
+            self.fown[hit] = mdst[pos].astype(self.fown.dtype)
 
 
 def _exchange_eles_spts(old_mesh, exchangers):

@@ -130,6 +130,10 @@ class RebalanceMixin:
         comm, rank, root = get_comm_rank_root()
         wstart = time.perf_counter_ns()
 
+        # The balancer knows which IndexMesh tables its configuration will
+        # ever read, so the rest need be neither built nor migrated
+        bal = self._rebal_balancer
+
         self._rebal_iter += 1
 
         # On hard stop, revert to the best partition seen and freeze
@@ -143,14 +147,16 @@ class RebalanceMixin:
                       flush=True)
 
             if self._rebal_best_eidxs is not None:
-                im = IndexMesh(self.system.mesh)
+                im = IndexMesh(self.system.mesh, vaff=bal.needs_vaff,
+                               geom=bal.needs_geom)
                 self._rebal_apply(self._rebal_ownermap(
                     im, self._rebal_best_eidxs
                 ))
 
             return
 
-        im = IndexMesh(self.system.mesh)
+        im = IndexMesh(self.system.mesh, vaff=bal.needs_vaff,
+                       geom=bal.needs_geom)
         self._rebal_dist_csv(im)
 
         # Per-rank cost and resulting element targets

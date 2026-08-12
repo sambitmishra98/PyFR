@@ -87,6 +87,52 @@ class DiffusionBalancer:
         self.flow_relax = cfg.getfloat(sect, 'flow-relax', 0.5)
         self.aggr_iters = cfg.getint(sect, 'init-aggressive-iters', 1)
 
+        # Affinity mode for the opening aggressive pass of the schedule.
+        # 'faces' is the default because it matches 'vertices' on final
+        # spread, edge cut and time, while letting IndexMesh omit the node
+        # tables entirely -- those are 81 of the 99 values per element that
+        # move() would otherwise migrate.
+        self.open_mode = cfg.get(sect, 'open-mode', 'faces')
+
+        # Smooth after every k-th schedule step. Smoothing after every step
+        # fights the diffusion and stops it reaching the target at all: on
+        # c3900 it stalls at maxdev 420 where any stride >= 2 lands exactly,
+        # and it is several times slower for the privilege. The final step
+        # always smooths regardless, so a schedule never ends on an
+        # unrefined boundary.
+        self.smooth_every = cfg.getint(sect, 'smooth-every', 4)
+
+        # Which IndexMesh tables this configuration will ever consult, so the
+        # caller can tell IndexMesh to skip building and migrating the rest
+        modes = {m for _, m in self.schedule()}
+        if self.outlier_frac > 0:
+            modes.add(self.outlier_mode)
+        if self.inlier_frac > 0:
+            modes.add(self.inlier_mode)
+
+        self.needs_vaff = modes != {'faces'}
+        self.needs_geom = self.outlier_frac > 0 or self.inlier_frac > 0
+
+        # heal()'s island count is not guaranteed to descend monotonically to
+        # one per rank: it has been observed to rise on the first iteration
+        # and then oscillate, so neither of the original exit conditions ever
+        # fires and the default max_iters=-1 loops forever.  Cap it, and stop
+        # once the island count has failed to improve on its best for
+        # `heal-patience` consecutive iterations.  0 disables heal entirely.
+        self.heal_maxiters = cfg.getint(sect, 'heal-max-iters', 200)
+        self.heal_patience = cfg.getint(sect, 'heal-patience', 3)
+
+        # heal() runs before iterate(), so the islands that the final
+        # iterate() creates are never seen by it: measured on c3900, enabling
+        # or disabling heal leaves the final partitioning bit-identical
+        # (same cut, same island count), it only costs time. Setting this
+        # runs it after iterate() instead, where it can actually act on them.
+        self.heal_after = cfg.getbool(sect, 'heal-after-iterate', False)
+
+    def schedule(self):
+        return ([(6.0, self.open_mode), (2.0, 'faces')]
+                + [(0.0, 'faces')]*10)
+
     # -- Flow planning
 
     def flow_plan(self, im, target, max_iters=4):
@@ -157,11 +203,29 @@ class DiffusionBalancer:
         rank = self.rank
         movable = ~im.frozen
 
-        mpi_face = (im.fown >= 0) & (im.fown != rank)
-        nbrs = np.unique(im.fown[mpi_face])
+        if mode != 'faces' and im.nodes is None:
+            raise RuntimeError(
+                f'Affinity mode {mode!r} needs the IndexMesh node tables, '
+                f'but it was built without them; see DiffusionBalancer.'
+                f'needs_vaff'
+            )
+
+        fown = im.fown
+
+        # Distinct face owners in one linear pass; the -1 padding is shifted
+        # into bin 0
+        tot = np.bincount(fown.ravel() + 1, minlength=self.comm.size + 1)
+        owners = np.flatnonzero(tot) - 1
+        nbrs = owners[(owners >= 0) & (owners != rank)]
 
         if mode == 'faces':
-            aown = (im.fown == rank).sum(axis=1)
+            # Only an element with a face to another rank can be a candidate,
+            # so restrict to those before the per-neighbour passes
+            isnbr = (fown >= 0) & (fown != rank)
+            bnd = np.flatnonzero(isnbr.any(axis=1) & movable)
+
+            fb = fown[bnd]
+            aown = (fb == rank).sum(axis=1)
         else:
             # Interface vertex sets per neighbouring rank
             vsets = {}
@@ -178,16 +242,21 @@ class DiffusionBalancer:
         flats, gids, dsts, scores = [], [], [], []
         for nb in nbrs:
             if mode == 'faces':
-                b = (im.fown == nb).sum(axis=1)
-                sel = (b > 0) & movable
+                b = (fb == nb).sum(axis=1)
+
+                # aown and b are indexed in boundary space, so sel is too;
+                # bnd maps back out, and movable is already folded into it
+                sel = b > 0
+                idx = bnd[sel]
             else:
                 b = (np.isin(im.nodes, vsets[nb]) & valid).sum(axis=1)
                 sel = (im.fown == nb).any(axis=1) & (b > 0) & movable
+                idx = np.flatnonzero(sel)
 
             score = (aown[sel] - b[sel]).astype(float)
             keep = score <= thr
 
-            flat = np.flatnonzero(sel)[keep]
+            flat = idx[keep]
             flats.append(flat)
             gids.append(im.gids[flat])
             dsts.append(np.full(len(flat), nb, dtype=int))
@@ -304,15 +373,18 @@ class DiffusionBalancer:
 
     def iterate(self, im, target, relax=None, smooth=True):
         relax = self.flow_relax if relax is None else relax
-        schedule = [(6.0, 'vertices'), (2.0, 'faces')] + [(0.0, 'faces')]*10
+        schedule = self.schedule()
 
-        for thr, mode in schedule:
+        for i, (thr, mode) in enumerate(schedule):
             mflow = self.flow_plan(im, target)
 
             caps = np.ceil(mflow[self.rank]*relax).astype(int)
             self.diffuse(im, np.maximum(caps, 0), thr, mode)
 
-            if smooth:
+            # Always smooth on the last step, whatever the stride
+            last = i == len(schedule) - 1
+
+            if smooth and (last or (i + 1) % self.smooth_every == 0):
                 self.smooth_until_stagnant(im)
 
     def converge(self, im, target, max_iters=1, smooth=True):
@@ -350,29 +422,52 @@ class DiffusionBalancer:
         vtab[1:] = np.bincount(src, minlength=ne).cumsum()
         etab = dst[np.argsort(src, kind='stable')]
 
-        labels = np.full(ne, -1, dtype=int)
-        sizes, cid = [], 0
+        # Connected components by label propagation with path compression.
+        # This was a pure-Python BFS over every owned element, and it runs at
+        # least once per balance() even when there are no islands to find,
+        # which made it the single largest cost in heal().
+        #
+        # Each round every vertex takes the smallest label in its
+        # neighbourhood, then labels are compressed by pointer jumping, so
+        # components collapse in O(log n) fully vectorised rounds.
+        lab = np.arange(ne)
 
-        for s in range(ne):
-            if labels[s] >= 0:
-                continue
+        # etab is grouped by source, so segment minima come from a reduceat.
+        # Zero-degree vertices would give repeated segment starts (for which
+        # reduceat returns the wrong thing), so they are excluded; they
+        # contribute nothing anyway, and the segments either side stay
+        # correctly bounded.
+        has = np.diff(vtab) > 0
+        starts = vtab[:-1][has]
 
-            stack, sz = [s], 0
-            labels[s] = cid
+        while True:
+            new = lab.copy()
 
-            while stack:
-                u = stack.pop()
-                sz += 1
+            if len(starts):
+                new[has] = np.minimum(lab[has],
+                                      np.minimum.reduceat(lab[etab], starts))
 
-                for v in etab[vtab[u]:vtab[u + 1]]:
-                    if labels[v] < 0:
-                        labels[v] = cid
-                        stack.append(v)
+            # Pointer jumping: follow each label to its root
+            while True:
+                nxt = new[new]
+                if np.array_equal(nxt, new):
+                    break
 
-            sizes.append(sz)
-            cid += 1
+                new = nxt
 
-        sizes = np.array(sizes, dtype=int)
+            if np.array_equal(new, lab):
+                break
+
+            lab = new
+
+        # Compact root ids to 0..ncomp-1. np.unique returns roots ascending,
+        # and a component's root is its smallest member index, so this
+        # reproduces the old BFS's numbering (which assigned ids in ascending
+        # order of first-encountered vertex) exactly.
+        _, labels = np.unique(lab, return_inverse=True)
+        labels = labels.reshape(-1)
+        sizes = np.bincount(labels)
+
         order = np.lexsort((np.arange(len(sizes)), -sizes))
 
         remap = np.empty_like(order)
@@ -497,12 +592,27 @@ class DiffusionBalancer:
         self.remove_outliers(im)
 
         iters = 0
+        nis_best, nis_stall = None, 0
         while max_iters == -1 or iters < max_iters:
             iters += 1
 
             cluster, nis_all = self.detect_islands(im)
             if all(n == 1 for n in nis_all):
                 break
+
+            # Stagnation criterion on the island count itself.  The existing
+            # exits below test element movement and nis <= 2, neither of which
+            # fires while nis_all merely oscillates.
+            if self.heal_patience > 0:
+                nis_now = sum(nis_all)
+
+                if nis_best is None or nis_now < nis_best:
+                    nis_best, nis_stall = nis_now, 0
+                else:
+                    nis_stall += 1
+
+                if nis_stall >= self.heal_patience:
+                    break
 
             self.remove_islands(im, cluster)
             self.remove_outliers(im)
@@ -518,7 +628,9 @@ class DiffusionBalancer:
 
     def balance(self, im, target):
         self.drain(im, target)
-        self.heal(im, target)
+
+        if self.heal_maxiters and not self.heal_after:
+            self.heal(im, target, max_iters=self.heal_maxiters)
 
         # Iterate, aggressively so on early calls
         if self.aggr_iters > 0:
@@ -528,6 +640,9 @@ class DiffusionBalancer:
             self.aggr_iters -= 1
         else:
             self.iterate(im, target)
+
+        if self.heal_maxiters and self.heal_after:
+            self.heal(im, target, max_iters=self.heal_maxiters)
 
     def seed(self, im, new_rank, target):
         # Give an empty rank one element, taken from the interface of

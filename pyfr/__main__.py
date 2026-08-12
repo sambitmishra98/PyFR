@@ -15,6 +15,7 @@ from pyfr._version import __version__
 from pyfr.backends import BaseBackend, get_backend
 from pyfr.inifile import Inifile
 from pyfr.mpiutil import get_comm_rank_root, init_mpi
+from pyfr.partition_diffuse import process_partition_diffuse
 from pyfr.partitioners import (BasePartitioner, get_partitioner,
                                reconstruct_partitioning, write_partitioning)
 from pyfr.plugins import BaseCLIPlugin
@@ -120,6 +121,26 @@ def main():
     ap_partition_reconstruct.set_defaults(
         process=process_partition_reconstruct
     )
+
+    # Construct a partitioning by offline diffusion (runs under mpirun)
+    ap_partition_diffuse = ap_partition.add_parser(
+        'diffuse', help='partition diffuse --help'
+    )
+    ap_partition_diffuse.add_argument('mesh', help='input mesh file')
+    ap_partition_diffuse.add_argument('np', help='number of partitions or a '
+                                      'colon delimited list of weights')
+    ap_partition_diffuse.add_argument('name',
+                                      help='existing partitioning to start '
+                                      'from')
+    ap_partition_diffuse.add_argument('dpname',
+                                      help='output partitioning name')
+    ap_partition_diffuse.add_argument('-f', '--force', action='count',
+                                      help='overwrite existing partitioning')
+    ap_partition_diffuse.add_argument('-n', '--niters', type=int, default=1,
+                                      help='number of diffusion cycles')
+    ap_partition_diffuse.add_argument('-c', '--cfg', type=FileType('r'),
+                                      help='ini file with a [diffuse] section')
+    ap_partition_diffuse.set_defaults(process=process_partition_diffuse)
 
     # Remove partitioning
     ap_partition_remove = ap_partition.add_parser(
