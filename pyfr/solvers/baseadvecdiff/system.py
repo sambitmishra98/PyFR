@@ -53,6 +53,9 @@ class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
 
     @memoize
     def _rhs_graphs(self, uinbank, foutbank):
+        if self._has_mpi_p_mortars:
+            return self._rhs_graphs_mpi_p(uinbank, foutbank)
+
         m = self._mpireqs
         k, *_ = self._get_kernels(uinbank, foutbank)
 
@@ -87,6 +90,19 @@ class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
         kdeps = k['eles/copy_fpts'] or k['eles/disu']
         g_soln.add_all(k['iint/con_u'],
                        deps=kdeps + k['mpiint/scal_fpts_pack'])
+        g_soln.add_all(k['mint/con_u'], deps=kdeps)
+
+        mprev = None
+        for stage in ('con_u_gather', 'con_u_interp', 'con_u_eval',
+                      'con_u_project', 'con_u_scatter'):
+            skerns = k[f'mint/{stage}']
+            if mprev is None:
+                g_soln.add_all(skerns, deps=kdeps)
+            else:
+                for l in skerns:
+                    g_soln.add(l, deps=deps(l, f'mint/{mprev}'))
+            mprev = stage
+
         g_soln.add_all(k['bcint/con_u'], deps=kdeps)
 
         g_soln.commit()
@@ -145,6 +161,20 @@ class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
         g_grad_flux.add_all(k['iint/comm_flux'],
                             deps=ideps + k['eles/avfill'],
                             pdeps=k['mpiint/vect_fpts_pack'])
+        g_grad_flux.add_all(k['mint/comm_flux'], deps=ideps)
+
+        mprev = None
+        for stage in ('comm_flux_gather', 'comm_flux_interp',
+                      'comm_flux_eval', 'comm_flux_project',
+                      'comm_flux_scatter'):
+            skerns = k[f'mint/{stage}']
+            if mprev is None:
+                g_grad_flux.add_all(skerns, deps=ideps)
+            else:
+                for l in skerns:
+                    g_grad_flux.add(l, deps=deps(l, f'mint/{mprev}'))
+            mprev = stage
+
         g_grad_flux.add_all(k['bcint/comm_flux'],
                             deps=ideps + k['eles/avfill'])
 
@@ -231,8 +261,364 @@ class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
 
         return g_soln, g_grad_flux, g_mpi_flux
 
+    def _rhs_graphs_mpi_p(self, uinbank, foutbank):
+        m = self._mpireqs
+        k, *_ = self._get_kernels(uinbank, foutbank)
+
+        def deps(dk, *names):
+            return self._kdeps(k, dk, *names)
+
+        # Graph 1: native solution exchange, local common states, and
+        # nonowner-to-owner distributed p-mortar state exchange.
+        g_state = self.backend.graph()
+        g_state.add_mpi_reqs(m['scal_fpts_recv'])
+        g_state.add_mpi_reqs(m['mpi_p_state_recv'])
+
+        g_state.add_all(k['eles/disu'])
+        g_state.add_all(k['mpiint/scal_fpts_pack'], deps=k['eles/disu'])
+        for send, pack in zip(
+            m['scal_fpts_send'], k['mpiint/scal_fpts_pack']
+        ):
+            g_state.add_mpi_req(send, deps=[pack])
+
+        g_state.add_all(k['eles/copy_soln'])
+        for kern in k['eles/copy_fpts']:
+            g_state.add(kern, deps=deps(kern, 'eles/disu'))
+        kdeps = k['eles/copy_fpts'] or k['eles/disu']
+        g_state.add_all(k['iint/con_u'], deps=kdeps)
+        g_state.add_all(k['mint/con_u'], deps=kdeps)
+
+        mprev = None
+        for stage in (
+            'con_u_gather', 'con_u_interp', 'con_u_eval',
+            'con_u_project', 'con_u_scatter'
+        ):
+            skerns = k[f'mint/{stage}']
+            if mprev is None:
+                g_state.add_all(skerns, deps=kdeps)
+            else:
+                for kern in skerns:
+                    g_state.add(kern, deps=deps(kern, f'mint/{mprev}'))
+            mprev = stage
+
+        g_state.add_all(k['bcint/con_u'], deps=kdeps)
+        g_state.add_all(k['mpimint/state_gather'], deps=k['eles/disu'])
+        g_state.add_all(
+            k['mpimint/state_pack'], deps=k['mpimint/state_gather']
+        )
+        state_send_deps = (
+            k['mpimint/state_pack'] or k['mpimint/state_gather']
+        )
+        for send in m['mpi_p_state_send']:
+            g_state.add_mpi_req(send, deps=state_send_deps)
+        g_state.commit()
+
+        # Graph 2: consume remote state on owners, evaluate one common
+        # state, project/scatter it, and return it to nonowners as needed.
+        g_common = self.backend.graph()
+        g_common.add_mpi_reqs(m['mpi_p_common_recv'])
+        g_common.add_all(k['mpiint/scal_fpts_unpack'])
+        for kern in k['mpiint/con_u']:
+            g_common.add(
+                kern, deps=deps(kern, 'mpiint/scal_fpts_unpack')
+            )
+
+        g_common.add_all(k['mpimint/state_unpack'])
+        g_common.add_all(
+            k['mpimint/state_interp'], deps=k['mpimint/state_unpack']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_eval'],
+            deps=k['mpimint/state_interp']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_project'],
+            deps=k['mpimint/common_state_eval']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_owner_scatter'],
+            deps=k['mpimint/common_state_project']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_pack'],
+            deps=k['mpimint/common_state_project']
+        )
+        common_send_deps = (
+            k['mpimint/common_state_pack']
+            or k['mpimint/common_state_project']
+        )
+        for send in m['mpi_p_common_send']:
+            g_common.add_mpi_req(send, deps=common_send_deps)
+
+        g_common.add_all(k['mpimint/common_state_local_scatter'])
+        g_common.commit()
+
+        # Graph 3: finish distributed common-state correction, form
+        # corrected gradients, send required gradients, and evaluate all
+        # rank-local/ordinary-MPI-independent flux work.
+        g_grad = self.backend.graph()
+        g_grad.add_mpi_reqs(m['vect_fpts_recv'])
+        g_grad.add_mpi_reqs(m['mpi_p_grad_recv'])
+
+        g_grad.add_all(k['mpimint/common_state_unpack'])
+        g_grad.add_all(
+            k['mpimint/common_state_scatter'],
+            deps=k['mpimint/common_state_unpack']
+        )
+        g_grad.add_all(
+            k['eles/tgradpcoru_upts'],
+            deps=k['mpimint/common_state_scatter']
+        )
+        for kern in k['eles/tgradcoru_upts']:
+            g_grad.add(kern, deps=deps(kern, 'eles/tgradpcoru_upts'))
+        for kern in k['eles/gradcoru_upts']:
+            g_grad.add(kern, deps=deps(kern, 'eles/tgradcoru_upts'))
+        for kern in k['eles/tdisf_fused']:
+            g_grad.add(kern, deps=deps(kern, 'eles/tgradcoru_upts'))
+        for kern in k['eles/gradcoru_fpts']:
+            ldeps = deps(
+                kern, 'eles/tdisf_fused', 'eles/gradcoru_upts'
+            )
+            g_grad.add(kern, deps=ldeps)
+
+        ideps = k['eles/gradcoru_fpts'] or k['eles/tdisf_fused']
+        g_grad.add_all(k['mpiint/vect_fpts_pack'], deps=ideps)
+        for send, pack in zip(
+            m['vect_fpts_send'], k['mpiint/vect_fpts_pack']
+        ):
+            g_grad.add_mpi_req(send, deps=[pack])
+
+        g_grad.add_all(k['mpimint/grad_gather'], deps=ideps)
+        g_grad.add_all(
+            k['mpimint/grad_pack'], deps=k['mpimint/grad_gather']
+        )
+        grad_send_deps = (
+            k['mpimint/grad_pack'] or k['mpimint/grad_gather']
+        )
+        for send in m['mpi_p_grad_send']:
+            g_grad.add_mpi_req(send, deps=grad_send_deps)
+
+        g_grad.add_all(k['iint/comm_flux'], deps=ideps)
+        g_grad.add_all(k['mint/comm_flux'], deps=ideps)
+        mprev = None
+        for stage in (
+            'comm_flux_gather', 'comm_flux_interp', 'comm_flux_eval',
+            'comm_flux_project', 'comm_flux_scatter'
+        ):
+            skerns = k[f'mint/{stage}']
+            if mprev is None:
+                g_grad.add_all(skerns, deps=ideps)
+            else:
+                for kern in skerns:
+                    g_grad.add(
+                        kern, deps=deps(kern, f'mint/{mprev}')
+                    )
+            mprev = stage
+        g_grad.add_all(k['bcint/comm_flux'], deps=ideps)
+
+        for kern in k['eles/gradcoru_qpts']:
+            g_grad.add(kern, deps=deps(kern, 'eles/gradcoru_upts'))
+        g_grad.add_all(k['eles/qptsu'])
+        for kern in k['eles/tdisf']:
+            if k['eles/qptsu']:
+                ldeps = deps(kern, 'eles/gradcoru_qpts', 'eles/qptsu')
+            elif k['eles/gradcoru_fpts']:
+                ldeps = deps(kern, 'eles/gradcoru_fpts')
+            else:
+                ldeps = deps(kern, 'eles/gradcoru_upts')
+            g_grad.add(kern, deps=ldeps)
+        for kern in k['eles/tdivtpcorf']:
+            g_grad.add(
+                kern, deps=deps(kern, 'eles/tdisf', 'eles/tdisf_fused')
+            )
+
+        kgroup = [
+            k['eles/tgradpcoru_upts'], k['eles/tgradcoru_upts'],
+            k['eles/gradcoru_upts'], k['eles/tdisf_fused'],
+            k['eles/gradcoru_fpts'], k['eles/gradcoru_qpts'],
+            k['eles/qptsu'], k['eles/tdisf'], k['eles/tdivtpcorf']
+        ]
+        for ks in zip_longest(*kgroup):
+            if k['eles/qptsu']:
+                subs = [
+                    [(ks[0], 'out'), (ks[1], 'out'), (ks[2], 'gradu'),
+                     (ks[4], 'b'), (ks[5], 'b')],
+                    [(ks[6], 'out'), (ks[7], 'u')],
+                    [(ks[5], 'out'), (ks[7], 'f'), (ks[8], 'b')],
+                ]
+            elif k['eles/tdisf_fused']:
+                subs = [
+                    [(ks[0], 'out'), (ks[1], 'out'),
+                     (ks[3], 'gradu'), (ks[4], 'b')],
+                    [(ks[3], 'f'), (ks[8], 'b')],
+                ]
+            else:
+                subs = [[
+                    (ks[0], 'out'), (ks[1], 'out'), (ks[2], 'gradu'),
+                    (ks[4], 'b'), (ks[7], 'f'), (ks[8], 'b')
+                ]]
+            self._group(g_grad, ks, subs=subs)
+        g_grad.commit()
+
+        # Graph 4: remote corrected gradients are now available. Owners
+        # evaluate the sole distributed viscous common flux and return the
+        # projected nonowner contribution. Ordinary MPI flux is also done.
+        g_flux = self.backend.graph()
+        g_flux.add_mpi_reqs(m['mpi_p_flux_recv'])
+        g_flux.add_all(k['mpiint/vect_fpts_unpack'])
+        for kern in k['mpiint/comm_flux']:
+            g_flux.add(
+                kern, deps=deps(kern, 'mpiint/vect_fpts_unpack')
+            )
+
+        g_flux.add_all(k['mpimint/grad_unpack'])
+        g_flux.add_all(
+            k['mpimint/grad_interp'], deps=k['mpimint/grad_unpack']
+        )
+        g_flux.add_all(
+            k['mpimint/flux_eval'], deps=k['mpimint/grad_interp']
+        )
+        g_flux.add_all(
+            k['mpimint/flux_project'], deps=k['mpimint/flux_eval']
+        )
+        g_flux.add_all(
+            k['mpimint/owner_flux_scatter'],
+            deps=k['mpimint/flux_project']
+        )
+        g_flux.add_all(
+            k['mpimint/flux_pack'], deps=k['mpimint/flux_project']
+        )
+        flux_send_deps = (
+            k['mpimint/flux_pack'] or k['mpimint/flux_project']
+        )
+        for send in m['mpi_p_flux_send']:
+            g_flux.add_mpi_req(send, deps=flux_send_deps)
+        g_flux.commit()
+
+        # Graph 5: consume the projected remote contribution and finish
+        # the corrected divergence on every rank.
+        g_div = self.backend.graph()
+        g_div.add_all(k['mpimint/flux_unpack'])
+        g_div.add_all(
+            k['mpimint/flux_scatter'], deps=k['mpimint/flux_unpack']
+        )
+        g_div.add_all(k['eles/tdivtconf'], deps=k['mpimint/flux_scatter'])
+        for kern in k['eles/negdivconf']:
+            g_div.add(kern, deps=deps(kern, 'eles/tdivtconf'))
+        for k1, k2 in zip_longest(
+            k['eles/tdivtconf'], k['eles/negdivconf']
+        ):
+            self._group(g_div, [k1, k2])
+        g_div.commit()
+
+        return g_state, g_common, g_grad, g_flux, g_div
+
+    def _compute_grads_graph_mpi_p(self, uinbank):
+        m = self._mpireqs
+        k, *_ = self._get_kernels(uinbank, None)
+
+        def deps(dk, *names):
+            return self._kdeps(k, dk, *names)
+
+        g_state = self.backend.graph()
+        g_state.add_mpi_reqs(m['scal_fpts_recv'])
+        g_state.add_mpi_reqs(m['mpi_p_state_recv'])
+        g_state.add_all(k['eles/disu'])
+        g_state.add_all(k['mpiint/scal_fpts_pack'], deps=k['eles/disu'])
+        for send, pack in zip(
+            m['scal_fpts_send'], k['mpiint/scal_fpts_pack']
+        ):
+            g_state.add_mpi_req(send, deps=[pack])
+
+        for kern in k['eles/copy_fpts']:
+            g_state.add(kern, deps=deps(kern, 'eles/disu'))
+        kdeps = k['eles/copy_fpts'] or k['eles/disu']
+        g_state.add_all(k['iint/con_u'], deps=kdeps)
+        g_state.add_all(k['mint/con_u'], deps=kdeps)
+        mprev = None
+        for stage in (
+            'con_u_gather', 'con_u_interp', 'con_u_eval',
+            'con_u_project', 'con_u_scatter'
+        ):
+            skerns = k[f'mint/{stage}']
+            if mprev is None:
+                g_state.add_all(skerns, deps=kdeps)
+            else:
+                for kern in skerns:
+                    g_state.add(kern, deps=deps(kern, f'mint/{mprev}'))
+            mprev = stage
+        g_state.add_all(k['bcint/con_u'], deps=kdeps)
+
+        g_state.add_all(k['mpimint/state_gather'], deps=k['eles/disu'])
+        g_state.add_all(
+            k['mpimint/state_pack'], deps=k['mpimint/state_gather']
+        )
+        state_send_deps = (
+            k['mpimint/state_pack'] or k['mpimint/state_gather']
+        )
+        for send in m['mpi_p_state_send']:
+            g_state.add_mpi_req(send, deps=state_send_deps)
+        g_state.commit()
+
+        g_common = self.backend.graph()
+        g_common.add_mpi_reqs(m['mpi_p_common_recv'])
+        g_common.add_all(k['mpiint/scal_fpts_unpack'])
+        for kern in k['mpiint/con_u']:
+            g_common.add(
+                kern, deps=deps(kern, 'mpiint/scal_fpts_unpack')
+            )
+        g_common.add_all(k['mpimint/state_unpack'])
+        g_common.add_all(
+            k['mpimint/state_interp'], deps=k['mpimint/state_unpack']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_eval'],
+            deps=k['mpimint/state_interp']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_project'],
+            deps=k['mpimint/common_state_eval']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_owner_scatter'],
+            deps=k['mpimint/common_state_project']
+        )
+        g_common.add_all(
+            k['mpimint/common_state_pack'],
+            deps=k['mpimint/common_state_project']
+        )
+        common_send_deps = (
+            k['mpimint/common_state_pack']
+            or k['mpimint/common_state_project']
+        )
+        for send in m['mpi_p_common_send']:
+            g_common.add_mpi_req(send, deps=common_send_deps)
+        g_common.add_all(k['mpimint/common_state_local_scatter'])
+        g_common.commit()
+
+        g_grad = self.backend.graph()
+        g_grad.add_all(k['mpimint/common_state_unpack'])
+        g_grad.add_all(
+            k['mpimint/common_state_scatter'],
+            deps=k['mpimint/common_state_unpack']
+        )
+        g_grad.add_all(
+            k['eles/tgradpcoru_upts'],
+            deps=k['mpimint/common_state_scatter']
+        )
+        for kern in k['eles/tgradcoru_upts']:
+            g_grad.add(kern, deps=deps(kern, 'eles/tgradpcoru_upts'))
+        for kern in k['eles/gradcoru_u']:
+            g_grad.add(kern, deps=deps(kern, 'eles/tgradcoru_upts'))
+        g_grad.commit()
+
+        return g_state, g_common, g_grad
+
     @memoize
     def _compute_grads_graph(self, uinbank):
+        if self._has_mpi_p_mortars:
+            return self._compute_grads_graph_mpi_p(uinbank)
+
         m = self._mpireqs
         k, *_ = self._get_kernels(uinbank, None)
 
@@ -256,11 +642,27 @@ class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
             g_soln.add(l, deps=deps(l, 'eles/disu'))
         kdeps = k['eles/copy_fpts'] or k['eles/disu']
         g_soln.add_all(k['iint/con_u'], deps=kdeps)
+        g_soln.add_all(k['mint/con_u'], deps=kdeps)
+
+        mprev = None
+        for stage in ('con_u_gather', 'con_u_interp', 'con_u_eval',
+                      'con_u_project', 'con_u_scatter'):
+            skerns = k[f'mint/{stage}']
+            if mprev is None:
+                g_soln.add_all(skerns, deps=kdeps)
+            else:
+                for l in skerns:
+                    g_soln.add(l, deps=deps(l, f'mint/{mprev}'))
+            mprev = stage
+
         g_soln.add_all(k['bcint/con_u'], deps=kdeps)
 
         # Compute the transformed gradient of the partially corrected solution
-        g_soln.add_all(k['eles/tgradpcoru_upts'],
-                       deps=k['iint/con_u'] + k['bcint/con_u'])
+        g_soln.add_all(
+            k['eles/tgradpcoru_upts'],
+            deps=(k['iint/con_u'] + k['mint/con_u'] +
+                  k['mint/con_u_scatter'] + k['bcint/con_u'])
+        )
 
         g_soln.commit()
 
