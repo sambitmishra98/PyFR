@@ -1432,6 +1432,21 @@ def _build_staged_quad_system(
     )
 
 
+def _validate_staged_quad_transfer(
+    root_mesh, new_leaves, stage_system, staged_state, basis, before, tol
+):
+    from pyfr.amroffline import _global_integral
+
+    after = _global_integral(root_mesh, new_leaves, staged_state, basis)
+    error = after - before
+    if float(np.max(np.abs(error), initial=0.0)) > tol:
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged conservative transfer gate failed'
+        )
+    rho_range, pressure_range = _eos_ranges(stage_system, staged_state)
+    return after, error, rho_range, pressure_range
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1445,8 +1460,7 @@ def perform_indicator_quad_amr_transaction(
     """
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amroffline import (
-        _close_2to1, _current_column_leaves, _global_integral, _split_nodes,
-        _validate_state,
+        _close_2to1, _current_column_leaves, _split_nodes, _validate_state,
         _wall_floor_splits,
     )
 
@@ -1548,16 +1562,11 @@ def perform_indicator_quad_amr_transaction(
             intg, system, stage_mesh, transferred, bank, writer_plugins
         )
 
-        after = _global_integral(
-            root_mesh, new_leaves, staged_state, basis
-        )
-        error = after - before
-        if float(np.max(np.abs(error), initial=0.0)) > tol:
-            raise AMRTransactionError(
-                'ONLINE2D-1 staged conservative transfer gate failed'
+        after, error, staged_rho, staged_pressure = (
+            _validate_staged_quad_transfer(
+                root_mesh, new_leaves, stage_system, staged_state, basis,
+                before, tol
             )
-        staged_rho, staged_pressure = _eos_ranges(
-            stage_system, staged_state
         )
 
         rhs, bank_drift, staged_gndofs = _validate_staged_quad_rhs(
