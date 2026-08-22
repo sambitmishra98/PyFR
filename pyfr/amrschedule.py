@@ -289,6 +289,33 @@ def _recover_schedule_root(intg, mode):
         )
 
 
+def _perform_scheduled_amr(intg, mode, stage_dir):
+    if mode == 'quad-1r':
+        from pyfr.amrtransaction import (
+            perform_indicator_quad_amr_transaction,
+        )
+        return perform_indicator_quad_amr_transaction(intg)
+    if mode == 'mixed-quad-1r':
+        from pyfr.amrtransaction import (
+            perform_indicator_mixed_quad_amr_transaction,
+        )
+        return perform_indicator_mixed_quad_amr_transaction(intg)
+    if mode == 'mixed-hex-1r':
+        from pyfr.amrtransaction import (
+            perform_indicator_mixed_hex_amr_transaction,
+        )
+        return perform_indicator_mixed_hex_amr_transaction(intg)
+    if mode == 'mixed-hex-mpi':
+        return perform_indicator_mpi_mixed_hex_amr_transaction(
+            intg, shared_stage_dir=stage_dir, repartition=True
+        )
+
+    return perform_indicator_mpi_amr_transaction(
+        intg, shared_stage_dir=stage_dir,
+        ownership_policy='balanced-affinity-v1',
+    )
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -341,30 +368,7 @@ class NativeAMRSchedule:
             )
 
         mode = getattr(self, 'mode', 'hex-mpi')
-        if mode == 'quad-1r':
-            from pyfr.amrtransaction import (
-                perform_indicator_quad_amr_transaction,
-            )
-            result = perform_indicator_quad_amr_transaction(intg)
-        elif mode == 'mixed-quad-1r':
-            from pyfr.amrtransaction import (
-                perform_indicator_mixed_quad_amr_transaction,
-            )
-            result = perform_indicator_mixed_quad_amr_transaction(intg)
-        elif mode == 'mixed-hex-1r':
-            from pyfr.amrtransaction import (
-                perform_indicator_mixed_hex_amr_transaction,
-            )
-            result = perform_indicator_mixed_hex_amr_transaction(intg)
-        elif mode == 'mixed-hex-mpi':
-            result = perform_indicator_mpi_mixed_hex_amr_transaction(
-                intg, shared_stage_dir=self.stage_dir, repartition=True
-            )
-        else:
-            result = perform_indicator_mpi_amr_transaction(
-                intg, shared_stage_dir=self.stage_dir,
-                ownership_policy='balanced-affinity-v1',
-            )
+        result = _perform_scheduled_amr(intg, mode, self.stage_dir)
         tx = result.transaction
         event = ScheduledAMREvent(
             time=float(intg.tcurr),

@@ -563,6 +563,53 @@ def test_native_mixed_hex_mpi_schedule_selects_mixed_mode(monkeypatch,
     assert schedule.stage_dir == tmp_path.absolute()
 
 
+@pytest.mark.parametrize(
+    'mode',
+    ['quad-1r', 'mixed-quad-1r', 'mixed-hex-1r', 'mixed-hex-mpi', 'hex-mpi'],
+)
+def test_scheduled_amr_dispatch(monkeypatch, mode):
+    calls = []
+    result = object()
+
+    monkeypatch.setattr(
+        'pyfr.amrtransaction.perform_indicator_quad_amr_transaction',
+        lambda intg: calls.append(('quad-1r', {})) or result,
+    )
+    monkeypatch.setattr(
+        'pyfr.amrtransaction.perform_indicator_mixed_quad_amr_transaction',
+        lambda intg: calls.append(('mixed-quad-1r', {})) or result,
+    )
+    monkeypatch.setattr(
+        'pyfr.amrtransaction.perform_indicator_mixed_hex_amr_transaction',
+        lambda intg: calls.append(('mixed-hex-1r', {})) or result,
+    )
+    monkeypatch.setattr(
+        amrschedule, 'perform_indicator_mpi_mixed_hex_amr_transaction',
+        lambda intg, **kwargs:
+            calls.append(('mixed-hex-mpi', kwargs)) or result,
+    )
+    monkeypatch.setattr(
+        amrschedule, 'perform_indicator_mpi_amr_transaction',
+        lambda intg, **kwargs: calls.append(('hex-mpi', kwargs)) or result,
+    )
+
+    assert amrschedule._perform_scheduled_amr(
+        object(), mode, '/tmp/stage'
+    ) is result
+    assert calls[0][0] == mode
+    if mode == 'mixed-hex-mpi':
+        assert calls[0][1] == {
+            'shared_stage_dir': '/tmp/stage', 'repartition': True
+        }
+    elif mode == 'hex-mpi':
+        assert calls[0][1] == {
+            'shared_stage_dir': '/tmp/stage',
+            'ownership_policy': 'balanced-affinity-v1',
+        }
+    else:
+        assert calls[0][1] == {}
+
+
 def test_after_advance_routes_mixed_hex_mpi(monkeypatch):
     calls = []
     tx = SimpleNamespace(stage_leaf_count=9, stage_mortar_count=1)
