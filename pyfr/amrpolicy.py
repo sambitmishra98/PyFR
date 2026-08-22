@@ -2,6 +2,8 @@ from collections import defaultdict
 
 import numpy as np
 
+from pyfr.util import DisjointSet
+
 
 class AMROwnershipPolicyError(ValueError):
     pass
@@ -51,33 +53,19 @@ def _leaf_affinity(leaf, old_leaves, old_parts, nranks):
 
 
 def _mortar_units(raw):
-    nleaves = len(raw.leaf_order)
-    parent = np.arange(nleaves, dtype=np.int64)
-
-    def find(i):
-        i = int(i)
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = int(parent[i])
-        return i
-
-    def union(i, j):
-        ri, rj = find(i), find(j)
-        if ri == rj:
-            return
-        if ri > rj:
-            ri, rj = rj, ri
-        parent[rj] = ri
+    ds = DisjointSet()
 
     for mortar in raw.mortars:
         members = (int(mortar.left_eidx),
                    *(int(i) for i in mortar.right_eidx))
         for i in members[1:]:
-            union(members[0], i)
+            ri, rj = ds.find(members[0]), ds.find(i)
+            if ri != rj:
+                ds.union(min(ri, rj), max(ri, rj))
 
     groups = defaultdict(list)
-    for i in range(nleaves):
-        groups[find(i)].append(i)
+    for i in range(len(raw.leaf_order)):
+        groups[ds.find(i)].append(i)
 
     return tuple(
         tuple(v) for _, v in sorted(groups.items(), key=lambda kv: min(kv[1]))
