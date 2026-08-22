@@ -9,7 +9,8 @@ from pyfr.inifile import Inifile
 from pyfr.mpiutil import (Scatterer, SparseScatterer, autofree,
                           get_comm_rank_root)
 from pyfr.readers.shared_nodes import SharedNodesFinder
-from pyfr.util import first
+from pyfr.shapes import BaseShape
+from pyfr.util import first, subclass_where
 
 
 @dataclass
@@ -38,6 +39,7 @@ class Mesh:
     con: tuple = field(default_factory=tuple)
     con_p: dict = field(default_factory=dict)
     bcon: dict = field(default_factory=dict)
+    mcon: dict = field(default_factory=dict)
     cidxmap: dict = field(default_factory=dict)
 
     # Shared nodes for C0 continuous fields
@@ -45,6 +47,19 @@ class Mesh:
     node_valency: np.ndarray = None
     node_locs: np.ndarray = None
     shared_nodes: object = None
+
+    # V10D5C2: persistent native octree ancestry (pyfr.amr.HexLeafTree),
+    # populated only when the file carries an 'amr' group; None for every
+    # ordinary non-AMR native mesh, which is otherwise completely
+    # unaffected by this field's existence.
+    amr_tree: object = None
+
+
+@dataclass(frozen=True)
+class SolutionGroup:
+    etype: str
+    order: int
+    eidxs: np.ndarray
 
 
 @dataclass
@@ -58,6 +73,7 @@ class Solution:
     dtypes: dict = field(default_factory=dict)
     prevcfgs: dict = field(default_factory=dict)
     state: dict = field(default_factory=dict)
+    groups: dict = field(default_factory=dict)
 
 
 class Connectivity:
@@ -88,6 +104,49 @@ class Connectivity:
         return result
 
 
+class MortarConnectivity:
+    def __init__(
+        self, name, records, cidxmap, *, format=None, template=None
+    ):
+        self.name = name
+        self.records = records
+        self.cidxmap = cidxmap
+        self.format = format or 'quad-tri-v1'
+        self.template = template or 'quad-tri'
+
+    def __len__(self):
+        return len(self.records)
+
+    @property
+    def nright(self):
+        fields = self.records.dtype.fields
+        if 'right_cidx' in fields:
+            shape = fields['right_cidx'][0].shape
+            return shape[0] if shape else 1
+        if 'fine_cidx' in fields:
+            return self.records.dtype.fields['fine_cidx'][0].shape[0]
+        raise ValueError('Invalid mortar connectivity record')
+
+    def side(self, name, child=None):
+        fields = self.records.dtype.fields
+        if name in ('left', 'coarse'):
+            cfield = 'left_cidx' if 'left_cidx' in fields else 'coarse_cidx'
+            efield = 'left_eidx' if 'left_eidx' in fields else 'coarse_eidx'
+            cidx = self.records[cfield]
+            eidx = self.records[efield]
+        elif name in ('right', 'fine') and child is not None:
+            cfield = 'right_cidx' if 'right_cidx' in fields else 'fine_cidx'
+            efield = 'right_eidx' if 'right_eidx' in fields else 'fine_eidx'
+            if child < 0 or child >= self.nright:
+                raise ValueError('Invalid mortar side')
+            cidx = self.records[cfield][:, child]
+            eidx = self.records[efield][:, child]
+        else:
+            raise ValueError('Invalid mortar side')
+
+        return Connectivity(cidx, eidx, self.cidxmap)
+
+
 class NativeReader:
     def __init__(self, fname, pname=None, *, construct_con=True):
         self.f = h5py.File(fname, 'r')
@@ -95,8 +154,10 @@ class NativeReader:
 
         # Read in and transform the various parts of the mesh
         self._read_metadata()
+        self._read_amr_tree()
         self._read_partitioning(pname)
         self._read_eles()
+        self._validate_amr_tree()
         self._read_nodes()
 
         if construct_con:
@@ -191,18 +252,162 @@ class NativeReader:
         if 'aux' in dtype.names:
             soln.aux[etype] = {n: esoln['aux'][n] for n in dtype['aux'].names}
 
+    def _soln_dtype_signature(self, dtype):
+        return tuple(
+            (g, tuple(dtype[g].names or ())) for g in dtype.names
+        )
+
+    def _soln_nupts(self, dtype):
+        try:
+            field = dtype['soln'].names[0]
+            shape = dtype['soln'].fields[field][0].shape
+        except (KeyError, TypeError, IndexError):
+            raise ValueError('Invalid solution data type') from None
+
+        if len(shape) != 1:
+            raise ValueError('Invalid solution point field shape')
+
+        return shape[0]
+
+    def _persistent_soln_group_names(self, f, prefix):
+        byetype = {}
+        group = f.get(prefix)
+
+        if group is None:
+            return byetype
+
+        for name, dset in group.items():
+            if not isinstance(dset, h5py.Dataset):
+                continue
+            if m := re.fullmatch(r'p(\d+)-(\w+)', name):
+                byetype.setdefault(m[2], []).append(name)
+
+        return byetype
+
+    def _mixed_soln_groups(self, f, prefix):
+        groups = {}
+        byetype = {}
+        group = f.get(prefix)
+
+        if group is None:
+            return groups, byetype
+
+        for name, dset in group.items():
+            if not isinstance(dset, h5py.Dataset):
+                continue
+            if not (m := re.fullmatch(r'p(\d+)-(\w+)', name)):
+                continue
+
+            order, etype = int(m[1]), m[2]
+            if etype not in self.mesh.etypes:
+                raise ValueError(f'Unknown solution element type {etype!r}')
+
+            shapecls = subclass_where(BaseShape, name=etype)
+            if self._soln_nupts(dset.dtype) != shapecls.npts_from_order(order):
+                raise ValueError(
+                    f'{name}: persistent order/point-count mismatch'
+                )
+
+            epath = f'{prefix}/{name}-idxs'
+            if epath in f:
+                eidxs = np.asarray(f[epath], dtype=np.int64)
+                if len(eidxs) != len(dset):
+                    raise ValueError(f'{name}: invalid element index count')
+            else:
+                neles = len(self.f[f'eles/{etype}'])
+                if len(dset) != neles:
+                    raise ValueError(f'{name}: missing element index array')
+                eidxs = np.arange(neles, dtype=np.int64)
+
+            neles = len(self.f[f'eles/{etype}'])
+            if np.any((eidxs < 0) | (eidxs >= neles)):
+                raise ValueError(f'{name}: element index out of range')
+            if len(np.unique(eidxs)) != len(eidxs):
+                raise ValueError(f'{name}: duplicate element indices')
+
+            groups[name] = (etype, order, eidxs, dset.dtype)
+            byetype.setdefault(etype, []).append(name)
+
+        for etype, names in byetype.items():
+            eidxs = np.concatenate([groups[n][2] for n in names])
+            if len(np.unique(eidxs)) != len(eidxs):
+                raise ValueError(f'{etype}: overlapping persistent groups')
+
+        return groups, byetype
+
+    def _is_mixed_soln(self, soln, byetype):
+        cfgmixed = any(
+            s.startswith('solver-order-') for s in soln.config.sections()
+        )
+        filemixed = any(len(names) > 1 for names in byetype.values())
+        return cfgmixed or filemixed
+
+    def _load_mixed_subset_mesh_soln(self, f, soln, prefix, groups, byetype):
+        comm, _, _ = get_comm_rank_root()
+        subset = {}
+        signature = None
+
+        for etype in self.mesh.etypes:
+            names = byetype.get(etype, [])
+            present = np.concatenate(
+                [groups[n][2] for n in names]
+            ) if names else np.empty(0, dtype=np.int64)
+
+            local = self.mesh.eidxs.get(etype, np.empty(0, dtype=int))
+            ridx = np.flatnonzero(np.isin(local, present))
+            if len(ridx) != len(local):
+                subset[etype] = ridx
+
+        for name in sorted(groups):
+            etype, order, eidxs, dtype = groups[name]
+            ek = f'{prefix}/{name}'
+            ei = f'{ek}-idxs'
+            local = self.mesh.eidxs.get(etype, np.empty(0, dtype=int))
+
+            if ei in f:
+                escatter = SparseScatterer(comm, f[ei], local)
+                geidxs = local[escatter.ridx]
+            else:
+                escatter = self.escatter[etype]
+                geidxs = local
+
+            sig = self._soln_dtype_signature(dtype)
+            if signature is None:
+                signature = sig
+                soln.fields = self._soln_fields(dtype)
+            elif sig != signature or self._soln_fields(dtype) != soln.fields:
+                raise ValueError('Incompatible fields across solution groups')
+
+            soln.groups[name] = SolutionGroup(etype, order, geidxs)
+            soln.dtypes[name] = dtype
+
+            esoln = escatter(f[ek])
+            if escatter.cnt:
+                self._unpack_esoln(soln, name, esoln, dtype)
+
+        if subset:
+            return self._subset_mesh(subset), soln
+        return self.mesh, soln
+
     def load_subset_mesh_soln(self, sname, prefix=None):
         comm, rank, root = get_comm_rank_root()
 
         with h5py.File(sname, 'r') as f:
             soln = self._read_soln_header(f)
 
-            # Obtain the polynomial order
-            order = soln.config.getint('solver', 'order')
-
             # If no prefix has been specified then obtain it from the file
             if prefix is None:
                 prefix = soln.stats.get('data', 'prefix')
+
+            byetype = self._persistent_soln_group_names(f, prefix)
+            if self._is_mixed_soln(soln, byetype):
+                groups, byetype = self._mixed_soln_groups(f, prefix)
+                return self._load_mixed_subset_mesh_soln(
+                    f, soln, prefix, groups, byetype
+                )
+
+            # Obtain the polynomial order
+            order = soln.config.getint('solver', 'order')
 
             # Note if any elements are subset
             subset = {}
@@ -280,6 +485,113 @@ class NativeReader:
 
         meta = comm.bcast(meta, root=root)
         mesh.creator, mesh.codec, mesh.uuid, mesh.version = meta
+
+    def _read_amr_tree(self):
+        # V10D5C2: optional persistent octree ancestry.  Ordinary non-AMR
+        # native meshes carry no 'amr' group and mesh.amr_tree stays None;
+        # this method changes no other behaviour of the reader.
+        comm, rank, root = get_comm_rank_root()
+
+        if rank == root:
+            if 'amr' in self.f:
+                from pyfr.amr import (
+                    hex_leaf_tree_from_arrays, quad_leaf_tree_from_arrays,
+                )
+
+                grp = self.f['amr']
+                args = (
+                    int(grp['version'][()]),
+                    grp['root-mesh-uuid'][()].decode(),
+                    grp['leaves']['root-eidx'][()],
+                    grp['leaves']['path-offsets'][()],
+                    grp['leaves']['path-data'][()],
+                )
+
+                if 'template' not in grp:
+                    # Legacy accepted Hex ancestry has no template field.
+                    tree = hex_leaf_tree_from_arrays(*args)
+                else:
+                    template = grp['template'][()]
+                    if isinstance(template, bytes):
+                        template = template.decode()
+                    if template == 'quadtree-2x2-v1':
+                        tree = quad_leaf_tree_from_arrays(*args)
+                    else:
+                        raise ValueError(
+                            f'Unsupported persistent AMR template '
+                            f'{template!r}'
+                        )
+            else:
+                tree = None
+        else:
+            tree = None
+
+        self.mesh.amr_tree = comm.bcast(tree, root=root)
+
+    def _validate_amr_tree(self):
+        # A structurally valid leaf tree is not automatically ancestry for
+        # THIS adapted mesh. Canonical leaf ordinals are partition-independent
+        # global element eidxs, whose union must be exactly 0..N-1. Ordinary
+        # non-AMR meshes return above and pay no collective cost.
+        tree = self.mesh.amr_tree
+        if tree is None:
+            return
+
+        from pyfr.amr import HexLeafTree, QuadLeafTree
+
+        if isinstance(tree, HexLeafTree):
+            etype, label = 'hex', 'Hex'
+        elif isinstance(tree, QuadLeafTree):
+            etype, label = 'quad', 'Quad'
+        else:
+            raise RuntimeError('Unknown persistent AMR leaf-tree type')
+
+        if isinstance(tree, HexLeafTree):
+            etypes = set(self.mesh.etypes)
+            if etypes not in ({'hex'}, {'hex', 'pyr', 'tet'}):
+                raise RuntimeError(
+                    'Persistent Hex AMR ancestry requires a pure-Hex or '
+                    'Tet+Pyramid+Hex topology; '
+                    f'found element types {self.mesh.etypes}'
+                )
+        if isinstance(tree, QuadLeafTree):
+            extra = set(self.mesh.etypes) - {'quad', 'tri'}
+            if 'quad' not in self.mesh.etypes or extra:
+                raise RuntimeError(
+                    'Persistent Quad AMR ancestry requires a pure-Quad or '
+                    'Tri+Quad '
+                    f'topology; found element types {self.mesh.etypes}'
+                )
+
+        neles = len(self.f[f'eles/{etype}'])
+        if tree.nleaves != neles:
+            raise RuntimeError(
+                f'Persistent AMR ancestry leaf count ({tree.nleaves}) does '
+                f'not match the adapted mesh {label} element count ({neles})'
+            )
+
+        comm, _, _ = get_comm_rank_root()
+        geidx = np.asarray(
+            self.mesh.eidxs.get(etype, np.empty(0, dtype=np.int64)),
+            dtype=np.int64
+        )
+        if (len(np.unique(geidx)) != len(geidx) or
+                np.any((geidx < 0) | (geidx >= tree.nleaves))):
+            raise RuntimeError(
+                f'Persistent AMR ancestry has invalid local canonical '
+                f'{label} ordinals'
+            )
+
+        all_geidx = comm.allgather(geidx)
+        flat = np.concatenate(all_geidx)
+        if (len(flat) != tree.nleaves or
+                not np.array_equal(np.sort(flat),
+                                   np.arange(tree.nleaves, dtype=np.int64))):
+            raise RuntimeError(
+                f'Persistent AMR ancestry requires the global adapted '
+                f'{label} eidx union to be exactly 0..N-1 with no gaps or '
+                'duplicates'
+            )
 
     def _read_with_idxs(self, dset, idxs):
         comm, rank, root = get_comm_rank_root()
@@ -471,8 +783,9 @@ class NativeReader:
             reidx[mask] = np.where(ordgi[pos] == offs, perm[pos], -1)
 
         # Classify interfaces
-        is_boundary, is_local = rgidx == -1, reidx >= 0
-        is_mpi = ~(is_boundary | is_local)
+        is_boundary, is_mortar = rgidx == -1, rgidx == -2
+        is_local = reidx >= 0
+        is_mpi = ~(is_boundary | is_mortar | is_local)
 
         # Deduplicate internal interfaces
         lkey, rkey = self._pack_pairs((lcidx[is_local], leidx[is_local]),
@@ -489,6 +802,12 @@ class NativeReader:
             bmask = rcidx == bccidx
             self.mesh.bcon[name] = con(lcidx[bmask], leidx[bmask])
 
+        # Mortar connectivity.  The partitioner keeps all participants in
+        # each mortar on one rank, so every local record can use the existing
+        # local mortar execution path unchanged.
+        if 'mortars' in self.f:
+            self._construct_mortar_con(g2l, cidxmap, is_mortar, lcidx, leidx)
+
         # MPI connectivity
         if np.any(is_mpi):
             dt = [('cidx', np.int16), ('idx', int)]
@@ -499,6 +818,103 @@ class NativeReader:
             stride = max(len(self.f[f'eles/{et}']) for et in self.mesh.etypes)
 
             self._construct_mpi_con(g2l, cetmap, cidxmap, lhs, rhs, stride)
+
+    def _construct_mortar_con(self, g2l, cidxmap, is_mortar,
+                              lcidx, leidx):
+        marked = set(zip(lcidx[is_mortar].tolist(),
+                         leidx[is_mortar].tolist()))
+
+        def local_eidx(cidx, geidx):
+            etype, _ = cidxmap[int(cidx)]
+            if etype not in g2l:
+                return None
+
+            gids, ordg, perm = g2l[etype]
+            pos = np.searchsorted(ordg, geidx)
+            if pos >= len(ordg) or ordg[pos] != geidx:
+                return None
+
+            return perm[pos]
+
+        def participant_fields(dset):
+            fields = dset.dtype.fields
+            generic = {
+                'left_cidx', 'left_eidx', 'right_cidx', 'right_eidx'
+            }
+            legacy = {
+                'coarse_cidx', 'coarse_eidx', 'fine_cidx', 'fine_eidx'
+            }
+            if generic <= fields.keys():
+                nright = fields['right_cidx'][0].shape[0]
+                return (
+                    ('left_cidx', 'left_eidx', None),
+                    *(('right_cidx', 'right_eidx', i) for i in range(nright)),
+                )
+            if legacy <= fields.keys():
+                nright = fields['fine_cidx'][0].shape[0]
+                return (
+                    ('coarse_cidx', 'coarse_eidx', None),
+                    *(('fine_cidx', 'fine_eidx', i) for i in range(nright)),
+                )
+            raise ValueError('Unsupported mortar connectivity record')
+
+        for name, dset in self.f['mortars'].items():
+            refs = participant_fields(dset)
+            local = []
+            for source in dset:
+                record = source.copy()
+                mapped = []
+                for cfield, efield, child in refs:
+                    cidx = record[cfield]
+                    geidx = record[efield]
+                    if child is not None:
+                        cidx = cidx[child]
+                        geidx = geidx[child]
+                    mapped.append(local_eidx(cidx, geidx))
+
+                nlocal = sum(eidx is not None for eidx in mapped)
+                if not nlocal:
+                    continue
+                if nlocal != len(mapped):
+                    raise RuntimeError(
+                        'Mortar participants span multiple partitions'
+                    )
+
+                for (cfield, efield, child), eidx in zip(refs, mapped):
+                    if child is None:
+                        record[efield] = eidx
+                    else:
+                        record[efield][child] = eidx
+                local.append(record)
+
+            if not local:
+                continue
+
+            records = np.asarray(local, dtype=dset.dtype)
+            refs_marked = set()
+            for rec in records:
+                for cfield, efield, child in refs:
+                    if child is None:
+                        pair = (int(rec[cfield]), int(rec[efield]))
+                    else:
+                        pair = (
+                            int(rec[cfield][child]), int(rec[efield][child])
+                        )
+                    refs_marked.add(pair)
+            if not refs_marked <= marked:
+                msg = 'Mortar metadata does not match marked faces'
+                raise RuntimeError(msg)
+
+            def attr(name, default=None):
+                value = dset.attrs.get(name, default)
+                if isinstance(value, bytes):
+                    value = value.decode()
+                return value
+
+            self.mesh.mcon[name] = MortarConnectivity(
+                name, records, cidxmap, format=attr('format'),
+                template=attr('template')
+            )
 
     def _construct_mpi_con(self, g2l, cetmap, cidxmap, lhs, rhs, stride):
         comm, rank, root = get_comm_rank_root()
