@@ -1403,6 +1403,35 @@ def _validate_staged_quad_rhs(
     return rhs, bank_drift, sum(stage_system.ele_ndofs)
 
 
+def _build_staged_quad_system(
+    intg, system, stage_mesh, transferred, bank, writer_plugins
+):
+    staged = Solution(
+        config=intg.cfg, stats=None, fields=None,
+        data={'quad': np.array(transferred, copy=True)}, state={}
+    )
+    stage_serialiser = Serialiser()
+    stage_system = type(system)(
+        intg.backend, stage_mesh, staged, intg._registers,
+        intg.cfg, stage_serialiser, needs_cfl=False
+    )
+
+    # WriterPlugin needs the construction-time element map, matching the
+    # ordinary integrator lifecycle where plugins precede system.commit().
+    staged_plugins = [
+        plugin.prepare_amr_rebind(intg, stage_system)
+        for plugin in writer_plugins
+    ]
+    stage_system.commit()
+    staged_state, stage_shape = _inject_staged_quad_bank(
+        stage_system, stage_mesh, transferred, bank
+    )
+    return (
+        stage_system, stage_serialiser, staged_plugins, staged_state,
+        stage_shape
+    )
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1512,25 +1541,11 @@ def perform_indicator_quad_amr_transaction(
 
     stage_system = None
     try:
-        staged = Solution(
-            config=intg.cfg, stats=None, fields=None,
-            data={'quad': np.array(transferred, copy=True)}, state={}
-        )
-        stage_serialiser = Serialiser()
-        stage_system = type(system)(
-            intg.backend, stage_mesh, staged, intg._registers,
-            intg.cfg, stage_serialiser, needs_cfl=False
-        )
-        # Plugins are constructed before system.commit() in the ordinary
-        # integrator lifecycle because WriterPlugin needs the construction-
-        # time element map.  Mirror that ordering for the Quad shadow system.
-        staged_plugins = [
-            plugin.prepare_amr_rebind(intg, stage_system)
-            for plugin in writer_plugins
-        ]
-        stage_system.commit()
-        staged_state, stage_shape = _inject_staged_quad_bank(
-            stage_system, stage_mesh, transferred, bank
+        (
+            stage_system, stage_serialiser, staged_plugins, staged_state,
+            stage_shape
+        ) = _build_staged_quad_system(
+            intg, system, stage_mesh, transferred, bank, writer_plugins
         )
 
         after = _global_integral(
