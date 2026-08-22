@@ -1369,6 +1369,40 @@ def _prepare_quad_transfer(
     return basis, transferred, before, tol
 
 
+def _validate_staged_quad_rhs(
+    stage_system, system, intg, bank, scratch_bank, transferred, staged_state
+):
+    stage_system.preproc(intg.tcurr, bank)
+    intg.backend.wait()
+    after_preproc = _copy_state(stage_system, bank)
+    if (len(after_preproc) != 1 or
+            not np.array_equal(after_preproc[0], staged_state)):
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged bank changed during preprocessing'
+        )
+
+    if (stage_system.nrhs != system.nrhs or
+            len(stage_system.ele_banks) != len(system.ele_banks) or
+            any(len(a) != len(b) for a, b in zip(
+                stage_system.ele_banks, system.ele_banks
+            ))):
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged register-bank layout changed'
+        )
+
+    rhs, bank_drift = _scratch_rhs(
+        stage_system, intg.tcurr, bank, scratch_bank
+    )
+    after_rhs = _copy_state(stage_system, bank)
+    if (len(after_rhs) != 1 or
+            not np.array_equal(after_rhs[0], transferred)):
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged accepted bank changed after first RHS'
+        )
+
+    return rhs, bank_drift, sum(stage_system.ele_ndofs)
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1511,33 +1545,10 @@ def perform_indicator_quad_amr_transaction(
             stage_system, staged_state
         )
 
-        stage_system.preproc(intg.tcurr, bank)
-        intg.backend.wait()
-        after_preproc = _copy_state(stage_system, bank)
-        if (len(after_preproc) != 1 or
-                not np.array_equal(after_preproc[0], staged_state)):
-            raise AMRTransactionError(
-                'ONLINE2D-1 staged bank changed during preprocessing'
-            )
-
-        if (stage_system.nrhs != system.nrhs or
-                len(stage_system.ele_banks) != len(system.ele_banks) or
-                any(len(a) != len(b) for a, b in zip(
-                    stage_system.ele_banks, system.ele_banks
-                ))):
-            raise AMRTransactionError(
-                'ONLINE2D-1 staged register-bank layout changed'
-            )
-        rhs, bank_drift = _scratch_rhs(
-            stage_system, intg.tcurr, bank, scratch_bank
+        rhs, bank_drift, staged_gndofs = _validate_staged_quad_rhs(
+            stage_system, system, intg, bank, scratch_bank, transferred,
+            staged_state
         )
-        after_rhs = _copy_state(stage_system, bank)
-        if (len(after_rhs) != 1 or
-                not np.array_equal(after_rhs[0], transferred)):
-            raise AMRTransactionError(
-                'ONLINE2D-1 staged accepted bank changed after first RHS'
-            )
-        staged_gndofs = sum(stage_system.ele_ndofs)
     except Exception:
         stage_system = None
         raise
