@@ -782,6 +782,29 @@ def _discard_stage(stage_system, reader, stage_dir):
         shutil.rmtree(stage_dir, ignore_errors=True)
 
 
+def _validate_staged_hex_transfer(
+    stage_system, staged_state, old_state, old_volumes, proposed_volumes,
+    old_weights
+):
+    before = _conserved_totals(old_state, old_volumes, old_weights)
+    after = _conserved_totals(staged_state, proposed_volumes, old_weights)
+    error = after - before
+    tol = 8192*np.finfo(old_state.dtype).eps
+    scale = np.maximum(1.0, np.abs(before))
+    if np.any(np.abs(error) > tol*scale):
+        raise AMRTransactionError(
+            'D6A componentwise conservative transfer gate failed'
+        )
+    if not np.isclose(
+        np.sum(old_volumes), np.sum(proposed_volumes), rtol=0,
+        atol=tol*max(1.0, np.sum(old_volumes))
+    ):
+        raise AMRTransactionError('D6A physical volume gate failed')
+
+    rho_range, pressure_range = _eos_ranges(stage_system, staged_state)
+    return before, after, error, rho_range, pressure_range
+
+
 def perform_one_amr_transaction(
     intg, scripted_marks, *, action='refine', restart_root_mesh=None
 ):
@@ -886,21 +909,14 @@ def perform_one_amr_transaction(
             )
         )
 
-        # Validate conservation and Euler admissibility only after the exact
-        # transferred state has crossed the D5/native/PyFR bank boundary.
-        before = _conserved_totals(old_state, old_volumes, old_weights)
-        after = _conserved_totals(staged_state, proposed_volumes, old_weights)
-        error = after - before
-        tol = 8192*np.finfo(old_state.dtype).eps
-        scale = np.maximum(1.0, np.abs(before))
-        if np.any(np.abs(error) > tol*scale):
-            raise AMRTransactionError(
-                'D6A componentwise conservative transfer gate failed'
+        # Validate only after the exact transferred state has crossed the
+        # D5/native/PyFR bank boundary.
+        before, after, error, staged_rho, staged_pressure = (
+            _validate_staged_hex_transfer(
+                stage_system, staged_state, old_state, old_volumes,
+                proposed_volumes, old_weights
             )
-        if not np.isclose(np.sum(old_volumes), np.sum(proposed_volumes),
-                          rtol=0, atol=tol*max(1.0, np.sum(old_volumes))):
-            raise AMRTransactionError('D6A physical volume gate failed')
-        staged_rho, staged_pressure = _eos_ranges(stage_system, staged_state)
+        )
         stage_system.preproc(intg.tcurr, bank)
         intg.backend.wait()
         staged_after_preproc = _copy_state(stage_system, bank)[0]
