@@ -1,9 +1,68 @@
 from collections import defaultdict
+from functools import lru_cache
 import re
 
 import numpy as np
 
+from pyfr.amr import (
+    HexNodeStore, hex_affine_map, hex_child_face_nodes, hex_d4_transform,
+    hex_face_axis_side, hex_order_quad2x2_faces, hex_refined_children,
+    hex_rect_overlap, hex_root_face_uv, hex_transform_rect,
+    hex_tree_cell_index, hex_tree_face_groups, hex_tree_face_pairs,
+    hex_tree_leaves,
+)
+from pyfr.polys import get_polybasis
 from pyfr.readers import BaseReader, NodalMeshAssembler
+from pyfr.readers.base import _pyr_parallelogram_mask
+from pyfr.shapes import PyrShape, TetShape, TriShape
+
+
+@lru_cache(maxsize=None)
+def _tet_jacobian_operator(order):
+    spts = TetShape.std_ele(order)
+    qpts = TetShape.std_ele(max(8, 2*order))
+    basis = get_polybasis('tet', order, spts)
+
+    return basis.jac_nodal_basis_at(qpts)
+
+
+@lru_cache(maxsize=None)
+def _tet_promotion_operator(srcorder, dstorder):
+    srcpts = TetShape.std_ele(srcorder)
+    dstpts = TetShape.std_ele(dstorder)
+    basis = get_polybasis('tet', srcorder, srcpts)
+
+    return basis.nodal_basis_at(dstpts)
+
+
+def _affine_reference_map(src, dst, points):
+    lhs = np.column_stack((src, np.ones(len(src))))
+    coeff = np.linalg.solve(lhs, dst)
+
+    points = np.asarray(points)
+    return np.column_stack((points, np.ones(len(points)))) @ coeff
+
+
+@lru_cache(maxsize=None)
+def _pyramid_child_operator(porder, torder, childref):
+    childref = np.asarray(childref).reshape(4, 3)
+    mapped = _affine_reference_map(
+        TetShape.std_ele(1), childref, TetShape.std_ele(torder)
+    )
+    basis = get_polybasis('pyr', porder, PyrShape.std_ele(porder))
+
+    return basis.nodal_basis_at(mapped)
+
+
+@lru_cache(maxsize=None)
+def _pyramid_tri_operator(porder, torder, childref):
+    childref = np.asarray(childref).reshape(3, 3)
+    mapped = _affine_reference_map(
+        TriShape.std_ele(1), childref, TriShape.std_ele(torder)
+    )
+    basis = get_polybasis('pyr', porder, PyrShape.std_ele(porder))
+
+    return basis.nodal_basis_at(mapped)
 
 
 def msh_section(mshit, section):
@@ -239,6 +298,1221 @@ class GmshReader(BaseReader):
         for k, v in self._elenodes.items():
             v -= self._nodeoff
 
+
+    def _begin_nodepts_append(self):
+        self._pending_nodepts = []
+        self._pending_nnodes = 0
+
+    def _append_nodepts(self, points):
+        points = np.asarray(points, dtype=float)
+        pending = getattr(self, '_pending_nodepts', None)
+        if pending is None:
+            start = len(self._nodepts)
+            self._nodepts = np.vstack((self._nodepts, points))
+        else:
+            start = len(self._nodepts) + self._pending_nnodes
+            pending.append(points)
+            self._pending_nnodes += len(points)
+
+        return np.arange(start, start + len(points), dtype=np.int64)
+
+    def _commit_nodepts_append(self):
+        if self._pending_nodepts:
+            self._nodepts = np.vstack(
+                (self._nodepts, *self._pending_nodepts)
+            )
+
+        del self._pending_nodepts
+        del self._pending_nnodes
+
+    @staticmethod
+    def _affine_map(src, dst):
+        lhs = np.column_stack((src, np.ones(len(src))))
+        coeff = np.linalg.solve(lhs, dst)
+
+        def apply(points):
+            points = np.asarray(points)
+            return np.column_stack((points, np.ones(len(points)))) @ coeff
+
+        return apply
+
+    @staticmethod
+    def _generated_tet_storage(order):
+        npts = TetShape.npts_from_order(order)
+        corners = TetShape.corner_pts_idxs(npts)
+        mask = np.ones(npts, dtype=bool)
+        mask[corners] = False
+        storage = np.concatenate((corners, np.flatnonzero(mask)))
+
+        return storage, np.argsort(storage)
+
+    def _prepare_generated_tets(self, order):
+        npts = TetShape.npts_from_order(order)
+        etype = -npts
+        storage, nodemap = self._generated_tet_storage(order)
+
+        # These are instance-local copies.  The generated element type is an
+        # importer-internal representation whose first four entries are its
+        # corners and whose remaining entries follow PyFR's canonical order.
+        self._etype_map = dict(self._etype_map)
+        self._nodemaps = dict(self._nodemaps)
+        self._etype_map[etype] = ('tet', npts)
+        self._nodemaps['tet', npts] = nodemap.tolist()
+
+        return etype, storage
+
+    def _promote_tet(self, nodes, order, nodemaps, storage):
+        nnodes = len(nodes)
+        srcorder = TetShape.order_from_npts(nnodes)
+        srcpts = TetShape.std_ele(srcorder)
+        dstpts = TetShape.std_ele(order)
+
+        srcids = nodes[nodemaps['tet', nnodes]]
+        srccoords = self._nodepts[srcids]
+
+        if srcorder == order:
+            dstids = srcids.copy()
+        else:
+            dstcoords = (
+                _tet_promotion_operator(srcorder, order) @ srccoords
+            )
+
+            dstids = np.empty(len(dstpts), dtype=np.int64)
+            srcorners = TetShape.corner_pts_idxs(nnodes)
+            dstcorners = TetShape.corner_pts_idxs(len(dstpts))
+            dstids[dstcorners] = srcids[srcorners]
+
+            mask = np.ones(len(dstpts), dtype=bool)
+            mask[dstcorners] = False
+            dstids[mask] = self._append_nodepts(dstcoords[mask])
+
+        return dstids[storage]
+
+    def _promote_existing_tets(self, order, etype, nodemaps, storage):
+        promoted = defaultdict(list)
+        for key in list(self._elenodes):
+            srctype, pents = key
+            if self._etype_map[srctype][0] != 'tet':
+                continue
+
+            promoted[pents].extend(
+                self._promote_tet(row, order, nodemaps, storage)
+                for row in self._elenodes.pop(key)
+            )
+
+        for pents, rows in promoted.items():
+            self._elenodes[etype, pents] = np.asarray(rows, dtype=np.int64)
+
+    def _pyramid_child_tet_coords(self, parent, corners, order):
+        pmap = self._nodemaps['pyr', len(parent)]
+        pids = parent[pmap]
+        pcoords = self._nodepts[pids]
+        porder = PyrShape.order_from_npts(len(parent))
+
+        if order < 2*porder:
+            raise ValueError(
+                f'Pyramid order {porder} requires tetrahedral geometry '
+                f'order at least {2*porder}; received {order}'
+            )
+
+        pref = PyrShape.std_ele(1)
+        gref = pref[np.argsort(self._nodemaps['pyr', 5])]
+        refbyid = {int(node): point for node, point in zip(parent[:5], gref)}
+        childref = np.asarray([refbyid[int(node)] for node in corners])
+
+        operator = _pyramid_child_operator(
+            porder, order, tuple(childref.ravel())
+        )
+        return operator @ pcoords
+
+    def _store_pyramid_child_tet(self, coords, corners, order, storage):
+        tpts = TetShape.std_ele(order)
+
+        ids = np.empty(len(tpts), dtype=np.int64)
+        tcorners = TetShape.corner_pts_idxs(len(tpts))
+        ids[tcorners] = corners
+
+        mask = np.ones(len(tpts), dtype=bool)
+        mask[tcorners] = False
+        ids[mask] = self._append_nodepts(coords[mask])
+
+        return ids[storage]
+
+    @staticmethod
+    def _tet_geometry_quality(coords, order):
+        """Return a sampled scale-independent minimum Jacobian."""
+        jacop = _tet_jacobian_operator(order)
+        jac = np.einsum('dnp,nq->pdq', jacop, coords)
+        mindet = np.linalg.det(jac).min()
+
+        corners = coords[TetShape.corner_pts_idxs(len(coords))]
+        scale = max(
+            np.linalg.norm(a - b)
+            for i, a in enumerate(corners)
+            for b in corners[i + 1:]
+        )
+
+        return mindet/scale**3
+
+    def _orient_tet(self, corners):
+        a, b, c, d = (self._nodepts[n] for n in corners)
+        det = np.linalg.det(np.column_stack((b - a, c - a, d - a)))
+        if det < 0:
+            corners = [corners[0], corners[2], corners[1], corners[3]]
+            det = -det
+        return corners, det
+
+    @staticmethod
+    def _as_pent_tuple(pents):
+        return pents if isinstance(pents, tuple) else (pents,)
+
+    def _boundary_quad_lookup(self):
+        """Return fixed/periodic boundary quad faces keyed by corner IDs."""
+        fixed = set(getattr(self, '_bfacespents', {}).values())
+        periodic = {
+            pent
+            for pair in getattr(self, '_pfacespents', {}).values()
+            for pent in pair
+        }
+
+        lookup = {}
+        for ekey, rows in self._elenodes.items():
+            etype, pents = ekey
+            if self._etype_map[etype][0] != 'quad':
+                continue
+
+            epents = set(self._as_pent_tuple(pents))
+            if epents & fixed:
+                kind = 'fixed'
+            elif epents & periodic:
+                kind = 'periodic'
+            else:
+                continue
+
+            for eidx, row in enumerate(rows):
+                fkey = tuple(sorted(int(n) for n in row[:4]))
+                if fkey in lookup:
+                    raise ValueError(
+                        'Duplicate boundary quadrilateral face for pyramid '
+                        f'splitting: {fkey}'
+                    )
+                lookup[fkey] = (kind, ekey, eidx)
+
+        return lookup
+
+    def _boundary_tri_etype(self, pents, order):
+        """Select the complete triangle type for a boundary pyramid."""
+        try:
+            etype = {1: 2, 2: 9, 3: 21, 4: 23}[order]
+        except KeyError:
+            raise ValueError(
+                'Boundary pyramid splitting does not have a Gmsh triangle '
+                f'representation for geometry order {order}'
+            ) from None
+
+        nnodes = self._etype_map[etype][1]
+        if ('tri', nnodes) not in self._nodemaps:
+            raise ValueError(
+                'Boundary pyramid splitting requires a complete supported '
+                f'triangle element; found Gmsh type {etype}'
+            )
+
+        return etype
+
+    def _boundary_tri_nodes(self, parent, corners, etype):
+        """Build a tagged boundary triangle from one pyramid base half."""
+        corners = [int(n) for n in corners]
+        nnodes = self._etype_map[etype][1]
+        order = TriShape.order_from_npts(nnodes)
+        tpts = TriShape.std_ele(order)
+
+        tcoords = self._pyramid_tri_coords(parent, corners, tpts)
+
+        tids = np.empty(nnodes, dtype=np.int64)
+        tcorners = TriShape.corner_pts_idxs(nnodes)
+        tids[tcorners] = corners
+        mask = np.ones(nnodes, dtype=bool)
+        mask[tcorners] = False
+        tids[mask] = self._append_nodepts(tcoords[mask])
+
+        tmap = self._nodemaps['tri', nnodes]
+        return tids[np.argsort(tmap)]
+
+    def _pyramid_tri_coords(self, parent, corners, tpts):
+        corners = [int(n) for n in corners]
+
+        pmap = self._nodemaps['pyr', len(parent)]
+        pids = parent[pmap]
+        pcoords = self._nodepts[pids]
+        porder = PyrShape.order_from_npts(len(parent))
+
+        pref = PyrShape.std_ele(1)
+        gref = pref[np.argsort(self._nodemaps['pyr', 5])]
+        refbyid = {int(node): point for node, point in zip(parent[:5], gref)}
+        childref = np.asarray([refbyid[node] for node in corners])
+        torder = TriShape.order_from_npts(len(tpts))
+        operator = _pyramid_tri_operator(
+            porder, torder, tuple(childref.ravel())
+        )
+        return operator @ pcoords
+
+    def _pyramid_candidates(self, nodes, order):
+        v = [int(n) for n in nodes[:5]]
+        specs = [
+            (0, (v[0], v[2]), [[v[0], v[1], v[2], v[4]],
+                                [v[0], v[2], v[3], v[4]]]),
+            (1, (v[1], v[3]), [[v[0], v[1], v[3], v[4]],
+                                [v[1], v[2], v[3], v[4]]]),
+        ]
+
+        candidates = {}
+        for diagonal, edge, ccorners in specs:
+            oriented, childcoords = [], []
+            for corners in ccorners:
+                corners, _ = self._orient_tet(corners)
+                oriented.append(corners)
+                childcoords.append(
+                    self._pyramid_child_tet_coords(nodes, corners, order)
+                )
+
+            quality = min(
+                self._tet_geometry_quality(coords, order)
+                for coords in childcoords
+            )
+            edge = tuple(sorted(edge))
+            candidates[edge] = {
+                'edge': edge,
+                'diagonal': diagonal,
+                'corners': oriented,
+                'coords': childcoords,
+                'quality': quality,
+            }
+
+        return candidates
+
+    def _paired_pyramid_geometry_error(self, left, right, edge):
+        lcandidate = left['candidates'][edge]
+        rcandidate = right['candidates'][edge]
+        ltris = {tuple(sorted(c[:3])) for c in lcandidate['corners']}
+        rtris = {tuple(sorted(c[:3])) for c in rcandidate['corners']}
+        if ltris != rtris:
+            raise ValueError('Paired pyramids do not produce matching faces')
+
+        lorder = PyrShape.order_from_npts(len(left['nodes']))
+        rorder = PyrShape.order_from_npts(len(right['nodes']))
+        tpts = TriShape.std_ele(2*max(lorder, rorder))
+
+        return max(
+            np.max(np.abs(
+                self._pyramid_tri_coords(left['nodes'], tri, tpts) -
+                self._pyramid_tri_coords(right['nodes'], tri, tpts)
+            ))
+            for tri in ltris
+        )
+
+    @staticmethod
+    def _point_set_error(left, right):
+        distances = np.max(
+            np.abs(left[:, None] - right[None, :]), axis=2
+        )
+        return max(
+            distances.min(axis=0).max(),
+            distances.min(axis=1).max(),
+        )
+
+    def _select_periodic_pyramid_diagonals(self, records):
+        periodic_pairs = []
+        pending = [
+            r for r in records
+            if r['kind'] == 'boundary' and r['boundary'][0] == 'periodic'
+        ]
+
+        for pname, (lpent, rpent) in getattr(
+            self, '_pfacespents', {}
+        ).items():
+            left = [
+                r for r in pending
+                if lpent in self._as_pent_tuple(r['boundary'][1][1])
+            ]
+            right = [
+                r for r in pending
+                if rpent in self._as_pent_tuple(r['boundary'][1][1])
+            ]
+            if len(left) != len(right):
+                raise ValueError(
+                    f'Periodic pyramid boundary {pname} has {len(left)} '
+                    f'left faces and {len(right)} right faces'
+                )
+            if not left:
+                continue
+
+            lcent = np.array([
+                self._nodepts[list(r['quad'])].mean(axis=0) for r in left
+            ])
+            rcent = np.array([
+                self._nodepts[list(r['quad'])].mean(axis=0) for r in right
+            ])
+            lfidx, rfidx, _, trans = NodalMeshAssembler._pair_translational(
+                lcent, rcent
+            )
+
+            for li, ri in zip(lfidx, rfidx):
+                lrec, rrec = left[li], right[ri]
+                choices = []
+                for ledge, lcandidate in lrec['candidates'].items():
+                    lpts = self._nodepts[list(ledge)] + trans
+                    for redge, rcandidate in rrec['candidates'].items():
+                        rpts = self._nodepts[list(redge)]
+                        error = min(
+                            np.max(np.abs(lpts - rpts)),
+                            np.max(np.abs(lpts - rpts[::-1])),
+                        )
+                        choices.append((
+                            error,
+                            min(lcandidate['quality'], rcandidate['quality']),
+                            ledge,
+                            redge,
+                        ))
+
+                compatible = [c for c in choices if c[0] <= 1e-10]
+                if not compatible:
+                    raise ValueError(
+                        f'Periodic pyramid boundary {pname} does not expose '
+                        'matching base diagonals'
+                    )
+                _, quality, ledge, redge = max(
+                    compatible, key=lambda c: (c[1], c[2], c[3])
+                )
+                lrec['selected'] = lrec['candidates'][ledge]
+                rrec['selected'] = rrec['candidates'][redge]
+
+                lorder = PyrShape.order_from_npts(len(lrec['nodes']))
+                rorder = PyrShape.order_from_npts(len(rrec['nodes']))
+                tpts = TriShape.std_ele(2*max(lorder, rorder))
+                ltris = lrec['selected']['corners']
+                rtris = rrec['selected']['corners']
+                lcoords = [
+                    self._pyramid_tri_coords(lrec['nodes'], t[:3], tpts)
+                    + trans for t in ltris
+                ]
+                rcoords = [
+                    self._pyramid_tri_coords(rrec['nodes'], t[:3], tpts)
+                    for t in rtris
+                ]
+                geom_error = 0.0
+                for lc in lcoords:
+                    errors = [
+                        self._point_set_error(lc, rc) for rc in rcoords
+                    ]
+                    geom_error = max(geom_error, min(errors))
+                if geom_error > 1e-10:
+                    raise ValueError(
+                        f'Periodic pyramid boundary {pname} geometry '
+                        f'mismatch {geom_error:.3e} exceeds tolerance '
+                        '1.000e-10'
+                    )
+
+                periodic_pairs.append({
+                    'name': pname,
+                    'left_quad': lrec['qkey'],
+                    'right_quad': rrec['qkey'],
+                    'left_diagonal_edge': ledge,
+                    'right_diagonal_edge': redge,
+                    'quality': quality,
+                    'geometry_error': geom_error,
+                    'translation': trans,
+                })
+
+        if any('selected' not in record for record in pending):
+            raise ValueError('Unmatched periodic pyramid boundary face')
+
+        return periodic_pairs
+
+    @staticmethod
+    def _parse_hex_refine_selector(selector):
+        selector = selector.strip()
+        if selector == 'all':
+            return None
+
+        requested = set()
+        try:
+            for token in selector.split(','):
+                parts = token.strip().split('/')
+                if not token.strip() or any(not p for p in parts):
+                    raise ValueError
+
+                tag = int(parts[0])
+                path = tuple(int(p) for p in parts[1:])
+                requested.add((tag, path))
+        except ValueError:
+            raise ValueError(
+                'Hex refinement selector must be "all" or comma-separated '
+                'Gmsh tags with optional /0../7 octant paths'
+            ) from None
+
+        if not requested or any(tag <= 0 for tag, _ in requested):
+            raise ValueError('Hex refinement requires positive Gmsh tags')
+        if any(octant not in range(8) for _, path in requested
+               for octant in path):
+            raise ValueError('Hex refinement octants must be in 0..7')
+
+        return frozenset(requested)
+
+    def _volume_face_lookup(self):
+        volpents = set(self._volpents.values())
+        lookup = defaultdict(list)
+
+        for ekey, rows in self._elenodes.items():
+            etype, pents = ekey
+            if not set(self._as_pent_tuple(pents)) & volpents:
+                continue
+
+            petype, nnodes = self._etype_map[etype]
+            fnmap = self._petype_fnmap[petype].get('quad', ())
+            for eidx, row in enumerate(rows):
+                for fidx, fmap in enumerate(fnmap):
+                    qkey = tuple(sorted(int(n) for n in row[fmap]))
+                    lookup[qkey].append(
+                        (ekey, eidx, fidx, petype, nnodes)
+                    )
+
+        return lookup
+
+    # D5B1: the octree mathematics below is extracted to `pyfr.amr` so a
+    # native materializer can share it. These stay as thin adapters that
+    # convert between Gmsh's own file-order node layout (as read into
+    # `_elenodes` rows) and the shared core's canonical PyFR Hex8 order,
+    # preserving accepted D1/D2 observable behaviour exactly - see
+    # `d5b1/crosscheck.py` evidence in the AMR-M2 build report for the
+    # verification this refactor was checked against.
+
+    def _hex_node_store(self):
+        return HexNodeStore(
+            coords=lambda ids: self._nodepts[np.asarray(ids)],
+            allocate=lambda pts: self._append_nodepts(pts),
+        )
+
+    def _hex_affine_map(self, nodes, tol=1e-10):
+        pids = nodes[self._nodemaps['hex', 8]]
+        return pids, hex_affine_map(pids, self._hex_node_store(), tol=tol)
+
+    def _refined_hex_children(self, nodes, node_cache, coord_cache):
+        nodemap = self._nodemaps['hex', 8]
+        pids = nodes[nodemap]
+        children = hex_refined_children(
+            pids, self._hex_node_store(), node_cache, coord_cache
+        )
+        invmap = np.argsort(nodemap)
+        return [
+            (ix, iy, iz, np.asarray(row)[invmap])
+            for ix, iy, iz, row in children
+        ]
+
+    def _hex_child_face_nodes(self, children, fidx):
+        fmap = self._petype_fnmap['hex']['quad'][fidx]
+        return hex_child_face_nodes(children, fidx, fmap)
+
+    def _order_quad_2x2_faces(self, coarse, fidx, fine, tol=1e-10):
+        pids = coarse[self._nodemaps['hex', 8]]
+        return hex_order_quad2x2_faces(
+            pids, fidx, fine, self._hex_node_store(), tol=tol
+        )
+
+    @staticmethod
+    def _hex_tree_cell_index(path):
+        return hex_tree_cell_index(path)
+
+    @staticmethod
+    def _hex_face_axis_side(fidx):
+        return hex_face_axis_side(fidx)
+
+    def _hex_root_face_uv(self, row, fidx):
+        pids = row[self._nodemaps['hex', 8]]
+        return hex_root_face_uv(pids, fidx)
+
+    @staticmethod
+    def _hex_d4_transform(src, dst):
+        return hex_d4_transform(src, dst)
+
+    @staticmethod
+    def _hex_transform_rect(rect, transform):
+        return hex_transform_rect(rect, transform)
+
+    def _hex_root_topology(self, eligible):
+        faces = self._volume_face_lookup()
+        boundary = self._boundary_quad_lookup()
+        etotag = {ele: tag for tag, ele in eligible.items()}
+        rootfaces = {}
+
+        for tag, (ekey, eidx) in eligible.items():
+            row = self._elenodes[ekey][eidx]
+            for fidx, fmap in enumerate(self._petype_fnmap['hex']['quad']):
+                qnodes = tuple(int(n) for n in row[fmap])
+                qkey = tuple(sorted(qnodes))
+                owners = faces[qkey]
+
+                if len(owners) == 2:
+                    other = owners[0]
+                    if other[:2] == (ekey, eidx):
+                        other = owners[1]
+
+                    if other[3:] == ('hex', 8) and other[:2] in etotag:
+                        kind = 'interior'
+                        info = (etotag[other[:2]], other[2])
+                    else:
+                        kind = 'unsupported'
+                        info = other
+                elif len(owners) == 1:
+                    bmatch = boundary.get(qkey)
+                    if bmatch is None:
+                        kind, info = 'unmatched', None
+                    else:
+                        kind, bkey, bidx = bmatch
+                        info = bkey, bidx
+                else:
+                    kind, info = 'nonmanifold', None
+
+                rootfaces[tag, fidx] = {
+                    'qkey': qkey, 'kind': kind, 'info': info,
+                    'transform': (1, 0, 0, 0, 1, 0),
+                }
+
+        byqkey = defaultdict(list)
+        for side, face in rootfaces.items():
+            byqkey[face['qkey']].append(side)
+
+        shared = {}
+        for qkey, sides in byqkey.items():
+            interior = [
+                side for side in sides
+                if rootfaces[side]['kind'] == 'interior'
+            ]
+            if interior and len(interior) != 2:
+                for side in sides:
+                    rootfaces[side]['kind'] = 'unsupported'
+                continue
+            if interior:
+                shared[qkey] = interior
+
+        for qkey, sides in shared.items():
+            owner = min(sides)
+            okey, oeidx = eligible[owner[0]]
+            ouv = self._hex_root_face_uv(
+                self._elenodes[okey][oeidx], owner[1]
+            )
+            for tag, fidx in sides:
+                ekey, eidx = eligible[tag]
+                suv = self._hex_root_face_uv(
+                    self._elenodes[ekey][eidx], fidx
+                )
+                rootfaces[tag, fidx]['transform'] = \
+                    self._hex_d4_transform(suv, ouv)
+
+        return rootfaces
+
+    def _validate_hex_tree_roots(self, roots, eligible, rootfaces):
+        for tag in sorted(roots):
+            ekey, eidx = eligible[tag]
+            self._hex_affine_map(self._elenodes[ekey][eidx])
+
+            for fidx in range(6):
+                face = rootfaces[tag, fidx]
+                kind, info = face['kind'], face['info']
+                if kind == 'interior':
+                    continue
+                if kind == 'periodic':
+                    raise ValueError(
+                        'V10D2 does not refine periodic boundary cells'
+                    )
+                if kind == 'fixed':
+                    bkey, _ = info
+                    if self._etype_map[bkey[0]] != ('quad', 4):
+                        raise ValueError(
+                            'V10D2 requires Quad4 on refined boundaries'
+                        )
+                    continue
+                if kind == 'unsupported':
+                    raise ValueError(
+                        'V10D2 refined Hex faces require an unrefined '
+                        'Hex8 neighbour'
+                    )
+                if kind == 'unmatched':
+                    raise ValueError(
+                        'Selected Hex8 has an unmatched exterior face'
+                    )
+                raise ValueError(
+                    'Selected Hex8 has a non-manifold quadrilateral face'
+                )
+
+    @staticmethod
+    def _hex_tree_leaves(eligible, split):
+        return hex_tree_leaves(eligible, split)
+
+    def _hex_tree_face_groups(self, leaves, rootfaces):
+        return hex_tree_face_groups(leaves, rootfaces)
+
+    @staticmethod
+    def _hex_rect_overlap(a, b):
+        return hex_rect_overlap(a, b)
+
+    def _hex_tree_face_pairs(self, groups, rootfaces):
+        rootkinds = {
+            ('root', face['qkey']): face['kind']
+            for face in rootfaces.values()
+        }
+        yield from hex_tree_face_pairs(groups, rootkinds)
+
+    def _balance_hex_tree(self, split, eligible, rootfaces):
+        split = set(split)
+        while True:
+            leaves = self._hex_tree_leaves(eligible, split)
+            groups = self._hex_tree_face_groups(leaves, rootfaces)
+            added = set()
+
+            for lface, rface in self._hex_tree_face_pairs(
+                groups, rootfaces
+            ):
+                llevel, rlevel = lface['level'], rface['level']
+                if abs(llevel - rlevel) > 1:
+                    coarse = lface if llevel < rlevel else rface
+                    added.add(coarse['leaf'])
+
+            if not added:
+                return split, leaves, groups
+
+            split.update(added)
+
+    def _materialize_hex_tree(self, eligible, split):
+        leafrows = {}
+        node_cache, coord_cache = {}, {}
+
+        def walk(tag, path, row):
+            if (tag, path) not in split:
+                leafrows[tag, path] = row
+                return
+
+            children = self._refined_hex_children(
+                row, node_cache, coord_cache
+            )
+            self._commit_nodepts_append()
+            self._begin_nodepts_append()
+            for ix, iy, iz, child in children:
+                octant = ix + 2*iy + 4*iz
+                walk(tag, path + (octant,), child)
+
+        self._begin_nodepts_append()
+        try:
+            for tag in sorted(eligible):
+                ekey, eidx = eligible[tag]
+                row = self._elenodes[ekey][eidx]
+                if (tag, ()) in split:
+                    walk(tag, (), row)
+                else:
+                    leafrows[tag, ()] = row
+            self._commit_nodepts_append()
+        except:
+            if hasattr(self, '_pending_nodepts'):
+                del self._pending_nodepts
+                del self._pending_nnodes
+            raise
+
+        return leafrows
+
+    def refine_hexes(self, selector):
+        """Recursively refine selected affine Gmsh Hex8 octree cells."""
+        if getattr(self, '_hex_refine_applied', False):
+            return self._hex_refine_summary
+        if getattr(self, '_pyramid_split_applied', False):
+            raise ValueError(
+                'V10D2 Hex refinement cannot be combined with pyramid '
+                'splitting'
+            )
+
+        requested = self._parse_hex_refine_selector(selector)
+        volpents = set(self._volpents.values())
+        eligible = {}
+        taginfo = {}
+        for ekey, rows in self._elenodes.items():
+            etype, pents = ekey
+            tags = self._eletags.get(ekey)
+            if tags is None:
+                continue
+
+            isvol = bool(set(self._as_pent_tuple(pents)) & volpents)
+            petype, nnodes = self._etype_map[etype]
+            for eidx, tag in enumerate(tags):
+                taginfo[int(tag)] = (ekey, eidx, isvol, petype, nnodes)
+                if isvol and petype == 'hex' and nnodes == 8:
+                    eligible[int(tag)] = (ekey, eidx)
+
+        if requested is None:
+            explicit_roots = set(eligible)
+            split = {(tag, ()) for tag in explicit_roots}
+        else:
+            explicit_roots = {tag for tag, _ in requested}
+            missing = explicit_roots - taginfo.keys()
+            if missing:
+                raise ValueError(
+                    f'Unknown Gmsh element tags for Hex refinement: '
+                    f'{sorted(missing)}'
+                )
+            invalid = explicit_roots - eligible.keys()
+            if invalid:
+                raise ValueError(
+                    'V10D2 can refine only complete volume Hex8 elements; '
+                    f'invalid tags {sorted(invalid)}'
+                )
+
+            split = set()
+            for tag, path in requested:
+                for depth in range(len(path) + 1):
+                    split.add((tag, path[:depth]))
+
+        if not split:
+            self._hex_refine_mortars = []
+            self._hex_refine_applied = True
+            self._hex_refine_summary = {
+                'selected': 0, 'generated-hexes': 0, 'mortars': 0,
+                'boundary-splits': 0, 'conforming-refined-faces': 0,
+            }
+            return self._hex_refine_summary
+
+        rootfaces = self._hex_root_topology(eligible)
+        split, leaves, groups = self._balance_hex_tree(
+            split, eligible, rootfaces
+        )
+        refined_roots = {tag for tag, path in split if not path}
+        self._validate_hex_tree_roots(
+            refined_roots, eligible, rootfaces
+        )
+        leafrows = self._materialize_hex_tree(eligible, split)
+
+        mortar_fines = defaultdict(list)
+        mortar_faces = {}
+        mortar_surfaces = set()
+        for lface, rface in self._hex_tree_face_pairs(groups, rootfaces):
+            dl = lface['level'] - rface['level']
+            if dl == 0:
+                lrow = leafrows[lface['leaf']]
+                rrow = leafrows[rface['leaf']]
+                lfmap = self._petype_fnmap['hex']['quad'][lface['fidx']]
+                rfmap = self._petype_fnmap['hex']['quad'][rface['fidx']]
+                if tuple(sorted(int(n) for n in lrow[lfmap])) != tuple(
+                    sorted(int(n) for n in rrow[rfmap])
+                ):
+                    raise ValueError(
+                        'Same-level Hex tree neighbours are not conforming'
+                    )
+                continue
+            if abs(dl) != 1:
+                raise ValueError('Unbalanced Hex tree face escaped closure')
+
+            coarse, fine = (
+                (rface, lface) if dl > 0 else (lface, rface)
+            )
+            ckey = coarse['leaf'], coarse['fidx']
+            mortar_faces[ckey] = coarse
+            mortar_fines[ckey].append(fine)
+            mortar_surfaces.add(coarse['surface'])
+
+        mortars = []
+        for ckey in sorted(mortar_fines, key=repr):
+            coarse = mortar_faces[ckey]
+            fine = mortar_fines[ckey]
+            if len(fine) != 4:
+                raise ValueError(
+                    'Balanced Hex tree mortar does not have four fine faces'
+                )
+
+            crow = leafrows[coarse['leaf']]
+            faces = []
+            for fface in fine:
+                frow = leafrows[fface['leaf']]
+                fmap = self._petype_fnmap['hex']['quad'][fface['fidx']]
+                faces.append(tuple(int(n) for n in frow[fmap]))
+
+            ordered = self._order_quad_2x2_faces(
+                crow, coarse['fidx'], faces
+            )
+            cfmap = self._petype_fnmap['hex']['quad'][coarse['fidx']]
+            mortars.append({
+                'format': 'one-to-many-v1',
+                'template': 'quad-2x2',
+                'left': tuple(int(n) for n in crow[cfmap]),
+                'right': ordered,
+            })
+
+        boundary_remove = defaultdict(set)
+        boundary_add = defaultdict(list)
+        for tag in sorted(refined_roots):
+            for fidx in range(6):
+                face = rootfaces[tag, fidx]
+                if face['kind'] != 'fixed':
+                    continue
+
+                bkey, bidx = face['info']
+                surface = ('root', face['qkey'])
+                fdescs = sorted(
+                    groups[surface][tag],
+                    key=lambda d: (d['leaf'], d['fidx'])
+                )
+                boundary_remove[bkey].add(bidx)
+                fmap = self._petype_fnmap['hex']['quad'][fidx]
+                boundary_add[bkey].extend(
+                    tuple(int(n) for n in leafrows[d['leaf']][fmap])
+                    for d in fdescs
+                )
+
+        generated_tag = -1
+        refined_by_key = defaultdict(list)
+        for tag in refined_roots:
+            ekey, eidx = eligible[tag]
+            refined_by_key[ekey].append((eidx, tag))
+
+        for ekey in sorted(refined_by_key, key=repr):
+            rows = self._elenodes[ekey]
+            tags = self._eletags[ekey]
+            selected = sorted(refined_by_key[ekey])
+            keep = np.ones(len(rows), dtype=bool)
+            keep[[eidx for eidx, _ in selected]] = False
+
+            newrows, newtags = [], []
+            for _, tag in selected:
+                paths = sorted(
+                    path for ltag, path in leaves if ltag == tag
+                )
+                for path in paths:
+                    newrows.append(leafrows[tag, path])
+                    newtags.append(generated_tag)
+                    generated_tag -= 1
+
+            self._elenodes[ekey] = np.vstack((rows[keep], newrows))
+            self._eletags[ekey] = np.concatenate((tags[keep], newtags))
+
+        for bkey in sorted(boundary_remove, key=repr):
+            idxs = boundary_remove[bkey]
+            rows = self._elenodes[bkey]
+            tags = self._eletags[bkey]
+            keep = np.ones(len(rows), dtype=bool)
+            keep[list(idxs)] = False
+            newrows = np.asarray(boundary_add[bkey], dtype=np.int64)
+            newtags = np.arange(
+                generated_tag - len(newrows) + 1,
+                generated_tag + 1, dtype=np.int64
+            )[::-1]
+            generated_tag -= len(newrows)
+            self._elenodes[bkey] = np.vstack((rows[keep], newrows))
+            self._eletags[bkey] = np.concatenate((tags[keep], newtags))
+
+        shared_root_surfaces = set()
+        for (tag, _), face in rootfaces.items():
+            if face['kind'] != 'interior':
+                continue
+            other = face['info'][0]
+            if tag in refined_roots and other in refined_roots:
+                shared_root_surfaces.add(('root', face['qkey']))
+
+        self._hex_refine_mortars = mortars
+        self._hex_refine_applied = True
+        self._hex_refine_summary = {
+            'selected': len(explicit_roots),
+            'generated-hexes': sum(
+                1 for tag, _ in leaves if tag in refined_roots
+            ),
+            'mortars': len(mortars),
+            'boundary-splits': sum(
+                len(v) for v in boundary_remove.values()
+            ),
+            'conforming-refined-faces': len(
+                shared_root_surfaces - mortar_surfaces
+            ),
+        }
+        return self._hex_refine_summary
+
+    def split_pyramids(self, policy='all'):
+        """Replace selected pyramids with equivalent tetrahedra."""
+        if getattr(self, '_pyramid_split_applied', False):
+            return self._pyramid_split_summary
+
+        if policy not in {'all', 'incompatible'}:
+            raise ValueError(f'Invalid pyramid splitting policy {policy!r}')
+
+        pkeys = [
+            key for key in self._elenodes
+            if self._etype_map[key[0]][0] == 'pyr'
+        ]
+        input_count = sum(len(self._elenodes[key]) for key in pkeys)
+
+        split_rows = {}
+        split_masks = {}
+        for key in pkeys:
+            rows = self._elenodes[key]
+            if policy == 'all':
+                mask = np.ones(len(rows), dtype=bool)
+            else:
+                mask = ~_pyr_parallelogram_mask(
+                    self._nodepts, rows[:, :5], self._petype_fnmap,
+                    self._nodemaps
+                )
+
+            if np.any(mask):
+                split_rows[key] = rows[mask]
+                split_masks[key] = mask
+
+        split_count = sum(len(rows) for rows in split_rows.values())
+        retained_count = input_count - split_count
+        if not split_count:
+            self._pyramid_split_applied = True
+            self._pyramid_split_policy = policy
+            self._pyramid_mortars = []
+            self._pyramid_boundary_splits = []
+            self._pyramid_conforming_pairs = []
+            self._pyramid_periodic_pairs = []
+            self._pyramid_target_tet_order = None
+            self._pyramid_split_summary = {
+                'policy': policy, 'input': input_count,
+                'split': 0, 'retained': retained_count,
+                'generated-tets': 0, 'mortars': 0,
+                'boundary-splits': 0, 'conforming-pairs': 0,
+                'periodic-pairs': 0,
+            }
+            return self._pyramid_split_summary
+
+        unsupported = [
+            key[0] for key in split_rows
+            if ('pyr', self._etype_map[key[0]][1]) not in self._nodemaps
+        ]
+        if unsupported:
+            raise ValueError(
+                'Pyramid splitting requires complete supported Gmsh '
+                f'pyramids; found element types {unsupported}'
+            )
+
+        porders = [
+            PyrShape.order_from_npts(self._etype_map[key[0]][1])
+            for key in split_rows
+        ]
+        torders = [
+            TetShape.order_from_npts(self._etype_map[key[0]][1])
+            for key in self._elenodes
+            if self._etype_map[key[0]][0] == 'tet'
+        ]
+        target_order = max([2*max(porders), *torders])
+
+        # Preserve the source Gmsh maps before installing the importer-local
+        # generated tetrahedral ordering for the selected target order.
+        source_nodemaps = dict(self._nodemaps)
+        tetetype, storage = self._prepare_generated_tets(target_order)
+        self._begin_nodepts_append()
+        self._promote_existing_tets(
+            target_order, tetetype, source_nodemaps, storage
+        )
+
+        boundary_quads = self._boundary_quad_lookup()
+        records = []
+        by_quad = defaultdict(list)
+        for pkey, rows in split_rows.items():
+            pents = pkey[1]
+            for nodes in rows:
+                quad = tuple(int(n) for n in nodes[:4])
+                record = {
+                    'pents': pents,
+                    'nodes': nodes,
+                    'quad': quad,
+                    'qkey': tuple(sorted(quad)),
+                    'candidates': self._pyramid_candidates(
+                        nodes, target_order
+                    ),
+                }
+                records.append(record)
+                by_quad[record['qkey']].append(record)
+
+        for pkey, mask in split_masks.items():
+            rows = self._elenodes[pkey]
+            if np.any(~mask):
+                self._elenodes[pkey] = rows[~mask]
+            else:
+                del self._elenodes[pkey]
+
+        conforming_pairs = []
+        for qkey, group in by_quad.items():
+            bmatch = boundary_quads.get(qkey)
+            if len(group) == 1:
+                record = group[0]
+                record['kind'] = 'boundary' if bmatch else 'mortar'
+                record['boundary'] = bmatch
+                if not bmatch or bmatch[0] != 'periodic':
+                    record['selected'] = max(
+                        record['candidates'].values(),
+                        key=lambda c: (c['quality'], c['edge'])
+                    )
+            elif len(group) == 2:
+                if bmatch:
+                    raise ValueError(
+                        'A boundary quadrilateral is shared by two pyramids: '
+                        f'{qkey}'
+                    )
+
+                left, right = group
+                common = (
+                    left['candidates'].keys() & right['candidates'].keys()
+                )
+                if len(common) != 2:
+                    raise ValueError(
+                        'Paired pyramids do not expose the same base '
+                        f'diagonals: {qkey}'
+                    )
+
+                edge = max(
+                    common,
+                    key=lambda e: (
+                        min(left['candidates'][e]['quality'],
+                            right['candidates'][e]['quality']),
+                        e,
+                    )
+                )
+                geom_error = self._paired_pyramid_geometry_error(
+                    left, right, edge
+                )
+                if geom_error > 1e-10:
+                    raise ValueError(
+                        'Paired pyramid base geometry mismatch '
+                        f'{geom_error:.3e} exceeds tolerance 1.000e-10'
+                    )
+
+                for record in group:
+                    record['selected'] = record['candidates'][edge]
+                    record['kind'] = 'paired'
+                    record['boundary'] = None
+
+                conforming_pairs.append({
+                    'quad': qkey,
+                    'diagonal_edge': edge,
+                    'quality': min(
+                        record['selected']['quality'] for record in group
+                    ),
+                    'geometry_error': geom_error,
+                })
+            else:
+                raise ValueError(
+                    f'Non-manifold pyramid base shared by {len(group)} '
+                    f'elements: {qkey}'
+                )
+
+        periodic_pairs = self._select_periodic_pyramid_diagonals(
+            records
+        )
+
+        consumed_boundary_quads = set()
+        boundary_remove = defaultdict(set)
+        boundary_add = defaultdict(list)
+        boundary_splits = []
+        mortars = []
+        converted = defaultdict(list)
+        for record in records:
+            selected = record['selected']
+            quality = selected['quality']
+            if quality <= 1e-10:
+                raise ValueError(
+                    'Pyramid splitting produced a nonpositive or '
+                    f'near-singular tetrahedral child; quality={quality:.3e}'
+                )
+
+            converted[record['pents']].extend(
+                self._store_pyramid_child_tet(
+                    coords, corners, target_order, storage
+                )
+                for coords, corners in zip(
+                    selected['coords'], selected['corners']
+                )
+            )
+
+            quad = record['quad']
+            qkey = record['qkey']
+            tris = tuple(tuple(c[:3]) for c in selected['corners'])
+            if record['kind'] == 'boundary':
+                if qkey in consumed_boundary_quads:
+                    raise ValueError(
+                        'Multiple pyramids reference the same boundary '
+                        f'quadrilateral face: {qkey}'
+                    )
+
+                kind, bkey, bidx = record['boundary']
+                porder = PyrShape.order_from_npts(len(record['nodes']))
+                trietype = self._boundary_tri_etype(bkey[1], porder)
+                tkeyb = (trietype, bkey[1])
+                boundary_add[tkeyb].extend(
+                    self._boundary_tri_nodes(
+                        record['nodes'], tri, trietype
+                    )
+                    for tri in tris
+                )
+                boundary_remove[bkey].add(bidx)
+                consumed_boundary_quads.add(qkey)
+                boundary_splits.append({
+                    'quad': quad,
+                    'tris': tris,
+                    'boundary_pents': bkey[1],
+                    'boundary_kind': kind,
+                    'diagonal': selected['diagonal'],
+                    'quality': quality,
+                })
+            elif record['kind'] == 'mortar':
+                mortars.append({
+                    'quad': quad,
+                    'tris': tris,
+                    'diagonal': selected['diagonal'],
+                    'quality': quality,
+                })
+
+        for pents, children in converted.items():
+            tkey = (tetetype, pents)
+            children = np.asarray(children, dtype=np.int64)
+            if tkey in self._elenodes:
+                self._elenodes[tkey] = np.vstack(
+                    (self._elenodes[tkey], children)
+                )
+            else:
+                self._elenodes[tkey] = children
+
+        # Replace each matched boundary quad by two triangles carrying
+        # the same physical-entity key.  These are ordinary boundary faces,
+        # not mortar interfaces.
+        for bkey, idxs in boundary_remove.items():
+            rows = self._elenodes[bkey]
+            keep = np.ones(len(rows), dtype=bool)
+            keep[list(idxs)] = False
+            if np.any(keep):
+                self._elenodes[bkey] = rows[keep]
+            else:
+                del self._elenodes[bkey]
+
+        for bkey, rows in boundary_add.items():
+            rows = np.asarray(rows, dtype=np.int64)
+            if bkey in self._elenodes:
+                self._elenodes[bkey] = np.vstack((self._elenodes[bkey], rows))
+            else:
+                self._elenodes[bkey] = rows
+
+        self._commit_nodepts_append()
+
+        self._pyramid_mortars = mortars
+        self._pyramid_boundary_splits = boundary_splits
+        self._pyramid_conforming_pairs = conforming_pairs
+        self._pyramid_periodic_pairs = periodic_pairs
+        self._pyramid_target_tet_order = target_order
+        self._pyramid_split_policy = policy
+        self._pyramid_split_summary = {
+            'policy': policy, 'input': input_count,
+            'split': split_count, 'retained': retained_count,
+            'generated-tets': 2*split_count, 'mortars': len(mortars),
+            'boundary-splits': len(boundary_splits),
+            'conforming-pairs': len(conforming_pairs),
+            'periodic-pairs': len(periodic_pairs),
+        }
+        self._pyramid_split_applied = True
+        return self._pyramid_split_summary
+
     def _read_mesh_format(self, mshit):
         ver, ftype, dsize = next(mshit).split()
 
@@ -387,6 +1661,7 @@ class GmshReader(BaseReader):
 
     def _read_eles_impl_v2(self, mshit):
         elenodes = defaultdict(list)
+        eletags = defaultdict(list)
 
         for l in msh_section(mshit, 'Elements'):
             # Extract the raw element data
@@ -398,12 +1673,16 @@ class GmshReader(BaseReader):
                 raise ValueError(f'Unsupported element type {etype}')
 
             # Physical entity type (used for BCs)
-            elenodes[etype, (etags[0],)].append(enodes)
+            key = etype, (etags[0],)
+            elenodes[key].append(enodes)
+            eletags[key].append(enum)
 
         self._elenodes = {k: np.array(v) for k, v in elenodes.items()}
+        self._eletags = {k: np.array(v) for k, v in eletags.items()}
 
     def _read_eles_impl_v41(self, mshit):
         elenodes = defaultdict(list)
+        eletags = defaultdict(list)
 
         # Block and total element count
         nb, ne = (int(i) for i in next(mshit).split()[:2])
@@ -421,10 +1700,13 @@ class GmshReader(BaseReader):
             epents = self._tagpents[edim, etag]
 
             # Allocate space for, and read in, these elements
-            enodes = np.loadtxt(mshit, dtype=np.int64, max_rows=ecount,
-                                usecols=range(1, nnodes + 1), ndmin=2)
-
-            elenodes[etype, epents].append(enodes)
+            ebuf = np.loadtxt(
+                mshit, dtype=np.int64, max_rows=ecount,
+                usecols=range(nnodes + 1), ndmin=2
+            )
+            key = etype, epents
+            eletags[key].append(ebuf[:, 0])
+            elenodes[key].append(ebuf[:, 1:])
 
         if ne != sum(len(vv) for v in elenodes.values() for vv in v):
             raise ValueError('Invalid element count')
@@ -433,6 +1715,7 @@ class GmshReader(BaseReader):
             raise ValueError('Expected $EndElements')
 
         self._elenodes = {k: np.vstack(v) for k, v in elenodes.items()}
+        self._eletags = {k: np.concatenate(v) for k, v in eletags.items()}
 
     def _merge_vol(self):
         # Map from volume pent ID to bit mask
@@ -477,13 +1760,21 @@ class GmshReader(BaseReader):
 
         # Assemble a nodal mesh
         maps = self._etype_map, self._petype_fnmap, self._nodemaps
-        mesh = NodalMeshAssembler(self._nodepts, elenodes, volpent,
-                                  self._bfacespents, self._pfacespents, maps)
+        mortars = [
+            *getattr(self, '_pyramid_mortars', ()),
+            *getattr(self, '_hex_refine_mortars', ()),
+        ]
+        mesh = NodalMeshAssembler(
+            self._nodepts, elenodes, volpent, self._bfacespents,
+            self._pfacespents, maps, mortars=mortars
+        )
 
-        nodepts, eles, codec, periodic = mesh.get_eles(lintol, self.progress)
+        nodepts, eles, codec, periodic, mortars = mesh.get_eles(
+            lintol, self.progress
+        )
 
         # Append tag entries to the codec and assign per-element values
         codec.extend(f'tag/{tn}' for tn in sorted(self._volpents))
         self._assign_tags(eles, tagruns)
 
-        return nodepts, eles, codec, periodic
+        return nodepts, eles, codec, periodic, mortars
