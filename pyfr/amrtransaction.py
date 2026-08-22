@@ -805,6 +805,37 @@ def _validate_staged_hex_transfer(
     return before, after, error, rho_range, pressure_range
 
 
+def _validate_staged_hex_rhs(
+    stage_system, system, intg, bank, scratch_bank, staged_state, transferred
+):
+    stage_system.preproc(intg.tcurr, bank)
+    intg.backend.wait()
+    staged_after_preproc = _copy_state(stage_system, bank)[0]
+    if not np.array_equal(staged_after_preproc, staged_state):
+        raise AMRTransactionError(
+            'D6A staged accepted bank changed during preprocessing'
+        )
+
+    if (stage_system.nrhs != system.nrhs or
+            len(stage_system.ele_banks) != len(system.ele_banks) or
+            any(len(a) != len(b) for a, b in zip(
+                stage_system.ele_banks, system.ele_banks))):
+        raise AMRTransactionError(
+            'D6A staged register-bank layout changed'
+        )
+
+    rhs, bank_drift = _scratch_rhs(
+        stage_system, intg.tcurr, bank, scratch_bank
+    )
+    staged_after_rhs = _copy_state(stage_system, bank)[0]
+    if not np.array_equal(staged_after_rhs, transferred):
+        raise AMRTransactionError(
+            'D6A staged accepted bank changed after scratch RHS'
+        )
+
+    return rhs, bank_drift, sum(stage_system.ele_ndofs)
+
+
 def perform_one_amr_transaction(
     intg, scripted_marks, *, action='refine', restart_root_mesh=None
 ):
@@ -917,31 +948,10 @@ def perform_one_amr_transaction(
                 proposed_volumes, old_weights
             )
         )
-        stage_system.preproc(intg.tcurr, bank)
-        intg.backend.wait()
-        staged_after_preproc = _copy_state(stage_system, bank)[0]
-        if not np.array_equal(staged_after_preproc, staged_state):
-            raise AMRTransactionError(
-                'D6A staged accepted bank changed during preprocessing'
-            )
-
-        if (stage_system.nrhs != system.nrhs or
-            len(stage_system.ele_banks) != len(system.ele_banks) or
-            any(len(a) != len(b) for a, b in zip(
-                stage_system.ele_banks, system.ele_banks))):
-            raise AMRTransactionError(
-                'D6A staged register-bank layout changed'
-            )
-        rhs, bank_drift = _scratch_rhs(
-            stage_system, intg.tcurr, bank, scratch_bank
+        rhs, bank_drift, staged_gndofs = _validate_staged_hex_rhs(
+            stage_system, system, intg, bank, scratch_bank, staged_state,
+            transferred
         )
-        staged_after_rhs = _copy_state(stage_system, bank)[0]
-        if not np.array_equal(staged_after_rhs, transferred):
-            raise AMRTransactionError(
-                'D6A staged accepted bank changed after scratch RHS'
-            )
-
-        staged_gndofs = sum(stage_system.ele_ndofs)
         finalizer = weakref.finalize(
             stage_system, _cleanup_stage, reader, stage_dir
         )
