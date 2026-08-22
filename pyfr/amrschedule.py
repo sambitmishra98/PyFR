@@ -316,6 +316,20 @@ def _perform_scheduled_amr(intg, mode, stage_dir):
     )
 
 
+def _write_schedule_checkpoint(intg, mode, checkpoint_dir, scheduled):
+    tname = format(float(scheduled), '.17g')
+    stem = f'online-amr-t{tname}'
+    mesh_path = checkpoint_dir / f'{stem}.pyfrm'
+    soln_path = checkpoint_dir / f'{stem}.pyfrs'
+
+    if mode == 'mixed-hex-1r':
+        from pyfr.amrcheckpoint import write_online_mixed_hex_checkpoint
+        return write_online_mixed_hex_checkpoint(intg, mesh_path, soln_path)
+
+    from pyfr.amrcheckpoint import write_online_quad_checkpoint
+    return write_online_quad_checkpoint(intg, mesh_path, soln_path)
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -387,24 +401,9 @@ class NativeAMRSchedule:
         self.history.append(event)
 
         if tx is not None and self.checkpoint_dir is not None:
-            tname = format(float(scheduled), '.17g')
-            stem = f'online-amr-t{tname}'
-            if mode == 'mixed-hex-1r':
-                from pyfr.amrcheckpoint import (
-                    write_online_mixed_hex_checkpoint,
-                )
-                checkpoint = write_online_mixed_hex_checkpoint(
-                    intg,
-                    self.checkpoint_dir / f'{stem}.pyfrm',
-                    self.checkpoint_dir / f'{stem}.pyfrs',
-                )
-            else:
-                from pyfr.amrcheckpoint import write_online_quad_checkpoint
-                checkpoint = write_online_quad_checkpoint(
-                    intg,
-                    self.checkpoint_dir / f'{stem}.pyfrm',
-                    self.checkpoint_dir / f'{stem}.pyfrs',
-                )
+            checkpoint = _write_schedule_checkpoint(
+                intg, mode, self.checkpoint_dir, scheduled
+            )
             self.checkpoints.append(checkpoint)
         return result
 

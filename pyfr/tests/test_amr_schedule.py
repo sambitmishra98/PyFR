@@ -162,6 +162,25 @@ def test_quad_checkpoint_failure_is_post_commit_and_target_stays_done(
     assert calls.count(('amr', 0.2)) == 1
 
 
+def test_mixed_hex_checkpoint_dispatch(monkeypatch, tmp_path):
+    calls = []
+    checkpoint = object()
+    monkeypatch.setattr(
+        'pyfr.amrcheckpoint.write_online_mixed_hex_checkpoint',
+        lambda *args: calls.append(args) or checkpoint,
+    )
+    intg = object()
+
+    assert amrschedule._write_schedule_checkpoint(
+        intg, 'mixed-hex-1r', tmp_path, 0.2
+    ) is checkpoint
+    assert calls == [(
+        intg,
+        tmp_path / 'online-amr-t0.20000000000000001.pyfrm',
+        tmp_path / 'online-amr-t0.20000000000000001.pyfrs',
+    )]
+
+
 def test_schedule_mixin_rejects_plugin_config_before_parent_init():
     calls = []
 
