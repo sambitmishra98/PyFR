@@ -1866,6 +1866,27 @@ def _fixed_blocked_quad_leaves(leaves, rootfaces, fixed):
     return blocked
 
 
+def _validate_staged_mixed_quad_mesh(
+    stage_mesh, raw, root_mesh, new_leaves
+):
+    if tuple(stage_mesh.amr_tree.leaves()) != new_leaves:
+        raise AMRTransactionError('MIX2D1 staged ancestry changed leaf order')
+    if set(stage_mesh.etypes) != {'tri', 'quad'}:
+        raise AMRTransactionError('MIX2D1 staged element topology changed')
+    if not np.array_equal(stage_mesh.spts['tri'], root_mesh.spts['tri']):
+        raise AMRTransactionError(
+            'MIX2D1 staged immutable Tri geometry changed'
+        )
+
+    staged_mortars = tuple(
+        mcon for mcon in stage_mesh.mcon.values()
+        if mcon.format == 'one-to-many-v1'
+        and mcon.template == 'line-1x2'
+    )
+    if sum(map(len, staged_mortars)) != len(raw.mortars):
+        raise AMRTransactionError('MIX2D1 staged mortar count changed')
+
+
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -2022,21 +2043,9 @@ def perform_indicator_mixed_quad_amr_transaction(
             f'MIX2D1 native materialization failed: {exc}'
         ) from exc
 
-    if tuple(stage_mesh.amr_tree.leaves()) != new_leaves:
-        raise AMRTransactionError('MIX2D1 staged ancestry changed leaf order')
-    if set(stage_mesh.etypes) != {'tri', 'quad'}:
-        raise AMRTransactionError('MIX2D1 staged element topology changed')
-    if not np.array_equal(stage_mesh.spts['tri'], root_mesh.spts['tri']):
-        raise AMRTransactionError(
-            'MIX2D1 staged immutable Tri geometry changed'
-        )
-    staged_mortars = tuple(
-        mcon for mcon in stage_mesh.mcon.values()
-        if mcon.format == 'one-to-many-v1'
-        and mcon.template == 'line-1x2'
+    _validate_staged_mixed_quad_mesh(
+        stage_mesh, raw, root_mesh, new_leaves
     )
-    if sum(map(len, staged_mortars)) != len(raw.mortars):
-        raise AMRTransactionError('MIX2D1 staged mortar count changed')
 
     stage_system = None
     try:
