@@ -2570,15 +2570,30 @@ def _validate_staged_mixed_hex_mesh(
         raise AMRTransactionError('V10J staged mortar count changed')
 
 
+def _materialize_staged_mixed_hex_mesh(root_mesh, proposed_tree):
+    from pyfr.amrmesh import materialize_native_mixed_hex_tree
+    from pyfr.amrwriter import build_adapted_mixed_hex_mesh
+
+    try:
+        raw = materialize_native_mixed_hex_tree(root_mesh, proposed_tree)
+        stage_mesh = build_adapted_mixed_hex_mesh(raw)
+    except Exception as exc:
+        raise AMRTransactionError(
+            f'V10J native materialization failed: {exc}'
+        ) from exc
+
+    _validate_staged_mixed_hex_mesh(
+        stage_mesh, raw, root_mesh, proposed_tree
+    )
+    return raw, stage_mesh
+
+
 def _commit_mixed_hex_refinement(
     intg, system, mesh, root_mesh, old_tree, local_by_leaf, proposed_tree,
     *, refine_marks=(), wall_splits=(), closure_splits=(),
     fixed_blocked_marks=(),
 ):
     """Build, validate, and atomically commit one mixed-3D Hex proposal."""
-    from pyfr.amrmesh import materialize_native_mixed_hex_tree
-    from pyfr.amrwriter import build_adapted_mixed_hex_mesh
-
     bank = intg.idxcurr
     bankmap = _mixed_hex_bank_map(system, bank, 'accepted')
     scratch_bank = _scratch_bank(system, bank)
@@ -2616,16 +2631,8 @@ def _commit_mixed_hex_refinement(
         old['hex'], mesh.spts['hex'], basis
     )
 
-    try:
-        raw = materialize_native_mixed_hex_tree(root_mesh, proposed_tree)
-        stage_mesh = build_adapted_mixed_hex_mesh(raw)
-    except Exception as exc:
-        raise AMRTransactionError(
-            f'V10J native materialization failed: {exc}'
-        ) from exc
-
-    _validate_staged_mixed_hex_mesh(
-        stage_mesh, raw, root_mesh, proposed_tree
+    raw, stage_mesh = _materialize_staged_mixed_hex_mesh(
+        root_mesh, proposed_tree
     )
 
     proposed_after = _physical_hex_conserved_totals(
