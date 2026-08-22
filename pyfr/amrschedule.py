@@ -167,6 +167,24 @@ def _schedule_times(intg, comm):
     return schedule_dt, regular_start, initial_time, targets
 
 
+def _schedule_paths(cfg, mode):
+    section = 'solver-amr'
+    stage_dir = (
+        None if mode in {'quad-1r', 'mixed-quad-1r', 'mixed-hex-1r'}
+        else cfg.getpath(section, 'stage-dir', abs=True)
+    )
+
+    if not cfg.hasopt(section, 'checkpoint-dir'):
+        return stage_dir, None
+    if mode not in {'quad-1r', 'mixed-hex-1r'}:
+        raise AMRScheduleError(
+            'native AMR event checkpoints require pure Quad or '
+            'mixed Hex one-rank mode'
+        )
+
+    return stage_dir, cfg.getpath(section, 'checkpoint-dir', abs=True)
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -183,23 +201,7 @@ class NativeAMRSchedule:
         self.mode = _schedule_mode(intg, comm, mesh_etypes)
         _validate_schedule_integrator(intg, self.mode)
 
-        self.stage_dir = (
-            None if self.mode in {
-                'quad-1r', 'mixed-quad-1r', 'mixed-hex-1r'
-            }
-            else cfg.getpath(section, 'stage-dir', abs=True)
-        )
-        if cfg.hasopt(section, 'checkpoint-dir'):
-            if self.mode not in {'quad-1r', 'mixed-hex-1r'}:
-                raise AMRScheduleError(
-                    'native AMR event checkpoints require pure Quad or '
-                    'mixed Hex one-rank mode'
-                )
-            self.checkpoint_dir = cfg.getpath(
-                section, 'checkpoint-dir', abs=True
-            )
-        else:
-            self.checkpoint_dir = None
+        self.stage_dir, self.checkpoint_dir = _schedule_paths(cfg, self.mode)
         (self.schedule_dt, self.regular_start, self.initial_time,
          self.targets) = _schedule_times(intg, comm)
         if (intg.isrestart and self.mode == 'quad-1r' and
