@@ -185,6 +185,46 @@ def _schedule_paths(cfg, mode):
     return stage_dir, cfg.getpath(section, 'checkpoint-dir', abs=True)
 
 
+def _recover_quad_root(intg):
+    from pyfr.readers.native import NativeReader
+
+    cfg = intg.cfg
+    section = 'solver-amr'
+    if not cfg.hasopt(section, 'root-mesh'):
+        raise AMRScheduleError(
+            'adapted Quad restart requires solver-amr root-mesh'
+        )
+
+    root_path = cfg.getpath(section, 'root-mesh', abs=True)
+    try:
+        root_reader = NativeReader(str(root_path))
+    except Exception as exc:
+        raise AMRScheduleError(
+            f'unable to open adapted Quad root mesh: {root_path}'
+        ) from exc
+
+    try:
+        root_mesh = root_reader.mesh
+        tree = intg.system.mesh.amr_tree
+        if getattr(root_mesh, 'amr_tree', None) is not None:
+            raise AMRScheduleError(
+                'adapted Quad root-mesh anchor must be unadapted'
+            )
+        if root_mesh.uuid != tree.root_mesh_uuid:
+            raise AMRScheduleError(
+                'adapted Quad root-mesh anchor UUID mismatch'
+            )
+        if (root_mesh.etypes != ['quad'] or root_mesh.con_p or
+                root_mesh.mcon or
+                np.any(root_mesh.spts_curved.get('quad', ()))):
+            raise AMRScheduleError(
+                'adapted Quad root-mesh anchor is outside scope'
+            )
+        intg._amr_root_mesh = root_mesh
+    finally:
+        root_reader.close()
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -206,40 +246,7 @@ class NativeAMRSchedule:
          self.targets) = _schedule_times(intg, comm)
         if (intg.isrestart and self.mode == 'quad-1r' and
                 getattr(intg.system.mesh, 'amr_tree', None) is not None):
-            from pyfr.readers.native import NativeReader
-
-            if not cfg.hasopt(section, 'root-mesh'):
-                raise AMRScheduleError(
-                    'adapted Quad restart requires solver-amr root-mesh'
-                )
-            root_path = cfg.getpath(section, 'root-mesh', abs=True)
-            try:
-                root_reader = NativeReader(str(root_path))
-            except Exception as exc:
-                raise AMRScheduleError(
-                    f'unable to open adapted Quad root mesh: {root_path}'
-                ) from exc
-            try:
-                root_mesh = root_reader.mesh
-                tree = intg.system.mesh.amr_tree
-                if getattr(root_mesh, 'amr_tree', None) is not None:
-                    raise AMRScheduleError(
-                        'adapted Quad root-mesh anchor must be unadapted'
-                    )
-                if root_mesh.uuid != tree.root_mesh_uuid:
-                    raise AMRScheduleError(
-                        'adapted Quad root-mesh anchor UUID mismatch'
-                    )
-                if (root_mesh.etypes != ['quad'] or root_mesh.con_p or
-                        root_mesh.mcon or np.any(
-                            root_mesh.spts_curved.get('quad', ())
-                        )):
-                    raise AMRScheduleError(
-                        'adapted Quad root-mesh anchor is outside scope'
-                    )
-                intg._amr_root_mesh = root_mesh
-            finally:
-                root_reader.close()
+            _recover_quad_root(intg)
         elif (intg.isrestart and self.mode == 'mixed-quad-1r' and
               getattr(intg.system.mesh, 'amr_tree', None) is not None):
             raise AMRScheduleError(
