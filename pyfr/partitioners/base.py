@@ -55,6 +55,72 @@ class BasePartitioner:
                 raise ValueError('Invalid partitioner option')
 
     @staticmethod
+    def _mortar_element_groups(mesh, cdisps):
+        if 'mortars' not in mesh:
+            return []
+
+        groups = []
+        for dset in mesh['mortars'].values():
+            fields = dset.dtype.fields
+            generic = {'left_cidx', 'left_eidx', 'right_cidx', 'right_eidx'}
+            legacy = {
+                'coarse_cidx', 'coarse_eidx', 'fine_cidx', 'fine_eidx'
+            }
+
+            if generic <= fields.keys():
+                lcf, lef = 'left_cidx', 'left_eidx'
+                rcf, ref = 'right_cidx', 'right_eidx'
+            elif legacy <= fields.keys():
+                lcf, lef = 'coarse_cidx', 'coarse_eidx'
+                rcf, ref = 'fine_cidx', 'fine_eidx'
+            else:
+                raise ValueError('Unsupported mortar connectivity record')
+
+            for rec in dset:
+                left = cdisps[rec[lcf]] + rec[lef]
+                right = cdisps[rec[rcf]] + rec[ref]
+                groups.append(np.concatenate(([left], np.atleast_1d(right))))
+
+        return groups
+
+    @staticmethod
+    def _amr_hex_family_groups(mesh, edisps):
+        """Return ancestry-defined Hex root-family partition groups.
+
+        Persistent Hex AMR leaves are stored in canonical element order, so
+        each repeated root-eidx identifies the complete active leaf subtree
+        descended from one original Hex root.  Treating these groups as
+        indivisible partition vertices keeps a refined family on one rank
+        while leaving the final per-leaf ownership representation unchanged.
+        """
+        if 'amr' not in mesh or 'hex' not in edisps:
+            return []
+
+        grp = mesh['amr']
+        if 'template' in grp:
+            template = grp['template'][()]
+            if isinstance(template, bytes):
+                template = template.decode()
+            if template != 'octree-2x2x2-v1':
+                return []
+
+        roots = np.asarray(grp['leaves/root-eidx'][()], dtype=np.int64)
+        nhex = len(mesh['eles/hex'])
+        if roots.ndim != 1 or len(roots) != nhex:
+            raise ValueError(
+                'Persistent Hex AMR ancestry does not match Hex element count'
+            )
+
+        groups = []
+        disp = edisps['hex']
+        for root in np.unique(roots):
+            eidxs = np.flatnonzero(roots == root)
+            if len(eidxs) > 1:
+                groups.append(disp + eidxs)
+
+        return groups
+
+    @staticmethod
     def construct_global_con(mesh):
         codec = [c.decode() for c in mesh['codec']]
         efaces, ecurved, etags = {}, [], []
@@ -93,6 +159,12 @@ class BasePartitioner:
             econ[:, 1] = cdisps[einfo['cidx']] + einfo['off']
 
             conn.append(econ)
+
+        # Add graph edges from the left mortar element to every right
+        # participant.  These edges are used for partitioning only;
+        # the face connectivity remains marked as mortar connectivity.
+        for group in BasePartitioner._mortar_element_groups(mesh, cdisps):
+            conn.extend([[group[0], fine] for fine in group[1:]])
 
         # Stack all of the global connectivity arrays together
         conn = np.vstack(conn)
@@ -195,7 +267,7 @@ class BasePartitioner:
         pass
 
     @staticmethod
-    def _group_periodic_eles(mesh, con, cdisps, elewts_fn):
+    def _group_periodic_eles(mesh, con, cdisps, edisps, elewts_fn):
         cdtype = [('l', np.int64), ('r', np.int64)]
         ds, pidx = DisjointSet(), []
 
@@ -224,9 +296,24 @@ class BasePartitioner:
             for l, r in iter_struct(pcon.reshape(-1, 2)):
                 ds.union(l, r)
 
+        # Mortar participants must remain on one partition so that the
+        # common flux is evaluated exactly once by the local mortar kernel.
+        for group in BasePartitioner._mortar_element_groups(mesh, cdisps):
+            for ele in group[1:]:
+                ds.union(group[0], ele)
+
+        # Keep every active leaf subtree descended from one refined Hex root
+        # on a single partition.  Unioning this with mortar/periodic affinity
+        # also handles families whose nonconforming boundary pulls in a
+        # neighbouring element.
+        for group in BasePartitioner._amr_hex_family_groups(mesh, edisps):
+            for ele in group[1:]:
+                ds.union(group[0], ele)
+
         if (pmerge := ds.merges()):
             # Eliminate connectivity entries associated with periodic faces
-            con = np.delete(con, np.hstack(pidx), axis=0)
+            if pidx:
+                con = np.delete(con, np.hstack(pidx), axis=0)
 
             mfrom = np.array(list(pmerge))
             mto = np.array(list(pmerge.values()))
@@ -372,8 +459,9 @@ class BasePartitioner:
 
         # Merge periodic elements
         with progress.start('Group periodic elements'):
-            pmcon, exwts, pmerge = self._group_periodic_eles(mesh, con,
-                                                             cdisps, elewts_fn)
+            pmcon, exwts, pmerge = self._group_periodic_eles(
+                mesh, con, cdisps, edisps, elewts_fn
+            )
 
         # Obtain the dual graph for this mesh
         with progress.start('Construct graph'):
