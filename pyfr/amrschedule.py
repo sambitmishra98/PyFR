@@ -147,6 +147,26 @@ def _validate_schedule_integrator(intg, mode):
         )
 
 
+def _schedule_times(intg, comm):
+    cfg = intg.cfg
+    section = 'solver-amr'
+    schedule_dt = cfg.getfloat(section, 'schedule-dt')
+    regular_start = cfg.getfloat(section, 'schedule-start', intg.tstart)
+    initial_time = (
+        cfg.getfloat(section, 'initial-time')
+        if cfg.hasopt(section, 'initial-time') else None
+    )
+    targets = _future_schedule_targets(
+        intg.tcurr, intg.tend, intg.dtmin, regular_start=regular_start,
+        schedule_dt=schedule_dt, initial_time=initial_time,
+    )
+    _check_schedule_agreement(
+        comm, (schedule_dt, regular_start, initial_time, targets)
+    )
+
+    return schedule_dt, regular_start, initial_time, targets
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -180,24 +200,8 @@ class NativeAMRSchedule:
             )
         else:
             self.checkpoint_dir = None
-        self.schedule_dt = cfg.getfloat(section, 'schedule-dt')
-        self.regular_start = cfg.getfloat(
-            section, 'schedule-start', intg.tstart
-        )
-        self.initial_time = (
-            cfg.getfloat(section, 'initial-time')
-            if cfg.hasopt(section, 'initial-time') else None
-        )
-        self.targets = _future_schedule_targets(
-            intg.tcurr, intg.tend, intg.dtmin,
-            regular_start=self.regular_start,
-            schedule_dt=self.schedule_dt,
-            initial_time=self.initial_time,
-        )
-        _check_schedule_agreement(
-            comm, (self.schedule_dt, self.regular_start, self.initial_time,
-                   self.targets)
-        )
+        (self.schedule_dt, self.regular_start, self.initial_time,
+         self.targets) = _schedule_times(intg, comm)
         if (intg.isrestart and self.mode == 'quad-1r' and
                 getattr(intg.system.mesh, 'amr_tree', None) is not None):
             from pyfr.readers.native import NativeReader
