@@ -464,6 +464,7 @@ well as characteristics of the spatial and temporal schemes to be used.
    systems/constants.rst
    systems/solver.rst
    systems/solver-time-integrator.rst
+   systems/solver-amr.rst
    systems/solver-entropy-filter.rst
    systems/solver-artificial-viscosity.rst
    systems/solver-interfaces.rst
