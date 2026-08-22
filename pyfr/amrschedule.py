@@ -98,6 +98,55 @@ def _schedule_mode(intg, comm, mesh_etypes):
             else 'hex-mpi')
 
 
+def _validate_schedule_integrator(intg, mode):
+    if getattr(intg, 'formulation', None) != 'explicit':
+        raise AMRScheduleError('native D9 AMR scheduling requires explicit')
+    if getattr(intg, 'controller_name', None) != 'none':
+        raise AMRScheduleError(
+            'native D9 AMR scheduling requires controller none'
+        )
+    if getattr(intg, 'stepper_name', None) != 'rk4':
+        raise AMRScheduleError('native D9 AMR scheduling requires RK4')
+
+    backend_name = getattr(getattr(intg, 'backend', None), 'name', None)
+    if mode == 'quad-1r':
+        if backend_name not in {'openmp', 'cuda'}:
+            raise AMRScheduleError(
+                'native Quad AMR scheduling requires OpenMP or CUDA'
+            )
+    elif mode == 'mixed-quad-1r':
+        if backend_name != 'openmp':
+            raise AMRScheduleError(
+                'native mixed Quad AMR scheduling requires OpenMP'
+            )
+    elif mode == 'mixed-hex-1r':
+        if backend_name not in {'openmp', 'cuda'}:
+            raise AMRScheduleError(
+                'native mixed Hex AMR scheduling requires OpenMP or CUDA'
+            )
+    elif backend_name != 'openmp':
+        raise AMRScheduleError('native D9 Hex AMR scheduling requires OpenMP')
+
+    if mode == 'quad-1r':
+        from pyfr.amrtransaction import (
+            AMRTransactionError, _quad_online_writer_plugins,
+        )
+        try:
+            _quad_online_writer_plugins(intg)
+        except AMRTransactionError as exc:
+            raise AMRScheduleError(str(exc)) from exc
+    elif (getattr(intg, 'plugins', ()) or
+          getattr(intg, 'triggers', None)):
+        raise AMRScheduleError(
+            'native D9 AMR scheduling excludes plugins/triggers'
+        )
+
+    if getattr(getattr(intg, 'serialiser', None), '_serialfns', {}):
+        raise AMRScheduleError(
+            'native D9 AMR scheduling excludes serialised state'
+        )
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -112,51 +161,7 @@ class NativeAMRSchedule:
         comm, _, _ = get_comm_rank_root()
         mesh_etypes = tuple(getattr(intg.system.mesh, 'etypes', ()))
         self.mode = _schedule_mode(intg, comm, mesh_etypes)
-        if getattr(intg, 'formulation', None) != 'explicit':
-            raise AMRScheduleError(
-                'native D9 AMR scheduling requires explicit'
-            )
-        if getattr(intg, 'controller_name', None) != 'none':
-            raise AMRScheduleError(
-                'native D9 AMR scheduling requires controller none'
-            )
-        if getattr(intg, 'stepper_name', None) != 'rk4':
-            raise AMRScheduleError('native D9 AMR scheduling requires RK4')
-        backend_name = getattr(getattr(intg, 'backend', None), 'name', None)
-        if self.mode == 'quad-1r':
-            if backend_name not in {'openmp', 'cuda'}:
-                raise AMRScheduleError(
-                    'native Quad AMR scheduling requires OpenMP or CUDA'
-                )
-        elif self.mode == 'mixed-quad-1r':
-            if backend_name != 'openmp':
-                raise AMRScheduleError(
-                    'native mixed Quad AMR scheduling requires OpenMP'
-                )
-        elif self.mode == 'mixed-hex-1r':
-            if backend_name not in {'openmp', 'cuda'}:
-                raise AMRScheduleError(
-                    'native mixed Hex AMR scheduling requires OpenMP or CUDA'
-                )
-        elif backend_name != 'openmp':
-            raise AMRScheduleError(
-                'native D9 Hex AMR scheduling requires OpenMP'
-            )
-        if self.mode == 'quad-1r':
-            from pyfr.amrtransaction import _quad_online_writer_plugins
-            try:
-                _quad_online_writer_plugins(intg)
-            except AMRTransactionError as exc:
-                raise AMRScheduleError(str(exc)) from exc
-        elif (getattr(intg, 'plugins', ()) or
-              getattr(intg, 'triggers', None)):
-            raise AMRScheduleError(
-                'native D9 AMR scheduling excludes plugins/triggers'
-            )
-        if getattr(getattr(intg, 'serialiser', None), '_serialfns', {}):
-            raise AMRScheduleError(
-                'native D9 AMR scheduling excludes serialised state'
-            )
+        _validate_schedule_integrator(intg, self.mode)
 
         self.stage_dir = (
             None if self.mode in {

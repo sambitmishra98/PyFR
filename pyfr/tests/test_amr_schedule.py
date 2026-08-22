@@ -458,6 +458,25 @@ def test_adapted_quad_restart_schedule_requires_root_anchor(tmp_path):
         amrschedule.NativeAMRSchedule(intg)
 
 
+def test_quad_writer_transaction_error_is_schedule_error(monkeypatch):
+    from pyfr.amrtransaction import AMRTransactionError
+
+    intg = SimpleNamespace(
+        formulation='explicit', controller_name='none', stepper_name='rk4',
+        backend=SimpleNamespace(name='openmp'), plugins=(), triggers=None,
+        serialiser=SimpleNamespace(_serialfns={}),
+    )
+    monkeypatch.setattr(
+        'pyfr.amrtransaction._quad_online_writer_plugins',
+        lambda intg: (_ for _ in ()).throw(
+            AMRTransactionError('expected writer rejection')
+        ),
+    )
+
+    with pytest.raises(AMRScheduleError, match='expected writer rejection'):
+        amrschedule._validate_schedule_integrator(intg, 'quad-1r')
+
+
 def test_native_hex_schedule_remains_openmp_only(monkeypatch):
     from pyfr.inifile import Inifile
 
