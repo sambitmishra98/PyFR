@@ -1902,14 +1902,58 @@ def _materialize_staged_mixed_quad_mesh(root_mesh, proposed_tree, new_leaves):
     return raw, stage_mesh
 
 
+def _prepare_mixed_quad_transfer(
+    root_mesh, old_leaves, new_leaves, old, cfg, fields, gamma
+):
+    from pyfr.amroffline import (
+        _global_integral, _prolongate_to_tree, _validate_state
+    )
+
+    qbasis = QuadShape(None, cfg)
+    tbasis = TriShape(None, cfg)
+    if qbasis.nupts != old['quad'].shape[0]:
+        raise AMRTransactionError('MIX2D1 Quad solution-point mismatch')
+    if tbasis.nupts != old['tri'].shape[0]:
+        raise AMRTransactionError('MIX2D1 Tri solution-point mismatch')
+
+    transferred = {
+        'quad': _prolongate_to_tree(
+            old['quad'], old_leaves, new_leaves, qbasis
+        ),
+        'tri': np.array(old['tri'], copy=True, order='C'),
+    }
+    _validate_state(transferred['quad'], fields, gamma)
+    _validate_state(transferred['tri'], fields, gamma)
+    if not np.array_equal(transferred['tri'], old['tri']):
+        raise AMRTransactionError('MIX2D1 immutable Tri transfer is not exact')
+
+    qbefore = _global_integral(root_mesh, old_leaves, old['quad'], qbasis)
+    qafter = _global_integral(
+        root_mesh, new_leaves, transferred['quad'], qbasis
+    )
+    tibefore = _tri_global_integral(root_mesh, old['tri'], tbasis)
+    before = qbefore + tibefore
+    error = qafter + tibefore - before
+    scale = max(1.0, float(np.max(np.abs(before), initial=0.0)))
+    tol = 65536*np.finfo(
+        np.result_type(old['quad'], old['tri'], float)
+    ).eps*scale
+    if float(np.max(np.abs(error), initial=0.0)) > tol:
+        raise AMRTransactionError(
+            'MIX2D1 conservative prolongation gate failed'
+        )
+
+    return qbasis, tbasis, transferred, before, tol
+
+
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
     """Perform one genuine mixed Tri+Quad online Quad refinement event."""
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amroffline import (
-        _close_2to1, _global_integral, _prolongate_to_tree, _split_nodes,
-        _validate_state, _wall_floor_splits,
+        _close_2to1, _global_integral, _split_nodes, _validate_state,
+        _wall_floor_splits,
     )
     from pyfr.amr import quad_tree_face_groups, quad_tree_leaves
 
@@ -2012,41 +2056,9 @@ def perform_indicator_mixed_quad_amr_transaction(
         )
 
     proposed_tree = encode_quad_leaf_tree(root_mesh.uuid, new_leaves)
-    qbasis = QuadShape(None, intg.cfg)
-    tbasis = TriShape(None, intg.cfg)
-    if qbasis.nupts != old['quad'].shape[0]:
-        raise AMRTransactionError('MIX2D1 Quad solution-point mismatch')
-    if tbasis.nupts != old['tri'].shape[0]:
-        raise AMRTransactionError('MIX2D1 Tri solution-point mismatch')
-
-    transferred_quad = _prolongate_to_tree(
-        old['quad'], old_leaves, new_leaves, qbasis
+    qbasis, tbasis, transferred, before, tol = _prepare_mixed_quad_transfer(
+        root_mesh, old_leaves, new_leaves, old, intg.cfg, fields, gamma
     )
-    transferred = {
-        'quad': transferred_quad,
-        'tri': np.array(old['tri'], copy=True, order='C'),
-    }
-    _validate_state(transferred['quad'], fields, gamma)
-    _validate_state(transferred['tri'], fields, gamma)
-    if not np.array_equal(transferred['tri'], old['tri']):
-        raise AMRTransactionError('MIX2D1 immutable Tri transfer is not exact')
-
-    qbefore = _global_integral(root_mesh, old_leaves, old['quad'], qbasis)
-    qafter = _global_integral(
-        root_mesh, new_leaves, transferred['quad'], qbasis
-    )
-    tibefore = _tri_global_integral(root_mesh, old['tri'], tbasis)
-    before = qbefore + tibefore
-    proposed_after = qafter + tibefore
-    error = proposed_after - before
-    scale = max(1.0, float(np.max(np.abs(before), initial=0.0)))
-    tol = 65536*np.finfo(
-        np.result_type(old['quad'], old['tri'], float)
-    ).eps*scale
-    if float(np.max(np.abs(error), initial=0.0)) > tol:
-        raise AMRTransactionError(
-            'MIX2D1 conservative prolongation gate failed'
-        )
 
     raw, stage_mesh = _materialize_staged_mixed_quad_mesh(
         root_mesh, proposed_tree, new_leaves
