@@ -225,6 +225,50 @@ def _recover_quad_root(intg):
         root_reader.close()
 
 
+def _recover_mixed_hex_root(intg):
+    from pyfr.amr import HexLeafTree
+    from pyfr.readers.native import NativeReader
+
+    cfg = intg.cfg
+    section = 'solver-amr'
+    if not cfg.hasopt(section, 'root-mesh'):
+        raise AMRScheduleError(
+            'adapted mixed Hex restart requires solver-amr root-mesh'
+        )
+
+    root_path = cfg.getpath(section, 'root-mesh', abs=True)
+    try:
+        root_reader = NativeReader(str(root_path))
+    except Exception as exc:
+        raise AMRScheduleError(
+            f'unable to open mixed Hex root mesh: {root_path}'
+        ) from exc
+
+    try:
+        root_mesh = root_reader.mesh
+        tree = intg.system.mesh.amr_tree
+        if not isinstance(tree, HexLeafTree):
+            raise AMRScheduleError(
+                'adapted mixed Hex restart requires Hex ancestry'
+            )
+        if getattr(root_mesh, 'amr_tree', None) is not None:
+            raise AMRScheduleError(
+                'mixed Hex root-mesh anchor must be unadapted'
+            )
+        if root_mesh.uuid != tree.root_mesh_uuid:
+            raise AMRScheduleError(
+                'mixed Hex root-mesh anchor UUID mismatch'
+            )
+        if (set(root_mesh.etypes) != {'hex', 'pyr', 'tet'} or
+                root_mesh.con_p or root_mesh.mcon):
+            raise AMRScheduleError(
+                'mixed Hex root-mesh anchor is outside V10J scope'
+            )
+        intg._amr_root_mesh = root_mesh
+    finally:
+        root_reader.close()
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -255,43 +299,7 @@ class NativeAMRSchedule:
             )
         elif (intg.isrestart and self.mode == 'mixed-hex-1r' and
               getattr(intg.system.mesh, 'amr_tree', None) is not None):
-            from pyfr.amr import HexLeafTree
-            from pyfr.readers.native import NativeReader
-
-            if not cfg.hasopt(section, 'root-mesh'):
-                raise AMRScheduleError(
-                    'adapted mixed Hex restart requires solver-amr root-mesh'
-                )
-            root_path = cfg.getpath(section, 'root-mesh', abs=True)
-            try:
-                root_reader = NativeReader(str(root_path))
-            except Exception as exc:
-                raise AMRScheduleError(
-                    f'unable to open mixed Hex root mesh: {root_path}'
-                ) from exc
-            try:
-                root_mesh = root_reader.mesh
-                tree = intg.system.mesh.amr_tree
-                if not isinstance(tree, HexLeafTree):
-                    raise AMRScheduleError(
-                        'adapted mixed Hex restart requires Hex ancestry'
-                    )
-                if getattr(root_mesh, 'amr_tree', None) is not None:
-                    raise AMRScheduleError(
-                        'mixed Hex root-mesh anchor must be unadapted'
-                    )
-                if root_mesh.uuid != tree.root_mesh_uuid:
-                    raise AMRScheduleError(
-                        'mixed Hex root-mesh anchor UUID mismatch'
-                    )
-                if (set(root_mesh.etypes) != {'hex', 'pyr', 'tet'} or
-                        root_mesh.con_p or root_mesh.mcon):
-                    raise AMRScheduleError(
-                        'mixed Hex root-mesh anchor is outside V10J scope'
-                    )
-                intg._amr_root_mesh = root_mesh
-            finally:
-                root_reader.close()
+            _recover_mixed_hex_root(intg)
         elif (intg.isrestart and
               getattr(intg.system.mesh, 'amr_tree', None) is not None):
             raise AMRScheduleError(
