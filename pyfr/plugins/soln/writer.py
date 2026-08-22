@@ -78,6 +78,45 @@ class WriterPlugin(PostactionMixin, RegionMixin, BaseSolnPlugin):
             if not intg.isrestart:
                 self.tout_last -= self.dt_out
 
+    def prepare_amr_rebind(self, intg, system):
+        """Return a topology-rebound writer without mutating ``intg``.
+
+        The writer plugin caches element regions, auxiliary getters, output
+        shapes/eidxs, and a :class:`NativeWriter` at construction time.  None
+        of these objects may be carried across an h-adaptation system swap.
+
+        This helper is deliberately preparation-only.  The caller supplies a
+        fully validated shadow system and may install the returned plugin only
+        when the associated AMR transaction commits.  Existing asynchronous
+        output is flushed first so no old-system write remains in flight.
+        """
+        self._writer.flush()
+
+        class IntegratorView:
+            cfg = intg.cfg
+            backend = intg.backend
+            tcurr = intg.tcurr
+            tend = intg.tend
+            tstart = intg.tstart
+            dtmin = intg.dtmin
+            isrestart = intg.isrestart
+
+            @staticmethod
+            def call_plugin_dt(*args, **kwargs):
+                pass
+
+        view = IntegratorView()
+        view.system = system
+
+        rebound = type(self)(view, self.cfgsect, self.suffix)
+
+        # The original plugin already registered all future output times with
+        # the real integrator.  Preserve both its gating state and filename
+        # sequence rather than restarting either at the AMR event.
+        rebound.tout_last = self.tout_last
+        rebound._writer.fgen = self._writer.fgen
+        return rebound
+
     def _prepare_metadata(self, intg):
         comm, rank, root = get_comm_rank_root()
 
