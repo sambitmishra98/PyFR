@@ -4,6 +4,13 @@ from pyfr.solvers.baseadvec import (BaseAdvectionIntInters,
                                     BaseAdvectionBCInters)
 
 
+def mpi_ldg_beta(beta, rank, rhsrank):
+    if (rank + rhsrank) % 2:
+        return beta*(1.0 if rank > rhsrank else -1.0)
+    else:
+        return beta*(1.0 if rhsrank > rank else -1.0)
+
+
 class BaseAdvectionDiffusionIntInters(BaseAdvectionIntInters):
     def __init__(self, be, lhs, rhs, elemap, cfg):
         super().__init__(be, lhs, rhs, elemap, cfg)
@@ -52,10 +59,9 @@ class BaseAdvectionDiffusionMPIInters(BaseAdvectionMPIInters):
         # one side to take β = -β for the cflux and conu kernels. We
         # pick this side (arbitrarily) by comparing the physical ranks
         # of the two partitions.
-        if (rank + rhsrank) % 2:
-            self.c['ldg-beta'] *= 1.0 if rank > rhsrank else -1.0
-        else:
-            self.c['ldg-beta'] *= 1.0 if rhsrank > rank else -1.0
+        self.c['ldg-beta'] = mpi_ldg_beta(
+            self.c['ldg-beta'], rank, rhsrank
+        )
 
         # Artificial viscosity (populated by ArtificialViscosity if active)
         self.artvisc = None
