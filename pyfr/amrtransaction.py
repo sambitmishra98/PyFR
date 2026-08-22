@@ -836,21 +836,7 @@ def _validate_staged_hex_rhs(
     return rhs, bank_drift, sum(stage_system.ele_ndofs)
 
 
-def perform_one_amr_transaction(
-    intg, scripted_marks, *, action='refine', restart_root_mesh=None
-):
-    """Commit one scripted refine or coarsen transaction.
-
-    The call must occur after ``intg.advance_to(t_adapt)`` returns.  Refine
-    accepts exactly one active leaf; coarsen accepts exactly the eight active
-    direct siblings of one D4-legal parent.  A fresh adapted restart may
-    supply its immutable original root mesh through ``restart_root_mesh``;
-    the persisted root UUID must match.  Any failure before the identity
-    switch leaves ``intg`` untouched.
-    """
-    system, mesh, root_mesh = _validate_integrator(
-        intg, restart_root_mesh
-    )
+def _propose_scripted_hex_tree(root_mesh, mesh, scripted_marks, action):
     if action not in {'refine', 'coarsen'}:
         raise AMRTransactionError(
             f'Unknown D6B transaction action: {action!r}'
@@ -879,6 +865,28 @@ def perform_one_amr_transaction(
         proposed_tree = _close_refinement(root_mesh, old_tree, marks[0])
     else:
         proposed_tree = _close_coarsening(root_mesh, old_tree, marks)
+
+    return marks, old_tree, local_by_leaf, proposed_tree
+
+
+def perform_one_amr_transaction(
+    intg, scripted_marks, *, action='refine', restart_root_mesh=None
+):
+    """Commit one scripted refine or coarsen transaction.
+
+    The call must occur after ``intg.advance_to(t_adapt)`` returns.  Refine
+    accepts exactly one active leaf; coarsen accepts exactly the eight active
+    direct siblings of one D4-legal parent.  A fresh adapted restart may
+    supply its immutable original root mesh through ``restart_root_mesh``;
+    the persisted root UUID must match.  Any failure before the identity
+    switch leaves ``intg`` untouched.
+    """
+    system, mesh, root_mesh = _validate_integrator(
+        intg, restart_root_mesh
+    )
+    marks, old_tree, local_by_leaf, proposed_tree = (
+        _propose_scripted_hex_tree(root_mesh, mesh, scripted_marks, action)
+    )
 
     bank = intg.idxcurr
     old_shape, _ = _single_hex_bank(system, bank, 'accepted')
