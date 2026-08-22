@@ -40,6 +40,11 @@ def get_integrator(backend, systemcls, mesh, initsoln, cfg):
     name = '_'.join([form, cn, sn, 'integrator'])
     name = re.sub('(?:^|_|-)([a-z])', lambda m: m[1].upper(), name)
 
+    # Enable native accepted-step AMR scheduling only when explicitly asked
+    if cfg.hasopt('solver-amr', 'schedule-dt'):
+        from pyfr.amrschedule import AMRScheduleMixin
+        bases = (AMRScheduleMixin, *bases)
+
     # Composite the base classes together to form a new type
     integrator = type(name, bases, dict(name=name))
 
