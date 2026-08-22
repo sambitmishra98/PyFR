@@ -2588,6 +2588,23 @@ def _materialize_staged_mixed_hex_mesh(root_mesh, proposed_tree):
     return raw, stage_mesh
 
 
+def _validate_proposed_mixed_hex_transfer(
+    transferred, raw, basis, before, dtype
+):
+    proposed_after = _physical_hex_conserved_totals(
+        transferred['hex'], _raw_hex_spts(raw), basis
+    )
+    error = proposed_after - before
+    scale = np.maximum(1.0, np.abs(before))
+    tol = 8192*np.finfo(dtype).eps
+    if np.any(np.abs(error) > tol*scale):
+        raise AMRTransactionError(
+            'V10J componentwise conservative Hex transfer gate failed'
+        )
+
+    return tol, scale
+
+
 def _commit_mixed_hex_refinement(
     intg, system, mesh, root_mesh, old_tree, local_by_leaf, proposed_tree,
     *, refine_marks=(), wall_splits=(), closure_splits=(),
@@ -2635,16 +2652,9 @@ def _commit_mixed_hex_refinement(
         root_mesh, proposed_tree
     )
 
-    proposed_after = _physical_hex_conserved_totals(
-        transferred['hex'], _raw_hex_spts(raw), basis
+    tol, scale = _validate_proposed_mixed_hex_transfer(
+        transferred, raw, basis, before, old['hex'].dtype
     )
-    error = proposed_after - before
-    scale = np.maximum(1.0, np.abs(before))
-    tol = 8192*np.finfo(old['hex'].dtype).eps
-    if np.any(np.abs(error) > tol*scale):
-        raise AMRTransactionError(
-            'V10J componentwise conservative Hex transfer gate failed'
-        )
 
     stage_system = None
     try:
