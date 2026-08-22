@@ -1,3 +1,5 @@
+import numpy as np
+
 from pyfr.solvers.base.elements import ExportableField, inters_map
 from pyfr.solvers.baseadvec import BaseAdvectionElements
 
@@ -26,8 +28,16 @@ class BaseAdvectionDiffusionElements(BaseAdvectionElements):
         if self.basis.fpts_in_upts:
             if self.grad_fusion:
                 self.get_vect_fpts_for_inters = self._get_grad_upts_for_inters
+                self.get_vect_fpts_for_mortars = (
+                    self._get_grad_upts_for_mortars
+                )
             else:
                 self.get_vect_fpts_for_inters = self._get_vect_fpts_for_inters
+                self.get_vect_fpts_for_mortars = (
+                    self._get_vect_fpts_for_mortars
+                )
+        else:
+            self.get_vect_fpts_for_mortars = self._get_vect_fpts_for_mortars
 
         kernel, kernels = self._be.kernel, self.kernels
         kprefix = 'pyfr.solvers.baseadvecdiff.kernels'
@@ -135,4 +145,16 @@ class BaseAdvectionDiffusionElements(BaseAdvectionElements):
         rmap = self.srtd_face_fpts[fidx][eidxs]
         fmap = self.basis.fpts_map_upts[rmap]
         return self._grad_upts.mid, fmap, self.nupts
+
+    @inters_map
+    def _get_vect_fpts_for_mortars(self, eidxs, fidx):
+        rmap = np.tile(self.basis.facefpts[fidx], (len(eidxs), 1))
+        return self._vect_fpts.mid, rmap, self.nfpts
+
+    @inters_map
+    def _get_grad_upts_for_mortars(self, eidxs, fidx):
+        fpts = self.basis.facefpts[fidx]
+        fmap = self.basis.fpts_map_upts[fpts]
+        rmap = np.tile(fmap, (len(eidxs), 1))
+        return self._grad_upts.mid, rmap, self.nupts
 
