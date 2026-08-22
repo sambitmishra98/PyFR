@@ -106,6 +106,11 @@ class RegionMixin:
         # Parse the region
         ridxs = region_data(self.cfg, self.cfgsect, intg.system.mesh)
 
+        # Split mixed-p regions into their solution-order groups
+        if hasattr(intg.system, 'ele_group_map'):
+            gmap = intg.system.ele_group_map
+            ridxs = gmap.split_region(ridxs)
+
         # Generate the appropriate metadata arrays
         self._ele_regions, self._ele_region_data = [], {}
         for etype, eidxs in ridxs.items():
@@ -113,7 +118,11 @@ class RegionMixin:
             self._ele_regions.append((doff, etype, eidxs))
 
             # Obtain the global element numbers
-            geidxs = intg.system.mesh.eidxs[etype][eidxs]
+            if hasattr(intg.system, 'ele_group_map'):
+                geidxs = gmap.group_global_eidxs[etype][eidxs]
+            else:
+                geidxs = intg.system.mesh.eidxs[etype][eidxs]
+
             self._ele_region_data[etype] = geidxs
 
 

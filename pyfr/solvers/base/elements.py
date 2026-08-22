@@ -34,7 +34,7 @@ def inters_map(meth):
 
 
 class BaseElements:
-    def __init__(self, basiscls, eles, cfg):
+    def __init__(self, basiscls, eles, cfg, order=None, name=None):
         self._be = None
 
         self.eles = eles
@@ -63,8 +63,8 @@ class BaseElements:
         self.nvars = len(self.convars)
 
         # Instantiate the basis class
-        self.basis = basis = basiscls(nspts, cfg)
-        self.name = basis.name
+        self.basis = basis = basiscls(nspts, cfg, order=order)
+        self.name = name or basis.name
 
         # See what kind of projection the basis is using
         self.antialias = basis.antialias
@@ -128,9 +128,9 @@ class BaseElements:
 
         return scal_upts
 
-    def set_ics_from_soln(self, solnmat, solncfg):
+    def set_ics_from_soln(self, solnmat, solncfg, order=None):
         # Recreate the existing solution basis
-        solnb = self.basis.__class__(None, solncfg)
+        solnb = self.basis.__class__(None, solncfg, order=order)
 
         # Form the interpolation operator
         interp = solnb.ubasis.nodal_basis_at(self.basis.upts)
