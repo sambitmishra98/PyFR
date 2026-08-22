@@ -1,16 +1,10 @@
-"""Deterministic ownership policies for online Hex AMR.
-
-D7D introduces ownership *decision* logic only.  The accepted D7 MPI
-transaction remains solely responsible for solution migration, native mesh
-partitioning/rebuild, validation, COMMIT, and rollback.
-"""
 from collections import defaultdict
 
 import numpy as np
 
 
 class AMROwnershipPolicyError(ValueError):
-    """An AMR ownership policy cannot produce a supported partition."""
+    pass
 
 
 def _balanced_targets(nitems, nranks):
@@ -113,14 +107,6 @@ def _unit_adjacency(raw, units):
 
 def balanced_affinity_destination_parts(old_tree, proposed_tree, raw,
                                         old_parts, nranks):
-    """Choose a deterministic balanced ownership map for a proposed AMR tree.
-
-    The policy is intentionally small and homogeneous-rank specific.  It uses
-    two principles from the proven online load-balancing lineage: explicit
-    target element counts and ownership/interface affinity.  H-mortar
-    participants are contracted into indivisible units before assignment.
-    Migration/rebuild remains the responsibility of :mod:`pyfr.amrmpi`.
-    """
     if old_tree.root_mesh_uuid != proposed_tree.root_mesh_uuid:
         raise AMROwnershipPolicyError(
             'old and proposed trees do not share a root mesh UUID'
