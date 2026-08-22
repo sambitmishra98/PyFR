@@ -149,40 +149,61 @@ class NativeWriter:
                       for a in comm.allgather(aux_fields)
                       for k, v in a.items()}
 
+        # Preserve the existing uniform element-type path
+        if all(isinstance(k, str) for k in shapes):
+            keys = self._global_ecounts
+        else:
+            # Mixed-p keys may not be present on every rank
+            keys = sorted(
+                {k for ks in comm.allgather(tuple(shapes)) for k in ks},
+                key=str
+            )
+
         # Prepare the element information
         self._einfo = {}
         self._futures = {}
-        for etype, gcount in self._global_ecounts.items():
-            # See if any ranks want to write elements of this type
-            eshape = comm.allgather(shapes.get(etype))
+        for key in keys:
+            etype = key if isinstance(key, str) else key.etype
+            gcount = self._global_ecounts[etype]
+
+            # See if any ranks want to write elements of this type/group
+            eshape = comm.allgather(shapes.get(key))
             if any(eshape):
-                # Create a gatherer for this element type
-                idxs = eidxs.get(etype, [])
+                # Create a gatherer for this element type/group
+                idxs = eidxs.get(key, [])
                 gatherer = Gatherer(comm, idxs)
 
                 # Determine the final shape of the element array
                 shape = (gatherer.tot, *next(es for es in eshape if es))
 
-                # Determine the polynomial order
+                # Determine and validate the polynomial order
                 ecls = subclass_where(BaseShape, name=etype)
                 order = ecls.order_from_npts(shape[2])
+                if not isinstance(key, str) and order != key.order:
+                    raise ValueError(
+                        f'Group {key} has incompatible solution point count'
+                    )
 
                 # See if the element is being subset
                 subset = gatherer.tot != gcount
 
                 # Also get the associated nodal points
-                rname = self.cfg.get(f'solver-elements-{etype}', 'soln-pts')
+                rname = self.cfg.get(
+                    f'solver-elements-{etype}', 'soln-pts'
+                )
                 upts = get_quadrule(etype, rname, shape[2]).pts
 
                 # Build nested compound dtype for this element type
-                dtype = self._build_dtype(field_groups, shape[2],
-                                          aux_fields.get(etype, []))
+                dtype = self._build_dtype(
+                    field_groups, shape[2], aux_fields.get(key, [])
+                )
 
-                ek = f'p{order}-{etype}'
-                self._einfo[ek] = (gatherer, subset, etype, dtype, shape[0],
-                                   upts)
+                ek = f'p{order}-{etype}' if isinstance(key, str) else str(key)
+                self._einfo[ek] = (
+                    gatherer, subset, key, dtype, shape[0], upts
+                )
 
-                # Create a persistent future for this element type
+                # Create a persistent future for this element type/group
                 self._futures[ek] = gatherer.future((), dtype)
 
     def _build_dtype(self, field_groups, nupts, aux):
@@ -250,11 +271,11 @@ class NativeWriter:
 
         # Pack and gather the solution data into contiguous arrays
         futures = {}
-        for ek, (_, _, etype, dtype, *_) in self._einfo.items():
-            soln = data.get(etype)
+        for ek, (_, _, data_key, dtype, *_) in self._einfo.items():
+            soln = data.get(data_key)
 
             if soln is not None:
-                eaux = aux.get(etype, {}) if aux else {}
+                eaux = aux.get(data_key, {}) if aux else {}
                 arr = self._pack_element_data(soln, eaux, dtype, rank)
             else:
                 arr = np.empty(0, dtype=dtype)

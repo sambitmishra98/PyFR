@@ -6,9 +6,12 @@ import statistics
 import numpy as np
 
 from pyfr.backends.base import NullKernel
+from pyfr.mortars import build_distributed_quad_p_operators
 from pyfr.cache import memoize
 from pyfr.mpiutil import autofree, get_comm_rank_root, mpi
 from pyfr.shapes import BaseShape
+from pyfr.solvers.base.groups import ElementGroupMap
+from pyfr.solvers.base.mortars import build_mpi_p_mortar_batch_plans
 from pyfr.util import subclasses
 
 
@@ -16,6 +19,7 @@ class BaseSystem:
     elementscls = None
     intinterscls = None
     mpiinterscls = None
+    mortarinterscls = None
     bbcinterscls = None
 
     # Nonce sequence
@@ -72,9 +76,15 @@ class BaseSystem:
         # Allocate register banks (RHS first, then non-RHS)
         self._alloc_register_banks(registers, eles, ics)
 
+        # Distributed p-mortar runtime state (inactive by default)
+        self._has_mpi_p_mortars = False
+        self._mpi_p_mortar_comm = None
+        self._mpi_p_mortar_inters = ()
+
         # Load the interfaces
         self._int_inters = self._load_int_inters(mesh, elemap)
         self._mpi_inters = self._load_mpi_inters(mesh, elemap)
+        self._mortar_inters = self._load_mortar_inters(mesh, elemap)
         self._bc_inters, self._bc_prefns = self._load_bc_inters(mesh, elemap,
                                                                 initsoln,
                                                                 serialiser)
@@ -203,18 +213,24 @@ class BaseSystem:
 
     def commit(self):
         # Prepare the kernels and any associated MPI requests
-        self._gen_kernels(self.nrhs, self.ele_map.values(), self._int_inters,
-                          self._mpi_inters, self._bc_inters)
+        self._gen_kernels(
+            self.nrhs, self.ele_map.values(), self._int_inters,
+            self._mpi_inters, self._bc_inters, self._mortar_inters
+        )
         self._gen_mpireqs(self._mpi_inters)
         self.backend.commit()
 
         self.has_src_macros = any(eles.has_src_macros
                                   for eles in self.ele_map.values())
 
+        # Retain compact mortar statistics for reporting and profiling
+        self.mortar_stats = tuple(m.stats for m in self._mortar_inters)
+
         # Delete the memory-intensive ele_map and interface objects
         del self.ele_map
         del self._int_inters
         del self._mpi_inters
+        del self._mortar_inters
 
         for b in self._bc_inters:
             del b.elemap
@@ -224,43 +240,198 @@ class BaseSystem:
 
     def _load_eles(self, mesh, initsoln, nonce):
         basismap = {b.name: b for b in subclasses(BaseShape, just_leaf=True)}
+        msects = [s for s in self.cfg.sections()
+                  if s.startswith('solver-order-')]
 
-        # Load the elements
-        elemap = {etype: self.elementscls(basismap[etype], spts, self.cfg)
-                  for etype, spts in mesh.spts.items()}
+        # Preserve the exact uniform-p path when no overrides are present
+        if not msects:
+            if initsoln and initsoln.groups:
+                raise RuntimeError(
+                    'Mixed-p solution requires mixed-p configuration'
+                )
+
+            elemap = {
+                etype: self.elementscls(basismap[etype], spts, self.cfg)
+                for etype, spts in mesh.spts.items()
+            }
+            eles = list(elemap.values())
+
+            if initsoln:
+                ics = [
+                    ele.set_ics_from_soln(initsoln.data[et], initsoln.config)
+                    for et, ele in elemap.items()
+                ]
+            else:
+                ics = [ele.set_ics_from_cfg() for ele in eles]
+
+            for etype, ele in elemap.items():
+                curved = mesh.spts_curved[etype]
+                linoff = np.max(*np.nonzero(curved), initial=-1) + 1
+                ele.set_backend(self.backend, nonce, linoff)
+
+            return eles, elemap, ics
+
+        self._validate_mixed_p_mode(mesh, initsoln)
+        gmap = self.ele_group_map = ElementGroupMap(mesh, self.cfg)
+        elemap = {}
+
+        for gkey, eidxs in gmap.group_eidxs.items():
+            spts = mesh.spts[gkey.etype][:, eidxs]
+            ele = self.elementscls(
+                basismap[gkey.etype], spts, self.cfg,
+                order=gkey.order, name=gkey.persistent_name
+            )
+            elemap[gkey] = ele
 
         eles = list(elemap.values())
-
-        # Compute the initial conditions
         if initsoln:
-            ics = [ele.set_ics_from_soln(initsoln.data[et], initsoln.config)
-                   for et, ele in elemap.items()]
+            gmap.validate_solution_groups(initsoln.groups)
+            ics = [
+                ele.set_ics_from_soln(
+                    initsoln.data[gkey.persistent_name], initsoln.config,
+                    order=initsoln.groups[gkey.persistent_name].order
+                )
+                for gkey, ele in elemap.items()
+            ]
         else:
             ics = [ele.set_ics_from_cfg() for ele in eles]
 
-        # Allocate these elements on the backend
-        for etype, ele in elemap.items():
-            curved = mesh.spts_curved[etype]
+        for gkey, ele in elemap.items():
+            eidxs = gmap.group_eidxs[gkey]
+            curved = mesh.spts_curved[gkey.etype][eidxs]
             linoff = np.max(*np.nonzero(curved), initial=-1) + 1
-
             ele.set_backend(self.backend, nonce, linoff)
 
         return eles, elemap, ics
 
-    def _load_int_inters(self, mesh, elemap):
-        int_inters = self.intinterscls(self.backend, *mesh.con, elemap,
-                                       self.cfg)
+    def _validate_mixed_p_mode(self, mesh, initsoln):
+        if initsoln and not initsoln.groups:
+            raise RuntimeError(
+                'Uniform solution cannot initialize mixed-p configuration'
+            )
+        if mesh.mcon:
+            raise RuntimeError(
+                'V10C1A mixed-p with existing mortars is not supported'
+            )
+        if self.cfg.get('solver-time-integrator', 'formulation',
+                        'explicit') != 'explicit':
+            raise RuntimeError('V10C1A mixed-p implicit mode is not supported')
+        if self.cfg.get('solver', 'shock-capturing', 'none') != 'none':
+            raise RuntimeError(
+                'V10C1A mixed-p shock capturing is not supported'
+            )
+        psects = [
+            s for s in self.cfg.sections()
+            if s.startswith(('soln-plugin-', 'solver-plugin-'))
+        ]
+        if any(not s.startswith('soln-plugin-writer') for s in psects):
+            raise RuntimeError(
+                'V10C1B1 mixed-p plugins are not supported except '
+                'soln-plugin-writer'
+            )
 
+    def _load_int_inters(self, mesh, elemap):
+        con = mesh.con
+        if hasattr(self, 'ele_group_map'):
+            con, self._p_mortar_groups = self.ele_group_map.split_internal(*con)
+
+        if not len(con[0].cidxs):
+            return []
+
+        int_inters = self.intinterscls(self.backend, *con, elemap, self.cfg)
         return [int_inters]
 
     def _load_mpi_inters(self, mesh, elemap):
         mpi_inters = []
-        for p, con in mesh.con_p.items():
-            mpiiface = self.mpiinterscls(self.backend, con, p, elemap,
-                                         self.cfg)
+
+        if not hasattr(self, 'ele_group_map'):
+            for p, con in mesh.con_p.items():
+                mpiiface = self.mpiinterscls(
+                    self.backend, con, p, elemap, self.cfg
+                )
+                mpi_inters.append(mpiiface)
+            return mpi_inters
+
+        con_p, pfaces = self.ele_group_map.split_mpi(
+            mesh, elemap, self.cfg
+        )
+        for p, con in con_p.items():
+            if not len(con):
+                continue
+            mpiiface = self.mpiinterscls(
+                self.backend, con, p, elemap, self.cfg
+            )
             mpi_inters.append(mpiiface)
 
+        self._mpi_p_mortar_faces = pfaces
+        state_projection = getattr(
+            self.mortarinterscls, 'mpi_p_state_projection', False
+        )
+        pops = tuple(
+            build_distributed_quad_p_operators(
+                face, self.cfg, state_projection=state_projection
+            )
+            for face in pfaces
+        )
+        plans = build_mpi_p_mortar_batch_plans(zip(pfaces, pops))
+        self._mpi_p_mortar_ops = pops
+        self._mpi_p_mortar_plans = plans
+
+        comm, _, _ = get_comm_rank_root()
+        has_mpi_p = comm.allreduce(bool(pfaces), op=mpi.LOR)
+        self._has_mpi_p_mortars = bool(has_mpi_p)
+
+        if self._has_mpi_p_mortars:
+            pctor = getattr(
+                self.mortarinterscls, 'from_mpi_p_mortars', None
+            )
+            if pctor is None:
+                sname = getattr(self, 'name', type(self).__name__)
+                raise RuntimeError(
+                    f'{sname} distributed mixed-p mortar PDE execution '
+                    'is not supported'
+                )
+
+            # This is collective whenever any rank has a distributed p mortar.
+            pcomm = self._mpi_p_mortar_comm = autofree(comm.Dup())
+            self._mpi_p_mortar_inters = tuple(pctor(
+                self.backend, pfaces, pops, plans, elemap, self.cfg, pcomm
+            ))
+
         return mpi_inters
+
+    def _load_mortar_inters(self, mesh, elemap):
+        if self.mortarinterscls is None:
+            if mesh.mcon or getattr(self, '_p_mortar_groups', ()):
+                raise RuntimeError(f'{self.name} does not support mortars')
+            return []
+
+        inters = []
+        pgroups = getattr(self, '_p_mortar_groups', ())
+        if pgroups:
+            pctor = getattr(self.mortarinterscls, 'from_p_mortar', None)
+            if pctor is None:
+                sname = getattr(self, 'name', type(self).__name__)
+                raise RuntimeError(
+                    f'{sname} mixed-p mortar PDE execution is not '
+                    'supported'
+                )
+
+            inters.extend(
+                pctor(
+                    self.backend, mesh, group, elemap, self.cfg,
+                    f'p-mortar-{i}'
+                )
+                for i, group in enumerate(pgroups)
+            )
+
+        inters.extend(
+            self.mortarinterscls(
+                self.backend, mesh, mcon, elemap, self.cfg
+            )
+            for mcon in mesh.mcon.values()
+        )
+        return inters
 
     def _load_bc_inters(self, mesh, elemap, initsoln, serialiser):
         comm, rank, root = get_comm_rank_root()
@@ -290,8 +461,12 @@ class BaseSystem:
 
             # If we have this boundary then create an instance
             if localbc:
-                bciface = bcclass(self.backend, mesh.bcon[bname], elemap,
-                                  cfgsect, self.cfg, bccomm)
+                bcon = mesh.bcon[bname]
+                if hasattr(self, 'ele_group_map'):
+                    bcon = self.ele_group_map.remap_connectivity(bcon)
+
+                bciface = bcclass(self.backend, bcon, elemap, cfgsect,
+                                  self.cfg, bccomm)
                 bciface.setup(sdata, prevcfg)
                 bc_inters.append(bciface)
             else:
@@ -299,13 +474,17 @@ class BaseSystem:
 
             # Allow the boundary to return a preparation callback
             if (pfn := bcclass.preparefn(bciface, mesh, elemap)):
+                if hasattr(self, 'ele_group_map'):
+                    raise RuntimeError(
+                        'V10C1A mixed-p prepared BCs are not supported'
+                    )
                 bc_prefns[bname] = pfn
 
             bcclass.serialisefn(bciface, f'bcs/{bname}', serialiser)
 
         return bc_inters, bc_prefns
 
-    def _gen_kernels(self, nregs, eles, iint, mpiint, bcint):
+    def _gen_kernels(self, nregs, eles, iint, mpiint, bcint, mint):
         self._kernels = kernels = defaultdict(list)
 
         # Helper function to tag the element type/MPI interface
@@ -315,8 +494,12 @@ class BaseSystem:
         def tag_kern(pname, prov, kern):
             self._ktags[kern] = f'{pname}/{prov.name}'
 
-        provnames = ['eles', 'iint', 'mpiint', 'bcint']
-        provlists = [eles, iint, mpiint, bcint]
+        provnames = ['eles', 'iint', 'mpiint', 'bcint', 'mint']
+        provlists = [eles, iint, mpiint, bcint, mint]
+
+        if self._mpi_p_mortar_inters:
+            provnames.append('mpimint')
+            provlists.append(self._mpi_p_mortar_inters)
 
         for pn, provs in self._extra_kern_parts.items():
             provnames.append(pn)
@@ -365,7 +548,10 @@ class BaseSystem:
     def _gen_mpireqs(self, mpiint):
         self._mpireqs = mpireqs = defaultdict(list)
 
-        for m in [*mpiint, *self._extra_mpi_parts]:
+        parts = [
+            *mpiint, *self._mpi_p_mortar_inters, *self._extra_mpi_parts
+        ]
+        for m in parts:
             for mn, mgetter in m.mpireqs.items():
                 mpireqs[mn].append(mgetter())
 
