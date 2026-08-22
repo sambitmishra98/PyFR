@@ -2544,6 +2544,32 @@ def _close_mixed_hex_refinement(root_mesh, old_tree, mark):
     return _close_mixed_hex_refinements(root_mesh, old_tree, (mark,))
 
 
+def _validate_staged_mixed_hex_mesh(
+    stage_mesh, raw, root_mesh, proposed_tree
+):
+    if tuple(stage_mesh.amr_tree.leaves()) != tuple(proposed_tree.leaves()):
+        raise AMRTransactionError('V10J staged ancestry changed leaf order')
+    if set(stage_mesh.etypes) != {'hex', 'pyr', 'tet'}:
+        raise AMRTransactionError('V10J staged element topology changed')
+    for etype in ('pyr', 'tet'):
+        if not np.array_equal(stage_mesh.spts[etype], root_mesh.spts[etype]):
+            raise AMRTransactionError(
+                f'V10J staged immutable {etype} geometry changed'
+            )
+        if not np.array_equal(stage_mesh.tags[etype], root_mesh.tags[etype]):
+            raise AMRTransactionError(
+                f'V10J staged immutable {etype} tags changed'
+            )
+
+    staged_mortars = tuple(
+        mcon for mcon in stage_mesh.mcon.values()
+        if mcon.format == 'one-to-many-v1'
+        and mcon.template == 'quad-2x2'
+    )
+    if sum(map(len, staged_mortars)) != len(raw.mortars):
+        raise AMRTransactionError('V10J staged mortar count changed')
+
+
 def _commit_mixed_hex_refinement(
     intg, system, mesh, root_mesh, old_tree, local_by_leaf, proposed_tree,
     *, refine_marks=(), wall_splits=(), closure_splits=(),
@@ -2598,26 +2624,9 @@ def _commit_mixed_hex_refinement(
             f'V10J native materialization failed: {exc}'
         ) from exc
 
-    if tuple(stage_mesh.amr_tree.leaves()) != tuple(proposed_tree.leaves()):
-        raise AMRTransactionError('V10J staged ancestry changed leaf order')
-    if set(stage_mesh.etypes) != {'hex', 'pyr', 'tet'}:
-        raise AMRTransactionError('V10J staged element topology changed')
-    for etype in ('pyr', 'tet'):
-        if not np.array_equal(stage_mesh.spts[etype], root_mesh.spts[etype]):
-            raise AMRTransactionError(
-                f'V10J staged immutable {etype} geometry changed'
-            )
-        if not np.array_equal(stage_mesh.tags[etype], root_mesh.tags[etype]):
-            raise AMRTransactionError(
-                f'V10J staged immutable {etype} tags changed'
-            )
-    staged_mortars = tuple(
-        mcon for mcon in stage_mesh.mcon.values()
-        if mcon.format == 'one-to-many-v1'
-        and mcon.template == 'quad-2x2'
+    _validate_staged_mixed_hex_mesh(
+        stage_mesh, raw, root_mesh, proposed_tree
     )
-    if sum(map(len, staged_mortars)) != len(raw.mortars):
-        raise AMRTransactionError('V10J staged mortar count changed')
 
     proposed_after = _physical_hex_conserved_totals(
         transferred['hex'], _raw_hex_spts(raw), basis
