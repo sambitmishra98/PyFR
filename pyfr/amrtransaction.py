@@ -2605,6 +2605,26 @@ def _validate_proposed_mixed_hex_transfer(
     return tol, scale
 
 
+def _build_staged_mixed_hex_system(
+    intg, system, stage_mesh, transferred, bank
+):
+    staged = Solution(
+        config=intg.cfg, stats=None, fields=None,
+        data={et: np.array(v, copy=True) for et, v in transferred.items()},
+        state={},
+    )
+    stage_serialiser = Serialiser()
+    stage_system = type(system)(
+        intg.backend, stage_mesh, staged, intg._registers,
+        intg.cfg, stage_serialiser, needs_cfl=False,
+    )
+    stage_system.commit()
+    staged_states, stage_shapes = _inject_staged_mixed_hex_bank(
+        stage_system, transferred, bank
+    )
+    return stage_system, stage_serialiser, staged_states, stage_shapes
+
+
 def _commit_mixed_hex_refinement(
     intg, system, mesh, root_mesh, old_tree, local_by_leaf, proposed_tree,
     *, refine_marks=(), wall_splits=(), closure_splits=(),
@@ -2658,19 +2678,10 @@ def _commit_mixed_hex_refinement(
 
     stage_system = None
     try:
-        staged = Solution(
-            config=intg.cfg, stats=None, fields=None,
-            data={et: np.array(v, copy=True) for et, v in transferred.items()},
-            state={},
-        )
-        stage_serialiser = Serialiser()
-        stage_system = type(system)(
-            intg.backend, stage_mesh, staged, intg._registers,
-            intg.cfg, stage_serialiser, needs_cfl=False,
-        )
-        stage_system.commit()
-        staged_states, stage_shapes = _inject_staged_mixed_hex_bank(
-            stage_system, transferred, bank
+        stage_system, stage_serialiser, staged_states, stage_shapes = (
+            _build_staged_mixed_hex_system(
+                intg, system, stage_mesh, transferred, bank
+            )
         )
 
         after = _physical_hex_conserved_totals(
