@@ -55,6 +55,24 @@ def main():
                            'from the extension of inmesh')
     ap_import.add_argument('-l', dest='lintol', type=float, default=1e-5,
                            help='linearisation tolerance')
+    pyrgrp = ap_import.add_mutually_exclusive_group()
+    pyrgrp.add_argument(
+        '--split-pyramids', dest='pyramid_policy', action='store_const',
+        const='all', help='replace all complete pyramids with tetrahedra '
+                          'and quad-to-triangle interfaces'
+    )
+    pyrgrp.add_argument(
+        '--split-incompatible-pyramids', dest='pyramid_policy',
+        action='store_const', const='incompatible',
+        help='retain native parallelogram-base pyramids and split only '
+             'pyramids incompatible with PyFR'
+    )
+    ap_import.add_argument(
+        '--refine-hexes', metavar='TAGS',
+        help='recursively split selected affine Hex8 octree cells; TAGS '
+             'is "all" or comma-separated Gmsh tags with optional '
+             '/0../7 child paths'
+    )
     ap_import.set_defaults(process=process_import)
 
     # Partition subcommand
@@ -235,6 +253,35 @@ def main():
     ap_resample.add_argument('-P', '--pname', help='partitioning to use')
     ap_resample.set_defaults(process=process_resample)
 
+    # Offline AMR command
+    ap_amr = sp.add_parser('amr', help='amr --help').add_subparsers()
+    ap_amr_offline = ap_amr.add_parser(
+        'offline-quad', help='amr offline-quad --help'
+    )
+    ap_amr_offline.add_argument('mesh', help='current native Quad mesh')
+    ap_amr_offline.add_argument('soln', help='current native solution')
+    ap_amr_offline.add_argument('outmesh', help='adapted output mesh')
+    ap_amr_offline.add_argument('outsoln', help='adapted output solution')
+    ap_amr_offline.add_argument(
+        '--root', help='immutable original root mesh for adapted inputs'
+    )
+    ap_amr_offline.add_argument(
+        '--refine-threshold', type=float, required=True,
+        help='D9Q composite refine threshold'
+    )
+    ap_amr_offline.add_argument(
+        '--max-level', type=int, required=True, help='maximum quadtree level'
+    )
+    ap_amr_offline.add_argument(
+        '--wall-boundary', action='append', default=[],
+        help='root boundary with a minimum refinement level; repeatable'
+    )
+    ap_amr_offline.add_argument(
+        '--wall-min-level', type=int, default=0,
+        help='minimum level for roots touching --wall-boundary'
+    )
+    ap_amr_offline.set_defaults(process=process_amr_offline_quad)
+
     # Run command
     ap_run = sp.add_parser('run', help='run --help')
     ap_run.add_argument('mesh', help='mesh file')
@@ -277,6 +324,20 @@ def process_import(args):
     else:
         extn = Path(args.inmesh.name).suffix
         reader = get_reader_by_extn(extn, args.inmesh, args.progress)
+
+    # Apply optional import-time mesh transformations
+    if args.pyramid_policy and args.refine_hexes:
+        raise ValueError(
+            'Pyramid splitting and Hex refinement cannot be combined'
+        )
+    if args.pyramid_policy:
+        summary = reader.split_pyramids(args.pyramid_policy)
+        if args.verbose:
+            print(' '.join(f'{k}={v}' for k, v in summary.items()))
+    if args.refine_hexes:
+        summary = reader.refine_hexes(args.refine_hexes)
+        if args.verbose:
+            print(' '.join(f'{k}={v}' for k, v in summary.items()))
 
     # Write out the mesh
     reader.write(args.outmesh, args.lintol)
@@ -597,6 +658,29 @@ def _process_common(args, soln, cfg):
 
     # Execute!
     solver.run()
+
+
+def process_amr_offline_quad(args):
+    init_mpi()
+
+    from pyfr.amroffline import perform_offline_quad_amr
+
+    result = perform_offline_quad_amr(
+        args.mesh, args.soln, args.outmesh, args.outsoln,
+        root_mesh_path=args.root,
+        refine_threshold=args.refine_threshold, max_level=args.max_level,
+        wall_boundaries=args.wall_boundary,
+        wall_min_level=args.wall_min_level,
+    )
+    if args.verbose:
+        print(
+            f'old-leaves={result.old_leaves} '
+            f'new-leaves={result.new_leaves} '
+            f'refine-marks={result.refine_marks} '
+            f'closure-splits={result.closure_splits} '
+            f'max-score={result.max_score:.16g} '
+            f'conservation-residual={result.conservation_residual:.16g}'
+        )
 
 
 def process_run(args):
