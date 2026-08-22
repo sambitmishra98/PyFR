@@ -458,6 +458,34 @@ def test_adapted_quad_restart_schedule_requires_root_anchor(tmp_path):
         amrschedule.NativeAMRSchedule(intg)
 
 
+def test_adapted_restart_dispatch(monkeypatch):
+    calls = []
+    intg = SimpleNamespace(
+        isrestart=True,
+        system=SimpleNamespace(mesh=SimpleNamespace(amr_tree=object())),
+    )
+    monkeypatch.setattr(
+        amrschedule, '_recover_quad_root', lambda intg: calls.append('quad')
+    )
+    monkeypatch.setattr(
+        amrschedule, '_recover_mixed_hex_root',
+        lambda intg: calls.append('mixed-hex'),
+    )
+
+    amrschedule._recover_schedule_root(intg, 'quad-1r')
+    amrschedule._recover_schedule_root(intg, 'mixed-hex-1r')
+    assert calls == ['quad', 'mixed-hex']
+
+    with pytest.raises(AMRScheduleError, match='mixed Quad.*adapted restart'):
+        amrschedule._recover_schedule_root(intg, 'mixed-quad-1r')
+    with pytest.raises(AMRScheduleError, match='Hex AMR.*adapted restart'):
+        amrschedule._recover_schedule_root(intg, 'hex-mpi')
+
+    intg.isrestart = False
+    amrschedule._recover_schedule_root(intg, 'quad-1r')
+    assert calls == ['quad', 'mixed-hex']
+
+
 def test_quad_writer_transaction_error_is_schedule_error(monkeypatch):
     from pyfr.amrtransaction import AMRTransactionError
 

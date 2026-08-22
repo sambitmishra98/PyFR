@@ -269,6 +269,26 @@ def _recover_mixed_hex_root(intg):
         root_reader.close()
 
 
+def _recover_schedule_root(intg, mode):
+    if (not intg.isrestart or
+            getattr(intg.system.mesh, 'amr_tree', None) is None):
+        return
+
+    if mode == 'quad-1r':
+        _recover_quad_root(intg)
+    elif mode == 'mixed-quad-1r':
+        raise AMRScheduleError(
+            'native mixed Quad AMR scheduling does not yet support '
+            'adapted restart'
+        )
+    elif mode == 'mixed-hex-1r':
+        _recover_mixed_hex_root(intg)
+    else:
+        raise AMRScheduleError(
+            'native D9 Hex AMR scheduling does not support adapted restart'
+        )
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -288,23 +308,7 @@ class NativeAMRSchedule:
         self.stage_dir, self.checkpoint_dir = _schedule_paths(cfg, self.mode)
         (self.schedule_dt, self.regular_start, self.initial_time,
          self.targets) = _schedule_times(intg, comm)
-        if (intg.isrestart and self.mode == 'quad-1r' and
-                getattr(intg.system.mesh, 'amr_tree', None) is not None):
-            _recover_quad_root(intg)
-        elif (intg.isrestart and self.mode == 'mixed-quad-1r' and
-              getattr(intg.system.mesh, 'amr_tree', None) is not None):
-            raise AMRScheduleError(
-                'native mixed Quad AMR scheduling does not yet support '
-                'adapted restart'
-            )
-        elif (intg.isrestart and self.mode == 'mixed-hex-1r' and
-              getattr(intg.system.mesh, 'amr_tree', None) is not None):
-            _recover_mixed_hex_root(intg)
-        elif (intg.isrestart and
-              getattr(intg.system.mesh, 'amr_tree', None) is not None):
-            raise AMRScheduleError(
-                'native D9 Hex AMR scheduling does not support adapted restart'
-            )
+        _recover_schedule_root(intg, self.mode)
 
         self._completed_targets = set()
         self.history = []
