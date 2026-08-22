@@ -29,8 +29,8 @@ def _leaf_affinity(leaf, old_leaves, old_parts, nranks):
     root, path = leaf
     affinity = np.zeros(nranks, dtype=np.int64)
 
-    # Unchanged leaf or a newly refined descendant: the old active ancestor is
-    # the state record from which this proposed leaf is produced.
+    # Find the active ancestor for unchanged and newly refined leaves.
+    # Its owner is the migration affinity for the proposed leaf.
     ancestors = [
         old for old in old_leaves
         if old[0] == root and path[:len(old[1])] == old[1]
@@ -40,8 +40,8 @@ def _leaf_affinity(leaf, old_leaves, old_parts, nranks):
         affinity[old_parts[old]] = 1
         return affinity
 
-    # Coarsening: all retiring active descendants contribute to the proposed
-    # parent, so count their current owners as migration affinity.
+    # For coarsening, count the owners of all retiring descendants.
+    # These counts define the parent leaf's migration affinity.
     descendants = [
         old for old in old_leaves
         if old[0] == root and old[1][:len(path)] == path
@@ -156,9 +156,9 @@ def balanced_affinity_destination_parts(old_tree, proposed_tree, raw,
     unit_aff = [sum((leaf_aff[i] for i in u),
                     np.zeros(nranks, dtype=np.int64)) for u in units]
 
-    # Large constrained units first; canonical minimum leaf ordinal is the
-    # deterministic tie-break.  This is a best-fit assignment, not a graph
-    # partitioner, and deliberately avoids importing legacy migration code.
+    # Assign larger constrained units first and break ties canonically.
+    # This is a deterministic best-fit assignment rather than a graph
+    # partitioner.
     order = sorted(
         range(len(units)), key=lambda u: (-len(units[u]), units[u][0])
     )
