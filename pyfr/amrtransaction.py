@@ -1991,6 +1991,42 @@ def _validate_staged_mixed_quad_transfer(
     return after, error, rho_range, pressure_range
 
 
+def _validate_staged_mixed_quad_rhs(
+    stage_system, system, intg, bank, scratch_bank, transferred
+):
+    stage_system.preproc(intg.tcurr, bank)
+    intg.backend.wait()
+    after_preproc = _copy_state_by_etype(stage_system, bank)
+    for etype in transferred:
+        if not np.array_equal(after_preproc[etype], transferred[etype]):
+            raise AMRTransactionError(
+                f'MIX2D1 staged {etype} bank changed during preprocessing'
+            )
+
+    old_layout = {
+        et: len(banks)
+        for et, banks in zip(system.ele_types, system.ele_banks)
+    }
+    new_layout = {
+        et: len(banks)
+        for et, banks in zip(stage_system.ele_types, stage_system.ele_banks)
+    }
+    if stage_system.nrhs != system.nrhs or new_layout != old_layout:
+        raise AMRTransactionError('MIX2D1 register-bank layout changed')
+
+    rhs, bank_drift = _scratch_rhs(
+        stage_system, intg.tcurr, bank, scratch_bank
+    )
+    after_rhs = _copy_state_by_etype(stage_system, bank)
+    for etype in transferred:
+        if not np.array_equal(after_rhs[etype], transferred[etype]):
+            raise AMRTransactionError(
+                f'MIX2D1 staged {etype} bank changed after first RHS'
+            )
+
+    return rhs, bank_drift, sum(stage_system.ele_ndofs)
+
+
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -2124,38 +2160,9 @@ def perform_indicator_mixed_quad_amr_transaction(
             )
         )
 
-        stage_system.preproc(intg.tcurr, bank)
-        intg.backend.wait()
-        after_preproc = _copy_state_by_etype(stage_system, bank)
-        for etype in transferred:
-            if not np.array_equal(after_preproc[etype], transferred[etype]):
-                raise AMRTransactionError(
-                    f'MIX2D1 staged {etype} bank changed during preprocessing'
-                )
-
-        old_layout = {
-            et: len(banks)
-            for et, banks in zip(system.ele_types, system.ele_banks)
-        }
-        new_layout = {
-            et: len(banks)
-            for et, banks in zip(
-                stage_system.ele_types, stage_system.ele_banks
-            )
-        }
-        if stage_system.nrhs != system.nrhs or new_layout != old_layout:
-            raise AMRTransactionError('MIX2D1 register-bank layout changed')
-
-        rhs, bank_drift = _scratch_rhs(
-            stage_system, intg.tcurr, bank, scratch_bank
+        rhs, bank_drift, staged_gndofs = _validate_staged_mixed_quad_rhs(
+            stage_system, system, intg, bank, scratch_bank, transferred
         )
-        after_rhs = _copy_state_by_etype(stage_system, bank)
-        for etype in transferred:
-            if not np.array_equal(after_rhs[etype], transferred[etype]):
-                raise AMRTransactionError(
-                    f'MIX2D1 staged {etype} bank changed after first RHS'
-                )
-        staged_gndofs = sum(stage_system.ele_ndofs)
     except Exception:
         stage_system = None
         raise
