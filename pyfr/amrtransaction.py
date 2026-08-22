@@ -1338,6 +1338,37 @@ def _materialize_staged_quad_mesh(root_mesh, proposed_tree, new_leaves):
     return raw, stage_mesh
 
 
+def _prepare_quad_transfer(
+    root_mesh, old_leaves, new_leaves, old_state, cfg, fields, gamma
+):
+    from pyfr.amroffline import (
+        _global_integral, _prolongate_to_tree, _validate_state
+    )
+
+    basis = QuadShape(None, cfg)
+    if basis.nupts != old_state.shape[0]:
+        raise AMRTransactionError(
+            'ONLINE2D-1 solution points do not match the Quad basis'
+        )
+
+    transferred = _prolongate_to_tree(
+        old_state, old_leaves, new_leaves, basis
+    )
+    _validate_state(transferred, fields, gamma)
+
+    before = _global_integral(root_mesh, old_leaves, old_state, basis)
+    proposed = _global_integral(root_mesh, new_leaves, transferred, basis)
+    error = proposed - before
+    scale = max(1.0, float(np.max(np.abs(before), initial=0.0)))
+    tol = 65536*np.finfo(np.result_type(old_state, float)).eps*scale
+    if float(np.max(np.abs(error), initial=0.0)) > tol:
+        raise AMRTransactionError(
+            'ONLINE2D-1 conservative prolongation gate failed'
+        )
+
+    return basis, transferred, before, tol
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1351,8 +1382,8 @@ def perform_indicator_quad_amr_transaction(
     """
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amroffline import (
-        _close_2to1, _current_column_leaves, _global_integral,
-        _prolongate_to_tree, _split_nodes, _validate_state,
+        _close_2to1, _current_column_leaves, _global_integral, _split_nodes,
+        _validate_state,
         _wall_floor_splits,
     )
 
@@ -1437,31 +1468,9 @@ def perform_indicator_quad_amr_transaction(
         )
 
     proposed_tree = encode_quad_leaf_tree(root_mesh.uuid, new_leaves)
-    basis = QuadShape(None, intg.cfg)
-    if basis.nupts != old_state.shape[0]:
-        raise AMRTransactionError(
-            'ONLINE2D-1 solution points do not match the Quad basis'
-        )
-    transferred = _prolongate_to_tree(
-        old_state, old_leaves, new_leaves, basis
+    basis, transferred, before, tol = _prepare_quad_transfer(
+        root_mesh, old_leaves, new_leaves, old_state, intg.cfg, fields, gamma
     )
-    _validate_state(transferred, fields, gamma)
-
-    before = _global_integral(
-        root_mesh, old_leaves, old_state, basis
-    )
-    proposed_before_native = _global_integral(
-        root_mesh, new_leaves, transferred, basis
-    )
-    error = proposed_before_native - before
-    scale = max(1.0, float(np.max(np.abs(before), initial=0.0)))
-    tol = 65536*np.finfo(
-        np.result_type(old_state, float)
-    ).eps*scale
-    if float(np.max(np.abs(error), initial=0.0)) > tol:
-        raise AMRTransactionError(
-            'ONLINE2D-1 conservative prolongation gate failed'
-        )
 
     raw, stage_mesh = _materialize_staged_quad_mesh(
         root_mesh, proposed_tree, new_leaves
