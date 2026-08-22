@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import dataclass
 from itertools import chain
 from uuid import UUID
 
@@ -13,9 +14,32 @@ from pyfr.shapes import BaseShape
 from pyfr.util import digest, first, subclass_where
 
 
+def _pyr_parallelogram_mask(nodepts, foeles, petype_fnmap, nodemaps):
+    fnmap = petype_fnmap['pyr']['quad'][0]
+    pfnmap = [nodemaps['quad', 4][i] for i in fnmap]
+    fpts = nodepts[foeles[:, pfnmap]]
+    delta = fpts[:, 0] - fpts[:, 1] - fpts[:, 2] + fpts[:, 3]
+    return np.all(np.abs(delta) <= 1e-10, axis=1)
+
+
+@dataclass(frozen=True)
+class MortarData:
+    records: object
+    format: str | None = None
+    template: str | None = None
+
+
 class BaseReader:
     def __init__(self, progress):
         self.progress = progress
+
+    def split_pyramids(self, policy='all'):
+        msg = f'{self.name} meshes do not support pyramid splitting'
+        raise ValueError(msg)
+
+    def refine_hexes(self, selector):
+        msg = f'{self.name} meshes do not support Hex refinement'
+        raise ValueError(msg)
 
     def _get_default_partitioning(self, eles, codec):
         # Allocate the partitioning array
@@ -65,11 +89,16 @@ class BaseReader:
         pass
 
     def write(self, fname, lintol):
-        nodes, eles, codec, periodic = self._to_raw_mesh(lintol)
+        raw = self._to_raw_mesh(lintol)
+        if len(raw) == 4:
+            nodes, eles, codec, periodic = raw
+            mortars = {}
+        else:
+            nodes, eles, codec, periodic, mortars = raw
 
         # Compute the UUID
         with self.progress.start('Computing UUID'):
-            uuid = UUID(digest((nodes, eles, codec, periodic))[:32])
+            uuid = UUID(digest((nodes, eles, codec, periodic, mortars))[:32])
 
         # Write out the file
         with self.progress.start('Writing mesh'):
@@ -101,6 +130,19 @@ class BaseReader:
                     f[f'periodic/{pname}'].attrs['R'] = R
                     f[f'periodic/{pname}'].attrs['T'] = T
 
+                # Write out nonconforming mortar connectivity
+                for mname, minfo in mortars.items():
+                    if isinstance(minfo, MortarData):
+                        dset = f.create_dataset(
+                            f'mortars/{mname}', data=minfo.records
+                        )
+                        if minfo.format is not None:
+                            dset.attrs['format'] = minfo.format
+                        if minfo.template is not None:
+                            dset.attrs['template'] = minfo.template
+                    else:
+                        f[f'mortars/{mname}'] = minfo
+
                 # Write out the partitioning
                 f['partitionings/1/eles'] = parts
                 f['partitionings/1/eles'].attrs['regions'] = pregions
@@ -126,24 +168,20 @@ class NodalMeshAssembler:
                        'tet': 4, 'pyr': 5, 'pri': 6, 'hex': 8}
 
     def __init__(self, nodepts, elenodes, volpent, bfacespents, pfacespents,
-                 maps):
+                 maps, mortars=None):
         self._nodepts = nodepts
         self._elenodes = elenodes
         self._volpent = volpent
         self._bfacespents = bfacespents
         self._pfacespents = pfacespents
         self._etype_map, self._petype_fnmap, self._nodemaps = maps
+        self._mortars = mortars or []
 
     def _check_pyr_parallelogram(self, foeles):
-        # Find PyFR node map for the quad face
-        fnmap = self._petype_fnmap['pyr']['quad'][0]
-        pfnmap = [self._nodemaps['quad', 4][i] for i in fnmap]
-
-        # Face nodes
-        fpts = self._nodepts[foeles[:, pfnmap]].swapaxes(0, 1)
-
-        # Check if parallelogram or not
-        if np.any(np.abs(fpts[0] - fpts[1] - fpts[2] + fpts[3]) > 1e-10):
+        mask = _pyr_parallelogram_mask(
+            self._nodepts, foeles, self._petype_fnmap, self._nodemaps
+        )
+        if not np.all(mask):
             raise ValueError('Pyramids with non-parallelogram bases are '
                              'currently unsupported')
 
@@ -156,11 +194,21 @@ class NodalMeshAssembler:
             # Number of nodes in the first-order representation
             focount = self._petype_focount[petype]
 
-            foelemap[petype, epent] = eles[:, :focount]
+            foeles = eles[:, :focount]
 
             # Check if pyramids have a parallelogram base or not
             if petype == 'pyr':
-                self._check_pyr_parallelogram(foelemap[petype, epent])
+                self._check_pyr_parallelogram(foeles)
+
+            # Several complete Gmsh element types can represent the same
+            # PyFR type at different geometry orders.  Boundary entities may
+            # legitimately contain more than one such type, so retain every
+            # first-order face rather than overwriting earlier blocks.
+            key = petype, epent
+            if key in foelemap:
+                foelemap[key] = np.vstack((foelemap[key], foeles))
+            else:
+                foelemap[key] = foeles
 
         return foelemap
 
@@ -192,7 +240,7 @@ class NodalMeshAssembler:
         # To improve face-pairing performance sort the faces by their
         # node numbers such that any connected faces are adjacent
         nodeix = np.lexsort(nodes.T)
-        nodes = nodes[nodeix].view([('', nodes.dtype)]*nnodes).squeeze()
+        nodes = nodes[nodeix].view([('', nodes.dtype)]*nnodes).reshape(-1)
 
         # Generate the associated connectivity information
         eidx, fidx = divmod(nodeix, nfaces)
@@ -247,7 +295,7 @@ class NodalMeshAssembler:
 
                 # Use a lookup table to pair residual faces
                 con = np.column_stack([cidx[mask], eidx[mask]])
-                con = con.view([('', cidx.dtype)]*2).squeeze()
+                con = con.view([('', cidx.dtype)]*2).reshape(-1)
                 for rf, n in zip(iter_struct(con), iter_struct(nodes[mask])):
                     # If the nodes are in resid then pair the faces
                     if (lf := resid.pop(n, None)):
@@ -409,12 +457,16 @@ class NodalMeshAssembler:
                 # Map and copy over the node numbers
                 einfo['nodes'] = enodes[:, self._nodemaps[petype, nnodes]]
 
-        # Add the boundary conditions to the codec
+        # Add mortar and boundary entries to the codec
+        if any(m.get('format') == 'one-to-many-v1' for m in self._mortars):
+            codec.append('mortar/quad-2x2')
+        if any(m.get('format') != 'one-to-many-v1' for m in self._mortars):
+            codec.append('mortar/quad-tri')
         codec.extend(f'bc/{bname}' for bname in self._bfacespents)
 
         # Add in connectivity information
         with progress.start_with_spinner('Connecting elements') as spinner:
-            periodic = self._connect_eles(eles, codec, spinner)
+            periodic, mortars = self._connect_eles(eles, codec, spinner)
 
         # Compute element colouring
         with progress.start_with_spinner('Colouring elements') as spinner:
@@ -424,7 +476,111 @@ class NodalMeshAssembler:
         with progress.start_with_spinner('Linearising elements') as spinner:
             nodepts = self._linearise_eles(eles, lintol, spinner)
 
-        return nodepts, eles, codec, periodic
+        return nodepts, eles, codec, periodic, mortars
+
+    def _pair_mortar_faces(self, resid, cconn, codec):
+        if not self._mortars:
+            return {}
+
+        qdtype = [
+            ('coarse_cidx', np.int16), ('coarse_eidx', np.int64),
+            ('fine_cidx', np.int16, 2), ('fine_eidx', np.int64, 2),
+            ('diagonal', np.uint8), ('quality', np.float64)
+        ]
+        gdtype = [
+            ('left_cidx', np.int16), ('left_eidx', np.int64),
+            ('right_cidx', np.int16, 4), ('right_eidx', np.int64, 4)
+        ]
+        qgrouped = defaultdict(list)
+        ggrouped = defaultdict(list)
+
+        for mortar in self._mortars:
+            if mortar.get('format') == 'one-to-many-v1':
+                if mortar.get('template') != 'quad-2x2':
+                    raise ValueError('Unsupported generated mortar template')
+
+                lkey = tuple(sorted(mortar['left']))
+                rkeys = [tuple(sorted(r)) for r in mortar['right']]
+                try:
+                    left = resid.pop(lkey)
+                    right = [resid.pop(rkey) for rkey in rkeys]
+                except KeyError as exc:
+                    raise ValueError(
+                        'Unable to pair an octree quad-2x2 mortar face: '
+                        f'{tuple(exc.args[0])}'
+                    ) from None
+
+                mcidx = codec.index('mortar/quad-2x2')
+                lcidx, leidx = left
+                cconn[lcidx][leidx] = mcidx, -2
+                for rcidx, reidx in right:
+                    cconn[rcidx][reidx] = mcidx, -2
+
+                record = np.zeros((), dtype=gdtype)
+                record['left_cidx'] = lcidx
+                record['left_eidx'] = leidx
+                record['right_cidx'] = [r[0] for r in right]
+                record['right_eidx'] = [r[1] for r in right]
+
+                petype = codec[lcidx].split('/')[1]
+                ggrouped[petype].append(record)
+                continue
+
+            qkey = tuple(sorted(mortar['quad']))
+            tkeys = [tuple(sorted(t)) for t in mortar['tris']]
+            try:
+                coarse = resid.pop(qkey)
+                fine = [resid.pop(tkey) for tkey in tkeys]
+            except KeyError as exc:
+                raise ValueError(
+                    'Unable to pair a split-pyramid mortar face; the former '
+                    'pyramid base may require boundary-face splitting or use '
+                    f'an unsupported topology: {tuple(exc.args[0])}'
+                ) from None
+
+            mcidx = codec.index('mortar/quad-tri')
+            ccidx, ceidx = coarse
+            cconn[ccidx][ceidx] = mcidx, -2
+            for fcidx, feidx in fine:
+                cconn[fcidx][feidx] = mcidx, -2
+
+            record = np.zeros((), dtype=qdtype)
+            record['coarse_cidx'] = ccidx
+            record['coarse_eidx'] = ceidx
+            record['fine_cidx'] = [f[0] for f in fine]
+            record['fine_eidx'] = [f[1] for f in fine]
+            record['diagonal'] = mortar['diagonal']
+            record['quality'] = mortar['quality']
+
+            petype = codec[ccidx].split('/')[1]
+            qgrouped[petype].append(record)
+
+        result = {}
+        if len(qgrouped) == 1:
+            records = next(iter(qgrouped.values()))
+            result['quad-tri'] = np.array(records, dtype=qdtype)
+        else:
+            result.update({
+                f'quad-tri-{petype}': np.array(records, dtype=qdtype)
+                for petype, records in sorted(qgrouped.items())
+            })
+
+        if len(ggrouped) == 1:
+            records = next(iter(ggrouped.values()))
+            result['quad-2x2'] = MortarData(
+                np.array(records, dtype=gdtype),
+                format='one-to-many-v1', template='quad-2x2'
+            )
+        else:
+            result.update({
+                f'quad-2x2-{petype}': MortarData(
+                    np.array(records, dtype=gdtype),
+                    format='one-to-many-v1', template='quad-2x2'
+                )
+                for petype, records in sorted(ggrouped.items())
+            })
+
+        return result
 
     def _connect_eles(self, eles, codec, spinner):
         # For connectivity a first-order representation is sufficient
@@ -443,6 +599,10 @@ class NodalMeshAssembler:
         resid, cconn = self._pair_volume_faces(vfofaces, codec, eles)
         spinner()
 
+        # Extract one-to-many mortar faces before boundary processing
+        mortars = self._pair_mortar_faces(resid, cconn, codec)
+        spinner()
+
         # Tag and pair periodic boundary faces
         periodic = self._pair_periodic_volume_faces(bpart, cconn, resid)
         spinner()
@@ -454,7 +614,7 @@ class NodalMeshAssembler:
         if any(resid.values()):
             raise ValueError('Unpaired faces in mesh')
 
-        return periodic
+        return periodic, mortars
 
     def _linearise_eles(self, emap, lintol, spinner):
         # Create a copy of the node points
