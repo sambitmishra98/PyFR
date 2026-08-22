@@ -1301,6 +1301,28 @@ def _quad_wall_roots(root_mesh, wall_boundaries, l2g):
     return roots
 
 
+def _validate_staged_quad_mesh(stage_mesh, raw, new_leaves):
+    if tuple(stage_mesh.amr_tree.leaves()) != new_leaves:
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged native ancestry changed leaf order'
+        )
+    if set(stage_mesh.mcon) - {'line-1x2'}:
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged mesh contains an unsupported mortar'
+        )
+    mcon = stage_mesh.mcon.get('line-1x2', ())
+    if len(mcon) != len(raw.mortars):
+        raise AMRTransactionError(
+            'ONLINE2D-1 staged Line-1x2 mortar count changed'
+        )
+    for rec, expected in zip(getattr(mcon, 'records', ()), raw.mortars):
+        if (int(rec['left_eidx']) != expected.left_eidx or
+                tuple(map(int, rec['right_eidx'])) != expected.right_eidx):
+            raise AMRTransactionError(
+                'ONLINE2D-1 staged Line-1x2 low/high ordering changed'
+            )
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1436,26 +1458,7 @@ def perform_indicator_quad_amr_transaction(
             f'ONLINE2D-1 native materialization failed: {exc}'
         ) from exc
 
-    if tuple(stage_mesh.amr_tree.leaves()) != new_leaves:
-        raise AMRTransactionError(
-            'ONLINE2D-1 staged native ancestry changed leaf order'
-        )
-    if set(stage_mesh.mcon) - {'line-1x2'}:
-        raise AMRTransactionError(
-            'ONLINE2D-1 staged mesh contains an unsupported mortar'
-        )
-    if len(stage_mesh.mcon.get('line-1x2', ())) != len(raw.mortars):
-        raise AMRTransactionError(
-            'ONLINE2D-1 staged Line-1x2 mortar count changed'
-        )
-    for rec, expected in zip(
-        getattr(stage_mesh.mcon.get('line-1x2'), 'records', ()), raw.mortars
-    ):
-        if (int(rec['left_eidx']) != expected.left_eidx or
-                tuple(map(int, rec['right_eidx'])) != expected.right_eidx):
-            raise AMRTransactionError(
-                'ONLINE2D-1 staged Line-1x2 low/high ordering changed'
-            )
+    _validate_staged_quad_mesh(stage_mesh, raw, new_leaves)
 
     stage_system = None
     try:
