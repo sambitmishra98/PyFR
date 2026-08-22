@@ -1323,6 +1323,21 @@ def _validate_staged_quad_mesh(stage_mesh, raw, new_leaves):
             )
 
 
+def _materialize_staged_quad_mesh(root_mesh, proposed_tree, new_leaves):
+    try:
+        raw = materialize_native_quad_tree(
+            root_mesh, proposed_tree, comm_size=1
+        )
+        stage_mesh = build_adapted_quad_mesh(raw)
+    except Exception as exc:
+        raise AMRTransactionError(
+            f'ONLINE2D-1 native materialization failed: {exc}'
+        ) from exc
+
+    _validate_staged_quad_mesh(stage_mesh, raw, new_leaves)
+    return raw, stage_mesh
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1448,17 +1463,9 @@ def perform_indicator_quad_amr_transaction(
             'ONLINE2D-1 conservative prolongation gate failed'
         )
 
-    try:
-        raw = materialize_native_quad_tree(
-            root_mesh, proposed_tree, comm_size=1
-        )
-        stage_mesh = build_adapted_quad_mesh(raw)
-    except Exception as exc:
-        raise AMRTransactionError(
-            f'ONLINE2D-1 native materialization failed: {exc}'
-        ) from exc
-
-    _validate_staged_quad_mesh(stage_mesh, raw, new_leaves)
+    raw, stage_mesh = _materialize_staged_quad_mesh(
+        root_mesh, proposed_tree, new_leaves
+    )
 
     stage_system = None
     try:
