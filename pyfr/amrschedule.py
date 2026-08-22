@@ -69,6 +69,35 @@ def _check_schedule_agreement(comm, signature):
 
 
 
+def _schedule_mode(intg, comm, mesh_etypes):
+    cfg = intg.cfg
+
+    if comm.size == 1 and mesh_etypes in {
+        ('quad',), ('quad', 'tri'), ('hex', 'pyr', 'tet')
+    }:
+        from pyfr.amrtransaction import AMRTransactionError
+
+        try:
+            if mesh_etypes == ('hex', 'pyr', 'tet'):
+                from pyfr.amrtransaction import _mixed_hex_online_settings
+                _mixed_hex_online_settings(cfg)
+                return 'mixed-hex-1r'
+
+            from pyfr.amrtransaction import _quad_online_settings
+            _quad_online_settings(cfg)
+            return ('quad-1r' if mesh_etypes == ('quad',)
+                    else 'mixed-quad-1r')
+        except AMRTransactionError as exc:
+            raise AMRScheduleError(str(exc)) from exc
+
+    indicator_settings(cfg)
+    if comm.size < 2:
+        raise AMRScheduleError('native D9 Hex AMR scheduling requires MPI')
+
+    return ('mixed-hex-mpi' if mesh_etypes == ('hex', 'pyr', 'tet')
+            else 'hex-mpi')
+
+
 class NativeAMRSchedule:
     """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
@@ -82,35 +111,7 @@ class NativeAMRSchedule:
 
         comm, _, _ = get_comm_rank_root()
         mesh_etypes = tuple(getattr(intg.system.mesh, 'etypes', ()))
-        if comm.size == 1 and mesh_etypes in {
-            ('quad',), ('quad', 'tri'), ('hex', 'pyr', 'tet')
-        }:
-            from pyfr.amrtransaction import AMRTransactionError
-            try:
-                if mesh_etypes == ('hex', 'pyr', 'tet'):
-                    from pyfr.amrtransaction import _mixed_hex_online_settings
-                    _mixed_hex_online_settings(cfg)
-                    self.mode = 'mixed-hex-1r'
-                else:
-                    from pyfr.amrtransaction import _quad_online_settings
-                    _quad_online_settings(cfg)
-                    self.mode = (
-                        'quad-1r' if mesh_etypes == ('quad',)
-                        else 'mixed-quad-1r'
-                    )
-            except AMRTransactionError as exc:
-                raise AMRScheduleError(str(exc)) from exc
-        else:
-            indicator_settings(cfg)
-            if comm.size < 2:
-                raise AMRScheduleError(
-                    'native D9 Hex AMR scheduling requires MPI'
-                )
-            self.mode = (
-                'mixed-hex-mpi'
-                if mesh_etypes == ('hex', 'pyr', 'tet')
-                else 'hex-mpi'
-            )
+        self.mode = _schedule_mode(intg, comm, mesh_etypes)
         if getattr(intg, 'formulation', None) != 'explicit':
             raise AMRScheduleError(
                 'native D9 AMR scheduling requires explicit'
