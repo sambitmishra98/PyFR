@@ -1,5 +1,7 @@
 import pkgutil
 
+from pyfr.cache import memoize
+
 from mako.lookup import TemplateLookup
 from mako.template import Template
 
@@ -20,6 +22,10 @@ class DottedTemplateLookup(TemplateLookup):
         return uri
 
     def get_template(self, name):
+        return self._get_template(name, tuple(self.filters))
+
+    @memoize
+    def _get_template(self, name, filters):
         div = name.rfind('.')
 
         # Break apart name into a package and base file name
