@@ -1966,13 +1966,38 @@ def _build_staged_mixed_quad_system(
     return stage_system, stage_serialiser, staged_states, stage_shapes
 
 
+def _validate_staged_mixed_quad_transfer(
+    root_mesh, new_leaves, stage_system, staged_states, qbasis, tbasis,
+    before, tol
+):
+    from pyfr.amroffline import _global_integral
+
+    after = (
+        _global_integral(
+            root_mesh, new_leaves, staged_states['quad'], qbasis
+        ) + _tri_global_integral(
+            root_mesh, staged_states['tri'], tbasis
+        )
+    )
+    error = after - before
+    if float(np.max(np.abs(error), initial=0.0)) > tol:
+        raise AMRTransactionError(
+            'MIX2D1 staged conservative transfer gate failed'
+        )
+
+    rho_range, pressure_range = _combined_eos_ranges(
+        stage_system, staged_states
+    )
+    return after, error, rho_range, pressure_range
+
+
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
     """Perform one genuine mixed Tri+Quad online Quad refinement event."""
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amroffline import (
-        _close_2to1, _global_integral, _split_nodes, _validate_state,
+        _close_2to1, _split_nodes, _validate_state,
         _wall_floor_splits,
     )
     from pyfr.amr import quad_tree_face_groups, quad_tree_leaves
@@ -2092,20 +2117,11 @@ def perform_indicator_mixed_quad_amr_transaction(
             )
         )
 
-        after = (
-            _global_integral(
-                root_mesh, new_leaves, staged_states['quad'], qbasis
-            ) + _tri_global_integral(
-                root_mesh, staged_states['tri'], tbasis
+        after, error, staged_rho, staged_pressure = (
+            _validate_staged_mixed_quad_transfer(
+                root_mesh, new_leaves, stage_system, staged_states,
+                qbasis, tbasis, before, tol
             )
-        )
-        error = after - before
-        if float(np.max(np.abs(error), initial=0.0)) > tol:
-            raise AMRTransactionError(
-                'MIX2D1 staged conservative transfer gate failed'
-            )
-        staged_rho, staged_pressure = _combined_eos_ranges(
-            stage_system, staged_states
         )
 
         stage_system.preproc(intg.tcurr, bank)
