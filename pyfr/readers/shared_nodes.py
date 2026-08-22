@@ -58,6 +58,11 @@ class SharedNodesFinder(AlltoallMixin):
         return lnodes[lcounts < mval]
 
     def _build_responses(self, rkeys, rranks):
+        if not len(rkeys):
+            return np.empty(0, dtype=int), np.zeros(
+                self.comm.size, dtype=np.int32
+            )
+
         unodes, gstarts = np.unique(rkeys, return_index=True)
         gsizes = np.diff(gstarts, append=rkeys.size)
 
