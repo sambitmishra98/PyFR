@@ -2625,6 +2625,24 @@ def _build_staged_mixed_hex_system(
     return stage_system, stage_serialiser, staged_states, stage_shapes
 
 
+def _validate_staged_mixed_hex_transfer(
+    stage_system, stage_mesh, staged_states, basis, before, tol, scale
+):
+    after = _physical_hex_conserved_totals(
+        staged_states['hex'], stage_mesh.spts['hex'], basis
+    )
+    error = after - before
+    if np.any(np.abs(error) > tol*scale):
+        raise AMRTransactionError(
+            'V10J staged conservative Hex transfer gate failed'
+        )
+
+    rho_range, pressure_range = _combined_eos_ranges(
+        stage_system, staged_states
+    )
+    return after, error, rho_range, pressure_range
+
+
 def _commit_mixed_hex_refinement(
     intg, system, mesh, root_mesh, old_tree, local_by_leaf, proposed_tree,
     *, refine_marks=(), wall_splits=(), closure_splits=(),
@@ -2684,16 +2702,11 @@ def _commit_mixed_hex_refinement(
             )
         )
 
-        after = _physical_hex_conserved_totals(
-            staged_states['hex'], stage_mesh.spts['hex'], basis
-        )
-        error = after - before
-        if np.any(np.abs(error) > tol*scale):
-            raise AMRTransactionError(
-                'V10J staged conservative Hex transfer gate failed'
+        after, error, staged_rho, staged_pressure = (
+            _validate_staged_mixed_hex_transfer(
+                stage_system, stage_mesh, staged_states, basis, before, tol,
+                scale
             )
-        staged_rho, staged_pressure = _combined_eos_ranges(
-            stage_system, staged_states
         )
 
         stage_system.preproc(intg.tcurr, bank)
