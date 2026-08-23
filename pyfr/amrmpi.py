@@ -996,6 +996,48 @@ def _physical_hex_volume(spts, basis):
     return float(_physical_hex_conserved_totals(state, spts, basis)[0])
 
 
+def _validate_global_mixed_hex_transfer(
+    comm, old_local, new_local, old_vol_local, new_vol_local, local_rho,
+    local_pressure, dtype
+):
+    before = np.array(old_local, copy=True)
+    after = np.array(new_local, copy=True)
+    comm.Allreduce(mpi.IN_PLACE, before, op=mpi.SUM)
+    comm.Allreduce(mpi.IN_PLACE, after, op=mpi.SUM)
+    cons_error = after - before
+    old_volume = scal_coll(comm.Allreduce, old_vol_local, op=mpi.SUM)
+    proposed_volume = scal_coll(comm.Allreduce, new_vol_local, op=mpi.SUM)
+    rho_range = (
+        scal_coll(comm.Allreduce, local_rho[0], op=mpi.MIN),
+        scal_coll(comm.Allreduce, local_rho[1], op=mpi.MAX),
+    )
+    pressure_range = (
+        scal_coll(comm.Allreduce, local_pressure[0], op=mpi.MIN),
+        scal_coll(comm.Allreduce, local_pressure[1], op=mpi.MAX),
+    )
+
+    tol = 8192*np.finfo(dtype).eps
+    scale = np.maximum(1.0, np.abs(before))
+    gate_error = None
+    if np.any(np.abs(cons_error) > tol*scale):
+        gate_error = MPIAMRTransactionError(
+            'V10K global Hex conservation gate failed'
+        )
+    elif not np.isclose(
+        old_volume, proposed_volume, rtol=0,
+        atol=tol*max(1.0, old_volume)
+    ):
+        gate_error = MPIAMRTransactionError(
+            'V10K global Hex volume gate failed'
+        )
+    _collective_error(comm, 'V10K global conservation/EOS', gate_error)
+
+    return (
+        before, after, cons_error, old_volume, proposed_volume, rho_range,
+        pressure_range
+    )
+
+
 def _validate_mpi_mixed_hex_integrator(intg):
     comm, _, _ = get_comm_rank_root()
     if comm.size not in {2, 4}:
@@ -1634,37 +1676,13 @@ def perform_one_mpi_mixed_hex_amr_transaction(
             local_error = exc
         _collective_error(comm, 'V10K local physics gates', local_error)
 
-        before = np.array(old_local, copy=True)
-        after = np.array(new_local, copy=True)
-        comm.Allreduce(mpi.IN_PLACE, before, op=mpi.SUM)
-        comm.Allreduce(mpi.IN_PLACE, after, op=mpi.SUM)
-        cons_error = after - before
-        old_volume = scal_coll(comm.Allreduce, old_vol_local, op=mpi.SUM)
-        proposed_volume = scal_coll(
-            comm.Allreduce, new_vol_local, op=mpi.SUM
+        (
+            before, after, cons_error, old_volume, proposed_volume,
+            rho_range, pressure_range
+        ) = _validate_global_mixed_hex_transfer(
+            comm, old_local, new_local, old_vol_local, new_vol_local,
+            local_rho, local_pressure, next(iter(old_states.values())).dtype
         )
-        rho_range = (
-            scal_coll(comm.Allreduce, local_rho[0], op=mpi.MIN),
-            scal_coll(comm.Allreduce, local_rho[1], op=mpi.MAX),
-        )
-        pressure_range = (
-            scal_coll(comm.Allreduce, local_pressure[0], op=mpi.MIN),
-            scal_coll(comm.Allreduce, local_pressure[1], op=mpi.MAX),
-        )
-
-        tol = 8192*np.finfo(next(iter(old_states.values())).dtype).eps
-        scale = np.maximum(1.0, np.abs(before))
-        gate_error = None
-        if np.any(np.abs(cons_error) > tol*scale):
-            gate_error = MPIAMRTransactionError(
-                'V10K global Hex conservation gate failed'
-            )
-        elif not np.isclose(old_volume, proposed_volume, rtol=0,
-                            atol=tol*max(1.0, old_volume)):
-            gate_error = MPIAMRTransactionError(
-                'V10K global Hex volume gate failed'
-            )
-        _collective_error(comm, 'V10K global conservation/EOS', gate_error)
 
         stage_system.preproc(intg.tcurr, bank)
         stage_system.backend.wait()
