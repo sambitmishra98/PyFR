@@ -362,10 +362,6 @@ def _validate_integrator(intg, restart_root_mesh=None):
             'D6A does not carry trigger-managed state across topology changes'
         )
 
-    # The fixed-step none controller does not register integrator state.  In
-    # the initial D6A scope plugins, triggers, and stateful BCs are
-    # unsupported, so any remaining live callback is mutable state we do not
-    # yet migrate.
     serialfns = getattr(getattr(intg, 'serialiser', None), '_serialfns', {})
     if any(k.startswith('bcs/') for k in serialfns):
         raise AMRTransactionError('D6A requires stateless boundary conditions')
@@ -447,9 +443,7 @@ def _root_tree(mesh):
     leaves = [(int(eidx), ()) for eidx in geidx]
     tree = encode_hex_leaf_tree(mesh.uuid, leaves)
 
-    # This is the runtime identity boundary: canonical root Hex identity,
-    # physical native Hex row, and the accepted solution bank column must
-    # all be represented exactly once.
+    # Root identity, native row, and solution column must map one-to-one.
     local_by_leaf = {(int(eidx), ()): i for i, eidx in enumerate(geidx)}
     if len(local_by_leaf) != len(geidx):
         raise AMRTransactionError(
@@ -501,9 +495,7 @@ def _close_refinement(mesh, old_tree, mark):
             f'Scripted mark is not an active leaf: {mark!r}'
         )
 
-    # Reconstruct the current split-node set from persisted active leaves,
-    # then add one active leaf.  The loop is the accepted D2 closure
-    # algorithm and may add neighbouring coarse leaves for 2:1 balance.
+    # Reconstruct split nodes and add neighbours required for 2:1 balance.
     split = _tree_split_nodes(old_tree) | {mark}
     while True:
         leaves = hex_tree_leaves(roots, split)
@@ -919,8 +911,7 @@ def perform_one_amr_transaction(
             )
         )
 
-        # Validate only after the exact transferred state has crossed the
-        # D5/native/PyFR bank boundary.
+        # Validate after transfer crosses the native/PyFR bank boundary.
         before, after, error, staged_rho, staged_pressure = (
             _validate_staged_hex_transfer(
                 stage_system, staged_state, old_state, old_volumes,
@@ -939,11 +930,7 @@ def perform_one_amr_transaction(
         _discard_stage(stage_system, reader, stage_dir)
         raise
 
-    # Commit point.  No operation below is allowed to raise under the
-    # validated D6A scope; failures here are post-commit failures, never
-    # rollback claims.
-    # The existing memoizer is attached to the integrator; do not clear or
-    # otherwise mutate the retired system during the ownership switch.
+    # Commit point; all fallible proposal and validation work is above.
     clear_memoize(intg)
     intg.system = stage_system
     intg._amr_root_mesh = root_mesh
@@ -1622,9 +1609,6 @@ def perform_indicator_quad_amr_transaction(
     )
 
 
-# ===========================================================================
-# MIX2D1 - single-rank affine Tri+Quad online Quad AMR
-# ===========================================================================
 
 
 def _validate_mixed_quad_online_integrator(intg, restart_root_mesh=None):
@@ -1743,8 +1727,7 @@ def _validate_mixed_quad_online_integrator(intg, restart_root_mesh=None):
     if any(np.any(mesh.spts_curved.get(et, ())) for et in ('tri', 'quad')):
         raise AMRTransactionError('MIX2D1 requires affine live geometry')
 
-    # Triangles are immutable.  Their ordering, coordinates, and tags may not
-    # drift across a prior mixed Quad adaptation/restart.
+    # Immutable Tri ordering, coordinates, and tags may not drift.
     if mesh.amr_tree is not None:
         if not np.array_equal(mesh.spts['tri'], root_mesh.spts['tri']):
             raise AMRTransactionError('MIX2D1 immutable Tri geometry changed')
@@ -2248,9 +2231,6 @@ def perform_indicator_mixed_quad_amr_transaction(
         QuadAMRDecision('refine', marks, trigger), score_items, tx
     )
 
-# ===========================================================================
-# V10J - scripted single-rank mixed Tet+Pyramid+Hex online Hex AMR
-# ===========================================================================
 
 @dataclass(frozen=True)
 class MixedHexAMRTransactionResult:
