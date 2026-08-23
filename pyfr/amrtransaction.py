@@ -1,12 +1,3 @@
-"""Accepted-step single-rank online AMR transactions.
-
-This remains an explicit accepted-step API rather than an automatic RHS hook.
-D6B extends the accepted D6A transaction to an already adapted live mesh,
-reusing D2 closure, D3 prolongation, D4 restriction, and D5 native
-materialisation.  The immutable root mesh is retained transiently on the live
-integrator after the first committed event; restart reconstruction of that
-anchor remains outside this seam and fails closed.
-"""
 from dataclasses import dataclass
 import os
 import shutil
@@ -41,12 +32,11 @@ from pyfr.writers.serialise import Serialiser
 
 
 class AMRTransactionError(RuntimeError):
-    """A D6A transaction request or validation failed closed."""
+    pass
 
 
 @dataclass(frozen=True)
 class AMRTransactionResult:
-    """Evidence returned by a committed D6 transaction."""
 
     action: str
     old_tree: object
@@ -79,7 +69,6 @@ class AMRTransactionResult:
 
 @dataclass(frozen=True)
 class QuadAMRDecision:
-    """Deterministic decision record for the ONLINE2D-1 Quad path."""
 
     action: str
     marks: tuple
@@ -88,7 +77,6 @@ class QuadAMRDecision:
 
 @dataclass(frozen=True)
 class QuadIndicatorAMRResult:
-    """Indicator and transaction evidence returned to the native scheduler."""
 
     decision: QuadAMRDecision
     scores: tuple
@@ -97,7 +85,6 @@ class QuadIndicatorAMRResult:
 
 @dataclass(frozen=True)
 class QuadAMRTransactionResult:
-    """Evidence returned by one committed ONLINE2D-1 refinement event."""
 
     old_tree: object
     proposed_tree: object
@@ -129,7 +116,6 @@ class QuadAMRTransactionResult:
 
 @dataclass(frozen=True)
 class MixedQuadAMRTransactionResult:
-    """Evidence for one committed MIX2D1 Tri+Quad refinement event."""
 
     old_tree: object
     proposed_tree: object
@@ -186,7 +172,6 @@ def _scratch_bank(system, accepted_bank):
 
 
 def _single_hex_bank(system, bank, label):
-    """Return one validated Hex register bank and its full logical shape."""
     if list(getattr(system, 'ele_types', ())) != ['hex']:
         raise AMRTransactionError(
             f'D6A {label} system requires exactly one Hex element group'
@@ -220,7 +205,6 @@ def _single_hex_bank(system, bank, label):
 
 
 def _stage_hex_native_leaf_order(stage_mesh, raw):
-    """Fail closed before build unless D5 native ordering is one Hex group."""
     if list(stage_mesh.etypes) != ['hex']:
         raise AMRTransactionError(
             'D6A staged mesh requires exactly one active Hex element group'
@@ -251,7 +235,6 @@ def _stage_hex_native_leaf_order(stage_mesh, raw):
 
 
 def _stage_hex_leaf_mapping(stage_system, stage_mesh, raw, transferred, bank):
-    """Validate the explicit physical-leaf to staged-bank column mapping."""
     group_shape, group_bank = _single_hex_bank(stage_system, bank, 'staged')
     native_leaves, native_eidxs = _stage_hex_native_leaf_order(
         stage_mesh, raw
@@ -271,7 +254,6 @@ def _stage_hex_leaf_mapping(stage_system, stage_mesh, raw, transferred, bank):
 
 
 def _inject_staged_hex_bank(stage_system, stage_mesh, raw, transferred, bank):
-    """Inject one complete staged Hex bank and read it back through PyFR."""
     leaf_to_bank, (group_shape, group_bank) = _stage_hex_leaf_mapping(
         stage_system, stage_mesh, raw, transferred, bank
     )
@@ -478,7 +460,6 @@ def _root_tree(mesh):
 
 
 def _current_tree(mesh):
-    """Return the accepted leaf tree and leaf -> live bank-column map."""
     if mesh.amr_tree is None:
         return _root_tree(mesh)
 
@@ -617,7 +598,6 @@ def _raw_volumes(raw):
 
 
 def _physical_hex_conserved_totals(state, spts, basis):
-    """Integrate conserved state against the represented Hex geometry."""
     from pyfr.polys import get_polybasis
 
     spts = np.asarray(spts, dtype=float)
@@ -872,15 +852,6 @@ def _propose_scripted_hex_tree(root_mesh, mesh, scripted_marks, action):
 def perform_one_amr_transaction(
     intg, scripted_marks, *, action='refine', restart_root_mesh=None
 ):
-    """Commit one scripted refine or coarsen transaction.
-
-    The call must occur after ``intg.advance_to(t_adapt)`` returns.  Refine
-    accepts exactly one active leaf; coarsen accepts exactly the eight active
-    direct siblings of one D4-legal parent.  A fresh adapted restart may
-    supply its immutable original root mesh through ``restart_root_mesh``;
-    the persisted root UUID must match.  Any failure before the identity
-    switch leaves ``intg`` untouched.
-    """
     system, mesh, root_mesh = _validate_integrator(
         intg, restart_root_mesh
     )
@@ -1063,7 +1034,6 @@ def _quad_online_settings(cfg):
 
 
 def _quad_online_writer_plugins(intg, *, require_checkpoint_schedule=False):
-    """Validate the bounded writer-plugin subset carried across Quad AMR."""
     from pyfr.plugins.soln.writer import WriterPlugin
 
     cfg = intg.cfg
@@ -1511,14 +1481,6 @@ def _prepare_quad_state(intg, system, old_leaves, bank):
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
-    """Perform one indicator-driven online Quad refinement event.
-
-    The call is an accepted-step operation.  PREPARE, BUILD, and VALIDATE keep
-    the old live solver read-only.  The proposed native Quad mesh is built
-    directly in memory, a complete shadow system receives the accepted
-    conservative transfer, and the first RHS uses a distinct scratch bank.
-    Only after every gate passes is the integrator ownership switched.
-    """
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amroffline import (
         _close_2to1, _current_column_leaves, _split_nodes,
@@ -1666,7 +1628,6 @@ def perform_indicator_quad_amr_transaction(
 
 
 def _validate_mixed_quad_online_integrator(intg, restart_root_mesh=None):
-    """Validate the narrow first mixed Tri+Quad online-AMR lifecycle."""
     if getattr(intg, 'formulation', None) != 'explicit':
         raise AMRTransactionError('MIX2D1 requires explicit formulation')
     if getattr(intg, 'controller_name', None) != 'none':
@@ -2147,7 +2108,6 @@ def _close_mixed_quad_refinement(
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
-    """Perform one genuine mixed Tri+Quad online Quad refinement event."""
     from pyfr.amrindicator import density_velocity_variation_scores
     system, mesh, root_mesh = _validate_mixed_quad_online_integrator(
         intg, restart_root_mesh
@@ -2276,7 +2236,6 @@ def perform_indicator_mixed_quad_amr_transaction(
 
 @dataclass(frozen=True)
 class MixedHexAMRTransactionResult:
-    """Evidence for one committed V10J mixed 3D Hex refinement event."""
 
     old_tree: object
     proposed_tree: object
@@ -2310,13 +2269,11 @@ class MixedHexAMRTransactionResult:
 
     @property
     def refine_mark(self):
-        """Compatibility alias for a single scripted refinement mark."""
         return self.refine_marks[0] if len(self.refine_marks) == 1 else None
 
 
 @dataclass(frozen=True)
 class MixedHexAMRDecision:
-    """Deterministic V10J mixed-3D Hex refinement decision."""
 
     action: str
     marks: tuple
@@ -2325,7 +2282,6 @@ class MixedHexAMRDecision:
 
 @dataclass(frozen=True)
 class MixedHexIndicatorAMRResult:
-    """D9Q decision and optional mixed-3D transaction evidence."""
 
     decision: MixedHexAMRDecision
     scores: tuple
@@ -2385,7 +2341,6 @@ def _inject_staged_mixed_hex_bank(stage_system, states, bank):
 
 
 def _validate_mixed_hex_online_integrator(intg, restart_root_mesh=None):
-    """Validate the first narrow V10J mixed 3D explicit lifecycle."""
     if getattr(intg, 'formulation', None) != 'explicit':
         raise AMRTransactionError('V10J requires explicit formulation')
     if getattr(intg, 'controller_name', None) != 'none':
@@ -2720,7 +2675,6 @@ def _commit_mixed_hex_refinement(
     *, refine_marks=(), wall_splits=(), closure_splits=(),
     fixed_blocked_marks=(),
 ):
-    """Build, validate, and atomically commit one mixed-3D Hex proposal."""
     bank = intg.idxcurr
     bankmap = _mixed_hex_bank_map(system, bank, 'accepted')
     scratch_bank = _scratch_bank(system, bank)
@@ -2824,7 +2778,6 @@ def _commit_mixed_hex_refinement(
 def perform_scripted_mixed_hex_amr_transaction(
     intg, scripted_mark, *, restart_root_mesh=None
 ):
-    """Commit one scripted Hex refinement in mixed Tet+Pyramid+Hex topology."""
     system, mesh, root_mesh = _validate_mixed_hex_online_integrator(
         intg, restart_root_mesh
     )
@@ -2942,7 +2895,6 @@ def _fixed_blocked_hex_leaves(leaves, rootfaces, fixed):
 def perform_indicator_mixed_hex_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
-    """Perform one D9Q-driven mixed-3D Hex refinement transaction."""
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amrmesh import _derive_mixed_hex_root_face_topology
 
