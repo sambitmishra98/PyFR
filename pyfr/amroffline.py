@@ -1,4 +1,3 @@
-"""Offline monotone Quad h-adaptation for native PyFR restart pairs."""
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +22,7 @@ from pyfr.writers.native import NativeWriter
 
 
 class OfflineQuadAMRError(ValueError):
-    """An offline Quad AMR transform is invalid or outside scope."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -273,12 +272,6 @@ def perform_offline_quad_amr(
     wall_boundaries=(), wall_min_level=0, density_floor=1e-14,
     acoustic_floor=1e-14, lintol=1e-5,
 ):
-    """Perform one monotone offline Quad refinement event.
-
-    Adapted inputs require ``root_mesh_path`` to reference the immutable
-    original native root mesh whose UUID is stored in the persistent quadtree.
-    The operation is intentionally single-rank and refinement-only.
-    """
     comm, _, _ = get_comm_rank_root()
     if comm.size != 1:
         raise OfflineQuadAMRError(

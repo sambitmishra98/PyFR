@@ -1,9 +1,3 @@
-"""Deterministic solution indicators for explicit online Hex AMR events.
-
-D9A keeps indicator evaluation outside the normal RHS path.  The indicator
-selects marks only; accepted D7 topology, transfer, ownership, migration,
-validation, COMMIT, and rollback remain authoritative.
-"""
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,7 +14,7 @@ from pyfr.mpiutil import get_comm_rank_root
 
 
 class AMRIndicatorError(ValueError):
-    """An AMR indicator or deterministic mark decision is invalid."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -52,7 +46,6 @@ class IndicatorMPIAMRResult:
 
 
 def density_variation_scores(state, density_index=0, density_floor=1e-14):
-    """Return a relative within-element density variation for one Hex group."""
     state = np.asarray(state)
     if state.ndim != 3:
         raise AMRIndicatorError(
@@ -85,7 +78,6 @@ def density_velocity_variation_scores(
     state, *, density_index, momentum_indices, energy_index, gamma,
     density_floor=1e-14, acoustic_floor=1e-14,
 ):
-    """Return max density/velocity variation for one conserved Hex bank."""
     state = np.asarray(state)
     if state.ndim != 3:
         raise AMRIndicatorError(
@@ -160,13 +152,6 @@ def select_hex_indicator_decision(
     tie_tolerance=1e-12, min_level=0, max_level=2,
     max_refine_marks=1, max_coarsen_families=1,
 ):
-    """Select one deterministic refine/coarsen/no-op decision.
-
-    Refinement has priority and may select a bounded batch of leaves.
-    Otherwise a bounded batch of complete sibling families may be selected
-    for coarsening.  D7 remains responsible for 2:1 closure and coarsening
-    legality.
-    """
     if (not np.isfinite(refine_threshold) or
             not np.isfinite(coarsen_threshold)):
         raise AMRIndicatorError('indicator thresholds must be finite')
@@ -351,7 +336,6 @@ def _merge_global_scores(comm, local_scores, tree):
 
 
 def evaluate_mpi_density_indicator(intg):
-    """Collectively evaluate density scores and choose one global action."""
     comm, _, _ = get_comm_rank_root()
     try:
         comm, system, mesh, _ = _validate_mpi_integrator(intg)
@@ -441,7 +425,6 @@ def evaluate_mpi_density_indicator(intg):
 
 
 def evaluate_mpi_mixed_hex_indicator(intg):
-    """Collectively evaluate D9Q on a distributed mixed Hex topology."""
     comm, _, _ = get_comm_rank_root()
     try:
         comm, system, mesh, _ = _validate_mpi_mixed_hex_integrator(intg)
@@ -545,7 +528,6 @@ def evaluate_mpi_mixed_hex_indicator(intg):
 def perform_indicator_mpi_mixed_hex_amr_transaction(
     intg, *, shared_stage_dir, repartition=True
 ):
-    """Evaluate D9Q then execute the V10K mixed-Hex MPI transaction."""
     decision, scores, local_by_leaf = evaluate_mpi_mixed_hex_indicator(intg)
     score_items = tuple((leaf, scores[leaf]) for leaf in sorted(scores))
     if decision.action == 'none':
@@ -563,7 +545,6 @@ def perform_indicator_mpi_mixed_hex_amr_transaction(
 def perform_indicator_mpi_amr_transaction(
     intg, *, shared_stage_dir, ownership_policy='balanced-affinity-v1'
 ):
-    """Evaluate D9A and, if marked, execute the accepted D7 transaction."""
     decision, scores, local_by_leaf = evaluate_mpi_density_indicator(intg)
     score_items = tuple((leaf, scores[leaf]) for leaf in sorted(scores))
     if decision.action == 'none':

@@ -1,30 +1,3 @@
-"""V10 D5C - adapted native mesh persistence.
-
-Writes an :class:`~pyfr.amrmesh.AdaptedRawMesh` (D5B2's proposed raw
-mesh) as a standard native ``.pyfrm`` file, by reusing the accepted
-:class:`~pyfr.readers.base.BaseReader` write path rather than inventing
-a second HDF5 dialect. Element colouring is computed exactly once here
-via the existing accepted
-:meth:`~pyfr.readers.base.NodalMeshAssembler.compute_element_colouring`
-- children inherit root tags, but never root colour (colour is a
-property of the *adapted* adjacency graph, not of the pre-adaptation
-element).
-
-V10D5C2 addition: after the standard physical mesh is written, append
-the D5A canonical leaf codec (``amr/version``, ``amr/root-mesh-uuid``,
-``amr/leaves/root-eidx``, ``amr/leaves/path-offsets``,
-``amr/leaves/path-data``) so the file alone - without the in-memory
-``AdaptedRawMesh``/``HexLeafTree`` that produced it - carries persistent
-octree ancestry. The arrays written are read directly off the
-:class:`~pyfr.amr.HexLeafTree` re-derived from ``raw.leaf_order`` via
-the existing accepted :func:`~pyfr.amr.encode_hex_leaf_tree`, not a
-second encoding.
-
-OFFLINE-2D 0054 adds a direct Quad sibling. Quad files use the same leaf-array
-schema plus ``amr/template = quadtree-2x2-v1`` so NativeReader can distinguish
-them from legacy accepted Hex ancestry, whose on-disk representation remains
-unchanged and intentionally carries no template field.
-"""
 from uuid import UUID
 
 import h5py
@@ -41,10 +14,6 @@ from pyfr.util import digest
 
 
 class AdaptedHexReader(BaseReader):
-    """A :class:`BaseReader` whose raw mesh is a pre-built
-    :class:`~pyfr.amrmesh.AdaptedRawMesh` rather than a file on disk.
-    Exists solely so :meth:`BaseReader.write` (UUID computation, default
-    partitioning, HDF5 layout) is reused unchanged."""
 
     name = 'amr-adapted'
 
@@ -125,7 +94,6 @@ class AdaptedHexReader(BaseReader):
 
 
 class AdaptedQuadReader(BaseReader):
-    """A :class:`BaseReader` for a pre-built adapted Quad raw mesh."""
 
     name = 'amr-adapted-quad'
 
@@ -202,7 +170,6 @@ class AdaptedQuadReader(BaseReader):
 
 
 class AdaptedMixedQuadReader(BaseReader):
-    """Reader adapter for mixed Tri+Quad meshes with Quad-only AMR."""
 
     name = 'amr-adapted-mixed-quad'
 
@@ -296,14 +263,6 @@ class AdaptedMixedQuadReader(BaseReader):
 
 
 def build_adapted_quad_mesh(raw, lintol=1e-5, progress=None):
-    """Build the one-rank native :class:`Mesh` for an adapted Quad raw mesh.
-
-    This is the in-memory sibling of :func:`write_adapted_quad_mesh`.  It
-    deliberately reuses ``AdaptedQuadReader._to_raw_mesh`` so element
-    colouring, codec construction, mortar records, UUID calculation, and
-    canonical element numbering are identical to the ordinary native write
-    path without serialising a live adaptation event through ``.pyfrm``.
-    """
     reader = AdaptedQuadReader(raw, progress)
     nodes, eles, codec, periodic, mortars = reader._to_raw_mesh(lintol)
     if periodic:
@@ -416,7 +375,6 @@ def build_adapted_quad_mesh(raw, lintol=1e-5, progress=None):
 
 
 def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
-    """Build one-rank mixed Tri+Quad mesh in memory without serialisation."""
     reader = AdaptedMixedQuadReader(raw, progress)
     nodes, eles, codec, periodic, mortars = reader._to_raw_mesh(lintol)
     if periodic:
@@ -528,12 +486,6 @@ def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
     return mesh
 
 def _append_amr_ancestry(raw, fname):
-    """Append the persistent octree ancestry codec to an already-written
-    adapted ``.pyfrm``. Re-derives the :class:`~pyfr.amr.HexLeafTree` from
-    ``raw.leaf_order`` through the single accepted D5A encoder
-    (:func:`~pyfr.amr.encode_hex_leaf_tree`) rather than writing the
-    arrays out by hand, so the persisted schema is always exactly what
-    D5A's own validator will accept back."""
     tree = encode_hex_leaf_tree(raw.root_mesh_uuid, raw.leaf_order)
 
     with h5py.File(fname, 'a', libver='latest') as f:
@@ -545,21 +497,11 @@ def _append_amr_ancestry(raw, fname):
 
 
 def write_adapted_mesh(raw, fname, lintol=1e-5, progress=None):
-    """Write ``raw`` (an :class:`~pyfr.amrmesh.AdaptedRawMesh`) to
-    ``fname`` as a standard native ``.pyfrm`` file, with the persistent
-    octree ancestry codec (``amr/*``) appended. Root physical UUID
-    reproduction is not required - per the addendum, the written mesh's
-    own freshly computed UUID (from :meth:`BaseReader.write`) is
-    authoritative. ``amr/root-mesh-uuid`` is a *separate* record: the
-    UUID of the immutable pre-adaptation root the tree's leaves reference
-    (``raw.root_mesh_uuid``), not the adapted file's own UUID - these are
-    deliberately different identities serving different purposes."""
     AdaptedHexReader(raw, progress).write(fname, lintol)
     _append_amr_ancestry(raw, fname)
 
 
 def _append_quad_amr_ancestry(raw, fname):
-    """Append typed persistent quadtree ancestry to an adapted Quad mesh."""
     tree = encode_quad_leaf_tree(raw.root_mesh_uuid, raw.leaf_order)
 
     with h5py.File(fname, 'a', libver='latest') as f:
@@ -572,13 +514,11 @@ def _append_quad_amr_ancestry(raw, fname):
 
 
 def write_adapted_quad_mesh(raw, fname, lintol=1e-5, progress=None):
-    """Write an adapted Quad raw mesh with persistent quadtree ancestry."""
     AdaptedQuadReader(raw, progress).write(fname, lintol)
     _append_quad_amr_ancestry(raw, fname)
 
 
 def write_adapted_mixed_quad_mesh(raw, fname, lintol=1e-5, progress=None):
-    """Write mixed Tri+Quad mesh with persistent Quad-only ancestry."""
     AdaptedMixedQuadReader(raw, progress).write(fname, lintol)
     _append_quad_amr_ancestry(raw, fname)
 
@@ -587,7 +527,6 @@ def write_adapted_mixed_quad_mesh(raw, fname, lintol=1e-5, progress=None):
 # ===========================================================================
 
 class AdaptedMixedHexReader(BaseReader):
-    """Reader adapter for mixed Tet+Pyramid+Hex meshes with Hex-only AMR."""
 
     name = 'amr-adapted-mixed-hex'
 
@@ -682,7 +621,6 @@ class AdaptedMixedHexReader(BaseReader):
 
 
 def build_adapted_mixed_hex_mesh(raw, lintol=1e-5, progress=None):
-    """Build one-rank mixed Tet+Pyramid+Hex mesh in memory."""
     reader = AdaptedMixedHexReader(raw, progress)
     nodes, eles, codec, periodic, mortars = reader._to_raw_mesh(lintol)
     if periodic:
@@ -796,6 +734,5 @@ def build_adapted_mixed_hex_mesh(raw, lintol=1e-5, progress=None):
 
 
 def write_adapted_mixed_hex_mesh(raw, fname, lintol=1e-5, progress=None):
-    """Write mixed Tet+Pyramid+Hex mesh with persistent Hex ancestry."""
     AdaptedMixedHexReader(raw, progress).write(fname, lintol)
     _append_amr_ancestry(raw, fname)

@@ -1,4 +1,3 @@
-"""Native accepted-step scheduling for indicator-driven online AMR."""
 from dataclasses import dataclass
 import math
 
@@ -13,7 +12,7 @@ from pyfr.mpiutil import get_comm_rank_root
 
 
 class AMRScheduleError(AMRIndicatorError):
-    """A native AMR schedule is invalid for the current integrator."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -28,7 +27,6 @@ class ScheduledAMREvent:
 
 def _future_schedule_targets(tcurr, tend, dtmin, *, regular_start,
                              schedule_dt, initial_time=None):
-    """Return deterministic future AMR targets strictly before ``tend``."""
     values = (tcurr, tend, dtmin, regular_start, schedule_dt)
     if not all(np.isfinite(v) for v in values):
         raise AMRScheduleError('AMR schedule times must be finite')
@@ -331,7 +329,6 @@ def _write_schedule_checkpoint(intg, mode, checkpoint_dir, scheduled):
 
 
 class NativeAMRSchedule:
-    """One integrator-owned AMR schedule, evaluated only after advance_to."""
 
     def __init__(self, intg):
         cfg = intg.cfg
@@ -356,7 +353,6 @@ class NativeAMRSchedule:
         self.checkpoints = []
 
     def next_target(self, tcurr, requested, dtmin):
-        """Return the next pending AMR target up to ``requested``."""
         for target in self.targets:
             if target in self._completed_targets:
                 continue
@@ -409,7 +405,6 @@ class NativeAMRSchedule:
 
 
 class AMRScheduleMixin:
-    """Integrator mixin activated only by ``[solver-amr] schedule-dt``."""
 
     def __init__(self, *args, **kwargs):
         cfg = kwargs.get('cfg', args[4] if len(args) > 4 else None)

@@ -1,4 +1,3 @@
-"""Ordinary native checkpoints for committed online Quad AMR states."""
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +17,7 @@ from pyfr.writers.native import NativeWriter
 
 
 class OnlineQuadCheckpointError(RuntimeError):
-    """A committed online Quad state cannot be checkpointed safely."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -135,12 +134,6 @@ def _write_solution(intg, mesh, state, outpath):
 
 def write_online_quad_checkpoint(intg, out_mesh_path, out_soln_path, *,
                                  lintol=1e-5):
-    """Write an ordinary native mesh/solution pair after a committed event.
-
-    This operation is deliberately separate from the AMR transaction.  It
-    never participates in PREPARE/BUILD/VALIDATE/COMMIT and therefore cannot
-    turn an output failure into an adaptation rollback claim.
-    """
     mesh, root_mesh, leaves, state = _checkpoint_state(intg)
 
     out_mesh_path = Path(out_mesh_path)
@@ -304,7 +297,6 @@ def _write_mixed_hex_solution(intg, mesh, states, outpath):
 def write_online_mixed_hex_checkpoint(
     intg, out_mesh_path, out_soln_path, *, lintol=1e-5
 ):
-    """Write an ordinary native checkpoint after mixed-3D Hex AMR."""
     mesh, root_mesh, leaves, states = _mixed_hex_checkpoint_state(intg)
     out_mesh_path = Path(out_mesh_path)
     out_soln_path = Path(out_soln_path)
