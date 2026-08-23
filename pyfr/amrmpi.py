@@ -1,11 +1,3 @@
-"""V10 D7A - first multi-rank online Hex AMR transaction.
-
-This module deliberately keeps the accepted single-rank D6 API unchanged.
-D7A adds a separate collective transaction which reuses D3/D5/D6 mechanics
-and PyFR's native partitioning/reader path.  D7D adds an optional deterministic
-ownership policy; explicit canonical leaf -> destination-rank maps remain the
-accepted regression/reference path.
-"""
 from dataclasses import dataclass
 import os
 import re
@@ -42,11 +34,11 @@ from pyfr.writers.serialise import Serialiser
 
 
 class MPIAMRTransactionError(AMRTransactionError):
-    """A collective D7A transaction failed closed before COMMIT."""
+    pass
 
 
 class _CollectiveFailure(MPIAMRTransactionError):
-    """Internal marker: the all-rank failure vote already completed."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -174,11 +166,6 @@ def _validate_mortar_affinity(raw, vparts):
 
 
 def _serial_root_mesh(fname, expected_uuid=None):
-    """Read the complete immutable root mesh directly from native HDF5.
-
-    This helper is rank-0 only.  It intentionally does not invoke NativeReader,
-    whose normal behaviour is partition-local under an MPI communicator.
-    """
     with h5py.File(fname, 'r') as f:
         if 'amr' in f:
             raise MPIAMRTransactionError(
@@ -266,7 +253,6 @@ def _serial_root_mesh(fname, expected_uuid=None):
 
 
 def _serial_mixed_root_mesh(fname, expected_uuid=None):
-    """Read one complete Tet+Pyramid+Hex root on rank zero."""
     with h5py.File(fname, 'r') as f:
         if 'amr' in f:
             raise MPIAMRTransactionError(
@@ -377,7 +363,6 @@ def _serial_mixed_root_mesh(fname, expected_uuid=None):
 
 
 def _distributed_mixed_current_tree(mesh, comm):
-    """Return the global Hex tree and this rank's local leaf columns."""
     geidx = np.asarray(mesh.eidxs.get('hex', ()), dtype=np.int64)
     if geidx.ndim != 1 or len(np.unique(geidx)) != len(geidx):
         raise MPIAMRTransactionError('V10K local Hex ids are invalid')
@@ -1006,14 +991,12 @@ def _validate_mpi_integrator(intg):
 
 
 def _physical_hex_volume(spts, basis):
-    """Return represented Hex volume via the accepted geometry integrator."""
     spts = np.asarray(spts)
     state = np.ones((basis.nupts, 1, spts.shape[1]), dtype=spts.dtype)
     return float(_physical_hex_conserved_totals(state, spts, basis)[0])
 
 
 def _validate_mpi_mixed_hex_integrator(intg):
-    """Validate the narrow V10K K2 distributed mixed-3D lifecycle."""
     comm, _, _ = get_comm_rank_root()
     if comm.size not in {2, 4}:
         raise MPIAMRTransactionError(
@@ -1391,7 +1374,6 @@ def _remove_stage(comm, path):
 def perform_one_mpi_mixed_hex_amr_transaction(
     intg, local_scripted_marks, *, shared_stage_dir, repartition=False
 ):
-    """Commit one mixed-3D Hex refinement collectively on two ranks."""
     comm, _, _ = get_comm_rank_root()
     try:
         comm, system, mesh, root_mesh = _validate_mpi_mixed_hex_integrator(
@@ -1853,15 +1835,6 @@ def perform_one_mpi_amr_transaction(
     intg, local_scripted_marks, destination_parts=None, *, shared_stage_dir,
     action='refine', ownership_policy=None
 ):
-    """Commit one collective refine or coarsen AMR event on all MPI ranks.
-
-    ``local_scripted_marks`` contains only leaves owned by the calling rank.
-    ``destination_parts`` may be the same explicit proposed leaf -> rank
-    mapping on every rank, or ``None`` to use D7D ``balanced-affinity-v1``
-    ownership.
-    Coarsening accepts one or more disjoint D4-legal eight-sibling families.
-    The call must be entered collectively after ``advance_to``.
-    """
     comm, _, _ = get_comm_rank_root()
     try:
         comm, system, mesh, root_mesh = _validate_mpi_integrator(intg)
