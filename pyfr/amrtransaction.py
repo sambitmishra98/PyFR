@@ -1481,6 +1481,33 @@ def _validate_staged_quad_transfer(
     return after, error, rho_range, pressure_range
 
 
+def _prepare_quad_state(intg, system, old_leaves, bank):
+    from pyfr.amroffline import _validate_state
+
+    old_shape, _ = _single_quad_bank(system, bank, 'accepted')
+    scratch_bank = _scratch_bank(system, bank)
+    parts = _copy_state(system, bank)
+    if len(parts) != 1 or tuple(parts[0].shape) != old_shape:
+        raise AMRTransactionError(
+            'ONLINE2D-1 accepted Quad bank readback is invalid'
+        )
+
+    old_state = parts[0]
+    if old_shape[2] != len(old_leaves):
+        raise AMRTransactionError(
+            'ONLINE2D-1 Quad leaves do not map to the accepted bank'
+        )
+
+    fields = tuple(system.elementscls.convars(system.ndims, intg.cfg))
+    gamma = intg.cfg.getfloat('constants', 'gamma')
+    state_indices = _validate_state(old_state, fields, gamma)
+    rho_range, pressure_range = _eos_ranges(system, old_state)
+    return (
+        scratch_bank, old_state, fields, gamma, state_indices, rho_range,
+        pressure_range
+    )
+
+
 def perform_indicator_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -1494,7 +1521,7 @@ def perform_indicator_quad_amr_transaction(
     """
     from pyfr.amrindicator import density_velocity_variation_scores
     from pyfr.amroffline import (
-        _close_2to1, _current_column_leaves, _split_nodes, _validate_state,
+        _close_2to1, _current_column_leaves, _split_nodes,
         _wall_floor_splits,
     )
 
@@ -1522,25 +1549,11 @@ def perform_indicator_quad_amr_transaction(
         )
 
     bank = intg.idxcurr
-    old_shape, _ = _single_quad_bank(system, bank, 'accepted')
-    scratch_bank = _scratch_bank(system, bank)
-    parts = _copy_state(system, bank)
-    if len(parts) != 1 or tuple(parts[0].shape) != old_shape:
-        raise AMRTransactionError(
-            'ONLINE2D-1 accepted Quad bank readback is invalid'
-        )
-    old_state = parts[0]
-    if old_shape[2] != len(old_leaves):
-        raise AMRTransactionError(
-            'ONLINE2D-1 Quad leaves do not map to the accepted bank'
-        )
-
-    fields = tuple(system.elementscls.convars(system.ndims, intg.cfg))
-    gamma = intg.cfg.getfloat('constants', 'gamma')
-    irho, irhou, irhov, ienergy = _validate_state(
-        old_state, fields, gamma
-    )
-    old_rho, old_pressure = _eos_ranges(system, old_state)
+    (
+        scratch_bank, old_state, fields, gamma, state_indices, old_rho,
+        old_pressure
+    ) = _prepare_quad_state(intg, system, old_leaves, bank)
+    irho, irhou, irhov, ienergy = state_indices
     scores = density_velocity_variation_scores(
         old_state, density_index=irho,
         momentum_indices=(irhou, irhov), energy_index=ienergy,
