@@ -374,14 +374,10 @@ def build_adapted_quad_mesh(raw, lintol=1e-5, progress=None):
     return mesh
 
 
-def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
-    reader = AdaptedMixedQuadReader(raw, progress)
-    nodes, eles, codec, periodic, mortars = reader._to_raw_mesh(lintol)
-    if periodic:
-        raise ValueError('adapted mixed Quad mesh must be nonperiodic')
-    if set(eles) != {'tri', 'quad'}:
-        raise ValueError('adapted mixed mesh must contain Tri+Quad elements')
-
+def _assemble_adapted_mixed_mesh(
+    raw, nodes, eles, codec, periodic, mortars, tree_encoder, fname,
+    error_prefix
+):
     etypes = sorted(eles)
     eidxs = {
         etype: np.arange(len(eles[etype]), dtype=np.int64)
@@ -409,7 +405,7 @@ def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
     rcidx = np.concatenate(rcidx)
     reidx = np.concatenate(reidx)
     if np.any(reidx < -2):
-        raise ValueError('adapted mixed face has invalid offset')
+        raise ValueError(f'{error_prefix} face has invalid offset')
 
     is_boundary = reidx == -1
     is_mortar = reidx == -2
@@ -431,12 +427,11 @@ def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
     for bccidx in np.unique(rcidx[is_boundary]):
         name = codec[int(bccidx)]
         if not name.startswith('bc/'):
-            raise ValueError('adapted mixed boundary has invalid codec')
+            raise ValueError(f'{error_prefix} boundary has invalid codec')
         mask = is_boundary & (rcidx == bccidx)
         bcon[name[3:]] = con(lcidx[mask], leidx[mask])
 
-    marked = set(zip(lcidx[is_mortar].tolist(),
-                     leidx[is_mortar].tolist()))
+    marked = set(zip(lcidx[is_mortar].tolist(), leidx[is_mortar].tolist()))
     mcon = {}
     for name, minfo in mortars.items():
         records = np.array(minfo.records, copy=True)
@@ -450,7 +445,7 @@ def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
                 )
             )
         if not refs <= marked:
-            raise ValueError('adapted mixed mortar metadata mismatch')
+            raise ValueError(f'{error_prefix} mortar metadata mismatch')
         mcon[name] = MortarConnectivity(
             name, records, cidxmap, format=minfo.format,
             template=minfo.template,
@@ -466,10 +461,10 @@ def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
         etype: nodes[einfo['nodes']].swapaxes(0, 1)
         for etype, einfo in eles.items()
     }
-    tree = encode_quad_leaf_tree(raw.root_mesh_uuid, raw.leaf_order)
+    tree = tree_encoder(raw.root_mesh_uuid, raw.leaf_order)
     uuid = str(UUID(digest((nodes, eles, codec, periodic, mortars))[:32]))
     mesh = Mesh(
-        fname='<online-mixed-quad-amr>', raw={}, ndims=nodes.shape[1],
+        fname=fname, raw={}, ndims=nodes.shape[1],
         creator=f'pyfr {__version__}', codec=list(codec), uuid=uuid,
         version=2, etypes=etypes, eidxs=eidxs, spts=spts,
         spts_nodes={et: eles[et]['nodes'] for et in etypes},
@@ -484,6 +479,19 @@ def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
         eles, node_idxs, node_valency
     ).compute()
     return mesh
+
+
+def build_adapted_mixed_quad_mesh(raw, lintol=1e-5, progress=None):
+    reader = AdaptedMixedQuadReader(raw, progress)
+    nodes, eles, codec, periodic, mortars = reader._to_raw_mesh(lintol)
+    if periodic:
+        raise ValueError('adapted mixed Quad mesh must be nonperiodic')
+    if set(eles) != {'tri', 'quad'}:
+        raise ValueError('adapted mixed mesh must contain Tri+Quad elements')
+    return _assemble_adapted_mixed_mesh(
+        raw, nodes, eles, codec, periodic, mortars, encode_quad_leaf_tree,
+        '<online-mixed-quad-amr>', 'adapted mixed'
+    )
 
 def _append_amr_ancestry(raw, fname):
     tree = encode_hex_leaf_tree(raw.root_mesh_uuid, raw.leaf_order)
@@ -629,108 +637,10 @@ def build_adapted_mixed_hex_mesh(raw, lintol=1e-5, progress=None):
         raise ValueError(
             'adapted mixed Hex mesh must contain Tet+Pyramid+Hex elements'
         )
-
-    etypes = sorted(eles)
-    eidxs = {
-        etype: np.arange(len(eles[etype]), dtype=np.int64)
-        for etype in etypes
-    }
-    cidxmap = {}
-    for cidx, value in enumerate(codec):
-        for etype, einfo in eles.items():
-            for fidx in range(einfo['faces'].shape[-1]):
-                if value == f'eles/{etype}/face/{fidx}':
-                    cidxmap[cidx] = etype, fidx
-
-    lcidx, leidx, rcidx, reidx = [], [], [], []
-    for etype, einfo in eles.items():
-        ne = len(einfo)
-        for fidx, eface in enumerate(einfo['faces'].T):
-            own = codec.index(f'eles/{etype}/face/{fidx}')
-            lcidx.append(np.full(ne, own, dtype=np.int16))
-            leidx.append(np.arange(ne, dtype=np.int64))
-            rcidx.append(np.asarray(eface['cidx'], dtype=np.int16))
-            reidx.append(np.asarray(eface['off'], dtype=np.int64))
-
-    lcidx = np.concatenate(lcidx)
-    leidx = np.concatenate(leidx)
-    rcidx = np.concatenate(rcidx)
-    reidx = np.concatenate(reidx)
-    if np.any(reidx < -2):
-        raise ValueError('adapted mixed Hex face has invalid offset')
-
-    is_boundary = reidx == -1
-    is_mortar = reidx == -2
-    is_local = reidx >= 0
-    stride = max((len(e) for e in eles.values()), default=0) + 1
-    lkey = lcidx[is_local].astype(np.int64)*stride + leidx[is_local]
-    rkey = rcidx[is_local].astype(np.int64)*stride + reidx[is_local]
-    iidxs = np.flatnonzero(is_local)[lkey < rkey]
-
-    def con(cidxs, idxs):
-        return Connectivity(
-            np.asarray(cidxs, dtype=np.int16),
-            np.asarray(idxs, dtype=np.int64), cidxmap,
-        )
-
-    con_l = con(lcidx[iidxs], leidx[iidxs])
-    con_r = con(rcidx[iidxs], reidx[iidxs])
-    bcon = {}
-    for bccidx in np.unique(rcidx[is_boundary]):
-        name = codec[int(bccidx)]
-        if not name.startswith('bc/'):
-            raise ValueError('adapted mixed Hex boundary has invalid codec')
-        mask = is_boundary & (rcidx == bccidx)
-        bcon[name[3:]] = con(lcidx[mask], leidx[mask])
-
-    marked = set(zip(lcidx[is_mortar].tolist(), leidx[is_mortar].tolist()))
-    mcon = {}
-    for name, minfo in mortars.items():
-        records = np.array(minfo.records, copy=True)
-        refs = set()
-        for rec in records:
-            refs.add((int(rec['left_cidx']), int(rec['left_eidx'])))
-            refs.update(
-                (int(cidx), int(eidx))
-                for cidx, eidx in zip(
-                    rec['right_cidx'], rec['right_eidx']
-                )
-            )
-        if not refs <= marked:
-            raise ValueError('adapted mixed Hex mortar metadata mismatch')
-        mcon[name] = MortarConnectivity(
-            name, records, cidxmap, format=minfo.format,
-            template=minfo.template,
-        )
-
-    node_idxs = np.arange(len(nodes), dtype=np.int64)
-    node_valency = np.zeros(len(nodes), dtype=np.uint16)
-    for einfo in eles.values():
-        idx, count = np.unique(einfo['nodes'], return_counts=True)
-        node_valency[idx] += count.astype(np.uint16)
-
-    spts = {
-        etype: nodes[einfo['nodes']].swapaxes(0, 1)
-        for etype, einfo in eles.items()
-    }
-    tree = encode_hex_leaf_tree(raw.root_mesh_uuid, raw.leaf_order)
-    uuid = str(UUID(digest((nodes, eles, codec, periodic, mortars))[:32]))
-    mesh = Mesh(
-        fname='<online-mixed-hex-amr>', raw={}, ndims=nodes.shape[1],
-        creator=f'pyfr {__version__}', codec=list(codec), uuid=uuid,
-        version=2, etypes=etypes, eidxs=eidxs, spts=spts,
-        spts_nodes={et: eles[et]['nodes'] for et in etypes},
-        spts_curved={et: eles[et]['curved'] for et in etypes},
-        colours={et: eles[et]['colour'] for et in etypes},
-        tags={et: eles[et]['tags'] for et in etypes},
-        con=(con_l, con_r), con_p={}, bcon=bcon, mcon=mcon,
-        cidxmap=cidxmap, node_idxs=node_idxs, node_valency=node_valency,
-        node_locs=np.asarray(nodes), amr_tree=tree,
+    return _assemble_adapted_mixed_mesh(
+        raw, nodes, eles, codec, periodic, mortars, encode_hex_leaf_tree,
+        '<online-mixed-hex-amr>', 'adapted mixed Hex'
     )
-    mesh.shared_nodes = SharedNodesFinder(
-        eles, node_idxs, node_valency
-    ).compute()
-    return mesh
 
 
 def write_adapted_mixed_hex_mesh(raw, fname, lintol=1e-5, progress=None):
