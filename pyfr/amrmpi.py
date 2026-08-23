@@ -996,6 +996,53 @@ def _physical_hex_volume(spts, basis):
     return float(_physical_hex_conserved_totals(state, spts, basis)[0])
 
 
+def _prepare_local_mixed_hex_transfer(
+    intg, mesh, stage_mesh, stage_system, old_states, readback, repartition
+):
+    nvars = next(iter(old_states.values())).shape[1]
+    basis = HexShape(None, intg.cfg)
+    if 'hex' in old_states:
+        old_local = _physical_hex_conserved_totals(
+            old_states['hex'], mesh.spts['hex'], basis
+        )
+        old_vol_local = _physical_hex_volume(mesh.spts['hex'], basis)
+    else:
+        old_local = np.zeros(nvars, dtype=float)
+        old_vol_local = 0.0
+    if 'hex' in readback:
+        new_local = _physical_hex_conserved_totals(
+            readback['hex'], stage_mesh.spts['hex'], basis
+        )
+        new_vol_local = _physical_hex_volume(stage_mesh.spts['hex'], basis)
+    else:
+        new_local = np.zeros(nvars, dtype=float)
+        new_vol_local = 0.0
+
+    rr, pr = [], []
+    for state in readback.values():
+        rho, pressure = _eos_ranges(stage_system, state)
+        rr.append(rho)
+        pr.append(pressure)
+    local_rho = min(r[0] for r in rr), max(r[1] for r in rr)
+    local_pressure = min(p[0] for p in pr), max(p[1] for p in pr)
+
+    if not repartition:
+        for etype in ('pyr', 'tet'):
+            if etype in readback:
+                expected = _reorder_fixed_state(
+                    mesh, stage_mesh, old_states, etype
+                )
+                if not np.array_equal(readback[etype], expected):
+                    raise MPIAMRTransactionError(
+                        f'V10K immutable {etype} state drifted'
+                    )
+
+    return (
+        old_local, new_local, old_vol_local, new_vol_local, local_rho,
+        local_pressure
+    )
+
+
 def _validate_global_mixed_hex_transfer(
     comm, old_local, new_local, old_vol_local, new_vol_local, local_rho,
     local_pressure, dtype
@@ -1636,42 +1683,13 @@ def perform_one_mpi_mixed_hex_amr_transaction(
 
         local_error = None
         try:
-            nvars = next(iter(old_states.values())).shape[1]
-            basis = HexShape(None, intg.cfg)
-            if 'hex' in old_states:
-                old_local = _physical_hex_conserved_totals(
-                    old_states['hex'], mesh.spts['hex'], basis
-                )
-                old_vol_local = _physical_hex_volume(mesh.spts['hex'], basis)
-            else:
-                old_local = np.zeros(nvars, dtype=float)
-                old_vol_local = 0.0
-            if 'hex' in readback:
-                new_local = _physical_hex_conserved_totals(
-                    readback['hex'], stage_mesh.spts['hex'], basis
-                )
-                new_vol_local = _physical_hex_volume(stage_mesh.spts['hex'], basis)
-            else:
-                new_local = np.zeros(nvars, dtype=float)
-                new_vol_local = 0.0
-
-            rr, pr = [], []
-            for state in readback.values():
-                rho, pressure = _eos_ranges(stage_system, state)
-                rr.append(rho); pr.append(pressure)
-            local_rho = (min(r[0] for r in rr), max(r[1] for r in rr))
-            local_pressure = (min(p[0] for p in pr), max(p[1] for p in pr))
-
-            if not repartition:
-                for etype in ('pyr', 'tet'):
-                    if etype in readback:
-                        expected = _reorder_fixed_state(
-                            mesh, stage_mesh, old_states, etype
-                        )
-                        if not np.array_equal(readback[etype], expected):
-                            raise MPIAMRTransactionError(
-                                f'V10K immutable {etype} state drifted'
-                            )
+            (
+                old_local, new_local, old_vol_local, new_vol_local,
+                local_rho, local_pressure
+            ) = _prepare_local_mixed_hex_transfer(
+                intg, mesh, stage_mesh, stage_system, old_states, readback,
+                repartition
+            )
         except Exception as exc:
             local_error = exc
         _collective_error(comm, 'V10K local physics gates', local_error)
