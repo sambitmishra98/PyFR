@@ -1742,6 +1742,20 @@ def _order_fixed_quad2x2_faces(coarse_nodes, fine_faces, store, tol=1e-10):
     return tuple(ordered)
 
 
+def _validate_mixed_hex_fixed_balance(groups, fixed):
+    for surface in fixed:
+        fragments = [
+            frag for side in groups.get(surface, {}).values() for frag in side
+        ]
+        if not fragments:
+            raise AMRMeshError('Mixed immutable interface has no Hex side')
+        if max(f['level'] for f in fragments) > 1:
+            raise AMRMeshError(
+                'Hex refinement exceeds 2:1 against immutable Pyramid '
+                'neighbour'
+            )
+
+
 def materialize_native_mixed_hex_tree(mesh, tree, *, comm_size=1):
     """Materialize affine Tet+Pyramid+Hex topology while adapting only Hexes."""
     _validate_mixed_hex_scope(mesh, tree, comm_size)
@@ -1755,19 +1769,7 @@ def materialize_native_mixed_hex_tree(mesh, tree, *, comm_size=1):
     leaves = list(tree.leaves())
     groups, pairs = _validate_balanced_and_pair(leaves, rootfaces, rootkinds)
 
-    # Immutable Pyramid neighbours are level 0.  A touching Hex may be L0
-    # or L1, but direct L2 contact is illegal.
-    for surface in fixed:
-        fragments = [
-            frag for side in groups.get(surface, {}).values() for frag in side
-        ]
-        if not fragments:
-            raise AMRMeshError('Mixed immutable interface has no Hex side')
-        if max(f['level'] for f in fragments) > 1:
-            raise AMRMeshError(
-                'Hex refinement exceeds 2:1 against immutable Pyramid '
-                'neighbour'
-            )
+    _validate_mixed_hex_fixed_balance(groups, fixed)
 
     store = _NativeNodeStore(mesh.node_idxs, mesh.node_locs)
     leaf_pids = _materialize_isoparametric_hex_leaves(
