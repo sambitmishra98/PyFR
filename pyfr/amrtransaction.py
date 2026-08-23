@@ -1954,8 +1954,8 @@ def _prepare_mixed_quad_transfer(
     return qbasis, tbasis, transferred, before, tol
 
 
-def _build_staged_mixed_quad_system(
-    intg, system, stage_mesh, transferred, bank
+def _build_staged_mixed_system(
+    intg, system, stage_mesh, transferred, bank, inject_bank
 ):
     staged = Solution(
         config=intg.cfg, stats=None, fields=None,
@@ -1968,7 +1968,7 @@ def _build_staged_mixed_quad_system(
         intg.cfg, stage_serialiser, needs_cfl=False,
     )
     stage_system.commit()
-    staged_states, stage_shapes = _inject_staged_mixed_bank(
+    staged_states, stage_shapes = inject_bank(
         stage_system, transferred, bank
     )
     return stage_system, stage_serialiser, staged_states, stage_shapes
@@ -2178,8 +2178,9 @@ def perform_indicator_mixed_quad_amr_transaction(
     stage_system = None
     try:
         stage_system, stage_serialiser, staged_states, stage_shapes = (
-            _build_staged_mixed_quad_system(
-                intg, system, stage_mesh, transferred, bank
+            _build_staged_mixed_system(
+                intg, system, stage_mesh, transferred, bank,
+                _inject_staged_mixed_bank
             )
         )
 
@@ -2596,26 +2597,6 @@ def _validate_proposed_mixed_hex_transfer(
     return tol, scale
 
 
-def _build_staged_mixed_hex_system(
-    intg, system, stage_mesh, transferred, bank
-):
-    staged = Solution(
-        config=intg.cfg, stats=None, fields=None,
-        data={et: np.array(v, copy=True) for et, v in transferred.items()},
-        state={},
-    )
-    stage_serialiser = Serialiser()
-    stage_system = type(system)(
-        intg.backend, stage_mesh, staged, intg._registers,
-        intg.cfg, stage_serialiser, needs_cfl=False,
-    )
-    stage_system.commit()
-    staged_states, stage_shapes = _inject_staged_mixed_hex_bank(
-        stage_system, transferred, bank
-    )
-    return stage_system, stage_serialiser, staged_states, stage_shapes
-
-
 def _validate_staged_mixed_hex_transfer(
     stage_system, stage_mesh, staged_states, basis, before, tol, scale
 ):
@@ -2723,8 +2704,9 @@ def _commit_mixed_hex_refinement(
     stage_system = None
     try:
         stage_system, stage_serialiser, staged_states, stage_shapes = (
-            _build_staged_mixed_hex_system(
-                intg, system, stage_mesh, transferred, bank
+            _build_staged_mixed_system(
+                intg, system, stage_mesh, transferred, bank,
+                _inject_staged_mixed_hex_bank
             )
         )
 
