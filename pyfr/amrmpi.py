@@ -1043,15 +1043,15 @@ def _prepare_local_mixed_hex_transfer(
     )
 
 
-def _validate_global_mixed_hex_transfer(
+def _global_hex_transfer_totals(
     comm, old_local, new_local, old_vol_local, new_vol_local, local_rho,
-    local_pressure, dtype
+    local_pressure
 ):
     before = np.array(old_local, copy=True)
     after = np.array(new_local, copy=True)
     comm.Allreduce(mpi.IN_PLACE, before, op=mpi.SUM)
     comm.Allreduce(mpi.IN_PLACE, after, op=mpi.SUM)
-    cons_error = after - before
+    error = after - before
     old_volume = scal_coll(comm.Allreduce, old_vol_local, op=mpi.SUM)
     proposed_volume = scal_coll(comm.Allreduce, new_vol_local, op=mpi.SUM)
     rho_range = (
@@ -1061,6 +1061,23 @@ def _validate_global_mixed_hex_transfer(
     pressure_range = (
         scal_coll(comm.Allreduce, local_pressure[0], op=mpi.MIN),
         scal_coll(comm.Allreduce, local_pressure[1], op=mpi.MAX),
+    )
+    return (
+        before, after, error, old_volume, proposed_volume, rho_range,
+        pressure_range
+    )
+
+
+def _validate_global_mixed_hex_transfer(
+    comm, old_local, new_local, old_vol_local, new_vol_local, local_rho,
+    local_pressure, dtype
+):
+    (
+        before, after, cons_error, old_volume, proposed_volume, rho_range,
+        pressure_range
+    ) = _global_hex_transfer_totals(
+        comm, old_local, new_local, old_vol_local, new_vol_local, local_rho,
+        local_pressure
     )
 
     tol = 8192*np.finfo(dtype).eps
@@ -2203,20 +2220,12 @@ def perform_one_mpi_amr_transaction(
             local_error = exc
         _collective_error(comm, 'local conservation and EOS', local_error)
 
-        before = np.array(old_local, copy=True)
-        after = np.array(new_local, copy=True)
-        comm.Allreduce(mpi.IN_PLACE, before, op=mpi.SUM)
-        comm.Allreduce(mpi.IN_PLACE, after, op=mpi.SUM)
-        error = after - before
-        old_volume = scal_coll(comm.Allreduce, old_vol_local, op=mpi.SUM)
-        proposed_volume = scal_coll(comm.Allreduce, new_vol_local, op=mpi.SUM)
-        rho_range = (
-            scal_coll(comm.Allreduce, local_rho[0], op=mpi.MIN),
-            scal_coll(comm.Allreduce, local_rho[1], op=mpi.MAX),
-        )
-        pressure_range = (
-            scal_coll(comm.Allreduce, local_pressure[0], op=mpi.MIN),
-            scal_coll(comm.Allreduce, local_pressure[1], op=mpi.MAX),
+        (
+            before, after, error, old_volume, proposed_volume, rho_range,
+            pressure_range
+        ) = _global_hex_transfer_totals(
+            comm, old_local, new_local, old_vol_local, new_vol_local,
+            local_rho, local_pressure
         )
 
         tol = 8192*np.finfo(old_state.dtype).eps
