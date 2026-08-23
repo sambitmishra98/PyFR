@@ -1539,19 +1539,9 @@ def _remove_stage(comm, path):
     comm.barrier()
 
 
-def perform_one_mpi_mixed_hex_amr_transaction(
-    intg, local_scripted_marks, *, shared_stage_dir, repartition=False
+def _agree_mixed_hex_topology(
+    intg, mesh, local_scripted_marks, repartition, comm
 ):
-    comm, _, _ = get_comm_rank_root()
-    try:
-        comm, system, mesh, root_mesh = _validate_mpi_mixed_hex_integrator(
-            intg
-        )
-    except Exception as exc:
-        _collective_error(comm, 'V10K integrator validation', exc)
-        raise AssertionError('unreachable')
-    _collective_error(comm, 'V10K integrator validation')
-
     repartitions = comm.allgather(bool(repartition))
     if len(set(repartitions)) != 1:
         _collective_error(
@@ -1605,7 +1595,31 @@ def perform_one_mpi_mixed_hex_amr_transaction(
             )
         )
     old_epoch = int(old_epoch)
-    new_epoch = old_epoch + 1
+    return (
+        repartition, old_tree, local_by_leaf, old_parts, global_marks,
+        old_epoch, old_epoch + 1
+    )
+
+
+def perform_one_mpi_mixed_hex_amr_transaction(
+    intg, local_scripted_marks, *, shared_stage_dir, repartition=False
+):
+    comm, _, _ = get_comm_rank_root()
+    try:
+        comm, system, mesh, root_mesh = _validate_mpi_mixed_hex_integrator(
+            intg
+        )
+    except Exception as exc:
+        _collective_error(comm, 'V10K integrator validation', exc)
+        raise AssertionError('unreachable')
+    _collective_error(comm, 'V10K integrator validation')
+
+    (
+        repartition, old_tree, local_by_leaf, old_parts, global_marks,
+        old_epoch, new_epoch
+    ) = _agree_mixed_hex_topology(
+        intg, mesh, local_scripted_marks, repartition, comm
+    )
 
     root_fnames = comm.allgather(os.path.abspath(root_mesh.fname))
     if len(set(root_fnames)) != 1:
