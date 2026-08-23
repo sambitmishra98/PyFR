@@ -1916,18 +1916,9 @@ def perform_one_mpi_mixed_hex_amr_transaction(
         raise failure
 
 
-def perform_one_mpi_amr_transaction(
-    intg, local_scripted_marks, destination_parts=None, *, shared_stage_dir,
-    action='refine', ownership_policy=None
+def _agree_hex_topology(
+    mesh, local_scripted_marks, destination_parts, action, ownership_policy, comm
 ):
-    comm, _, _ = get_comm_rank_root()
-    try:
-        comm, system, mesh, root_mesh = _validate_mpi_integrator(intg)
-    except Exception as exc:
-        _collective_error(comm, 'integrator validation', exc)
-        raise AssertionError('unreachable')
-    _collective_error(comm, 'integrator validation')
-
     actions = comm.allgather(action)
     if len(set(actions)) != 1 or actions[0] not in {'refine', 'coarsen'}:
         _collective_error(
@@ -1961,8 +1952,7 @@ def perform_one_mpi_amr_transaction(
         mark_error = MPIAMRTransactionError(
             'D7 refinement requires at least one global mark'
         )
-    elif action == 'coarsen' and (not flat_marks or
-                                   len(flat_marks) % 8):
+    elif action == 'coarsen' and (not flat_marks or len(flat_marks) % 8):
         mark_error = MPIAMRTransactionError(
             'D9J coarsening requires a positive multiple of eight marks'
         )
@@ -2015,6 +2005,32 @@ def perform_one_mpi_amr_transaction(
                 'D7D current ownership does not cover the old tree exactly'
             )
         )
+
+    return (
+        action, old_tree, local_by_leaf, global_marks, policy_mode,
+        ownership_policy, old_parts
+    )
+
+
+def perform_one_mpi_amr_transaction(
+    intg, local_scripted_marks, destination_parts=None, *, shared_stage_dir,
+    action='refine', ownership_policy=None
+):
+    comm, _, _ = get_comm_rank_root()
+    try:
+        comm, system, mesh, root_mesh = _validate_mpi_integrator(intg)
+    except Exception as exc:
+        _collective_error(comm, 'integrator validation', exc)
+        raise AssertionError('unreachable')
+    _collective_error(comm, 'integrator validation')
+
+    (
+        action, old_tree, local_by_leaf, global_marks, policy_mode,
+        ownership_policy, old_parts
+    ) = _agree_hex_topology(
+        mesh, local_scripted_marks, destination_parts, action,
+        ownership_policy, comm
+    )
 
     # The immutable root file path and ownership mode must agree on every
     # rank before root-only materialisation begins.
