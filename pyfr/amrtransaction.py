@@ -2061,6 +2061,31 @@ def _validate_staged_mixed_quad_rhs(
     return rhs, bank_drift, sum(stage_system.ele_ndofs)
 
 
+def _prepare_mixed_quad_state(intg, system, root_mesh, old_leaves, bank):
+    from pyfr.amroffline import _validate_state
+
+    bankmap = _uniform_etype_bank_map(system, bank, 'accepted')
+    scratch_bank = _scratch_bank(system, bank)
+    old = _copy_state_by_etype(system, bank)
+    qshape, tshape = bankmap['quad'][0], bankmap['tri'][0]
+    if tuple(old['quad'].shape) != qshape or tuple(old['tri'].shape) != tshape:
+        raise AMRTransactionError('MIX2D1 accepted bank readback mismatch')
+    if qshape[2] != len(old_leaves):
+        raise AMRTransactionError('MIX2D1 Quad bank/leaf count mismatch')
+    if tshape[2] != len(root_mesh.eidxs['tri']):
+        raise AMRTransactionError('MIX2D1 immutable Tri bank count mismatch')
+
+    fields = tuple(system.elementscls.convars(system.ndims, intg.cfg))
+    gamma = intg.cfg.getfloat('constants', 'gamma')
+    state_indices = _validate_state(old['quad'], fields, gamma)
+    _validate_state(old['tri'], fields, gamma)
+    rho_range, pressure_range = _combined_eos_ranges(system, old)
+    return (
+        scratch_bank, old, fields, gamma, state_indices, rho_range,
+        pressure_range
+    )
+
+
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
@@ -2093,24 +2118,13 @@ def perform_indicator_mixed_quad_amr_transaction(
     old_tree = encode_quad_leaf_tree(root_mesh.uuid, old_leaves)
 
     bank = intg.idxcurr
-    bankmap = _uniform_etype_bank_map(system, bank, 'accepted')
-    scratch_bank = _scratch_bank(system, bank)
-    old = _copy_state_by_etype(system, bank)
-    qshape, tshape = bankmap['quad'][0], bankmap['tri'][0]
-    if tuple(old['quad'].shape) != qshape or tuple(old['tri'].shape) != tshape:
-        raise AMRTransactionError('MIX2D1 accepted bank readback mismatch')
-    if qshape[2] != len(old_leaves):
-        raise AMRTransactionError('MIX2D1 Quad bank/leaf count mismatch')
-    if tshape[2] != len(root_mesh.eidxs['tri']):
-        raise AMRTransactionError('MIX2D1 immutable Tri bank count mismatch')
-
-    fields = tuple(system.elementscls.convars(system.ndims, intg.cfg))
-    gamma = intg.cfg.getfloat('constants', 'gamma')
-    irho, irhou, irhov, ienergy = _validate_state(
-        old['quad'], fields, gamma
+    (
+        scratch_bank, old, fields, gamma, state_indices, old_rho,
+        old_pressure
+    ) = _prepare_mixed_quad_state(
+        intg, system, root_mesh, old_leaves, bank
     )
-    _validate_state(old['tri'], fields, gamma)
-    old_rho, old_pressure = _combined_eos_ranges(system, old)
+    irho, irhou, irhov, ienergy = state_indices
 
     scores = density_velocity_variation_scores(
         old['quad'], density_index=irho,
