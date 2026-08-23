@@ -1125,6 +1125,45 @@ def _validate_staged_mixed_hex_rhs(
 
     return rhs, bank_drift, scratch_bank
 
+
+def _validate_mixed_hex_precommit(
+    comm, stage_mesh, stage_system, stage_mortar_expected, stage_uuid,
+    new_epoch, proposed_tree, repartition
+):
+    local_mortars = sum(len(m) for m in stage_mesh.mcon.values())
+    mortar_count = scal_coll(comm.Allreduce, local_mortars, op=mpi.SUM)
+    local_mpi_faces = sum(len(c) for c in stage_mesh.con_p.values())
+    mpi_incidence = scal_coll(
+        comm.Allreduce, local_mpi_faces, op=mpi.SUM
+    )
+
+    final_error = None
+    if mortar_count != stage_mortar_expected:
+        final_error = MPIAMRTransactionError(
+            'V10K distributed mortar count differs from materialization'
+        )
+    elif mpi_incidence % 2 or mpi_incidence == 0:
+        final_error = MPIAMRTransactionError(
+            'V10K staged MPI connectivity is missing or asymmetric'
+        )
+    _collective_error(comm, 'V10K pre-COMMIT validation', final_error)
+
+    commit_signature = (
+        stage_uuid, new_epoch, tuple(proposed_tree.leaves()), bool(repartition)
+    )
+    commit_signatures = comm.allgather(commit_signature)
+    commit_error = None
+    if len(set(commit_signatures)) != 1:
+        commit_error = MPIAMRTransactionError(
+            'V10K ranks disagree on the proposed COMMIT identity'
+        )
+    _collective_error(comm, 'V10K COMMIT agreement', commit_error)
+
+    staged_gndofs = scal_coll(
+        comm.Allreduce, sum(stage_system.ele_ndofs), op=mpi.SUM
+    )
+    return mortar_count, mpi_incidence // 2, staged_gndofs
+
 def _validate_mpi_mixed_hex_integrator(intg):
     comm, _, _ = get_comm_rank_root()
     if comm.size not in {2, 4}:
@@ -1758,38 +1797,9 @@ def perform_one_mpi_mixed_hex_amr_transaction(
             old_error = exc
         _collective_error(comm, 'V10K old-system rollback guard', old_error)
 
-        local_mortars = sum(len(m) for m in stage_mesh.mcon.values())
-        mortar_count = scal_coll(comm.Allreduce, local_mortars, op=mpi.SUM)
-        local_mpi_faces = sum(len(c) for c in stage_mesh.con_p.values())
-        mpi_incidence = scal_coll(
-            comm.Allreduce, local_mpi_faces, op=mpi.SUM
-        )
-        final_error = None
-        if mortar_count != stage_mortar_expected:
-            final_error = MPIAMRTransactionError(
-                'V10K distributed mortar count differs from materialization'
-            )
-        elif mpi_incidence % 2 or mpi_incidence == 0:
-            final_error = MPIAMRTransactionError(
-                'V10K staged MPI connectivity is missing or asymmetric'
-            )
-        _collective_error(comm, 'V10K pre-COMMIT validation', final_error)
-        mpi_faces = mpi_incidence // 2
-
-        commit_signature = (
-            stage_uuid, new_epoch, tuple(proposed_tree.leaves()),
-            bool(repartition)
-        )
-        commit_signatures = comm.allgather(commit_signature)
-        commit_error = None
-        if len(set(commit_signatures)) != 1:
-            commit_error = MPIAMRTransactionError(
-                'V10K ranks disagree on the proposed COMMIT identity'
-            )
-        _collective_error(comm, 'V10K COMMIT agreement', commit_error)
-
-        staged_gndofs = scal_coll(
-            comm.Allreduce, sum(stage_system.ele_ndofs), op=mpi.SUM
+        mortar_count, mpi_faces, staged_gndofs = _validate_mixed_hex_precommit(
+            comm, stage_mesh, stage_system, stage_mortar_expected, stage_uuid,
+            new_epoch, proposed_tree, repartition
         )
 
         comm.barrier()
