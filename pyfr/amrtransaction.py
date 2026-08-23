@@ -1774,12 +1774,12 @@ def _mixed_quad_column_leaves(mesh):
         ) from exc
 
 
-def _uniform_etype_bank_map(system, bank, label):
+def _mixed_etype_bank_map(system, bank, label, etypes, prefix, groups):
     if bank < 0 or bank >= getattr(system, 'nrhs', 0):
-        raise AMRTransactionError(f'MIX2D1 {label} solution bank is invalid')
-    if set(system.ele_types) != {'tri', 'quad'}:
+        raise AMRTransactionError(f'{prefix} {label} solution bank is invalid')
+    if set(system.ele_types) != etypes:
         raise AMRTransactionError(
-            f'MIX2D1 {label} system requires uniform-p Tri+Quad groups'
+            f'{prefix} {label} system requires {groups}'
         )
 
     result = {}
@@ -1790,14 +1790,28 @@ def _uniform_etype_bank_map(system, bank, label):
             bshape = tuple(gbank.ioshape)
         except (KeyError, IndexError, AttributeError, TypeError):
             raise AMRTransactionError(
-                f'MIX2D1 {label} {etype} bank layout unavailable'
+                f'{prefix} {label} {etype} bank layout unavailable'
             ) from None
         if len(shape) != 3 or any(n <= 0 for n in shape) or bshape != shape:
             raise AMRTransactionError(
-                f'MIX2D1 {label} {etype} bank shape mismatch'
+                f'{prefix} {label} {etype} bank shape mismatch'
             )
         result[etype] = shape, gbank
     return result
+
+
+def _uniform_etype_bank_map(system, bank, label):
+    return _mixed_etype_bank_map(
+        system, bank, label, {'tri', 'quad'}, 'MIX2D1',
+        'uniform-p Tri+Quad groups'
+    )
+
+
+def _mixed_hex_bank_map(system, bank, label):
+    return _mixed_etype_bank_map(
+        system, bank, label, {'hex', 'pyr', 'tet'}, 'V10J',
+        'uniform-p Tet+Pyramid+Hex groups'
+    )
 
 
 def _copy_state_by_etype(system, bank):
@@ -2290,32 +2304,6 @@ class MixedHexIndicatorAMRResult:
     transaction: MixedHexAMRTransactionResult | None
 
 
-def _mixed_hex_bank_map(system, bank, label):
-    if bank < 0 or bank >= getattr(system, 'nrhs', 0):
-        raise AMRTransactionError(
-            f'V10J {label} solution bank is invalid'
-        )
-    if set(system.ele_types) != {'hex', 'pyr', 'tet'}:
-        raise AMRTransactionError(
-            f'V10J {label} system requires uniform-p Tet+Pyramid+Hex groups'
-        )
-
-    result = {}
-    for etype, banks in zip(system.ele_types, system.ele_banks):
-        try:
-            shape = tuple(system.ele_shapes[etype])
-            gbank = banks[bank]
-            bshape = tuple(gbank.ioshape)
-        except (KeyError, IndexError, AttributeError, TypeError):
-            raise AMRTransactionError(
-                f'V10J {label} {etype} bank layout unavailable'
-            ) from None
-        if len(shape) != 3 or any(n <= 0 for n in shape) or bshape != shape:
-            raise AMRTransactionError(
-                f'V10J {label} {etype} bank shape mismatch'
-            )
-        result[etype] = shape, gbank
-    return result
 
 
 def _inject_staged_mixed_hex_bank(stage_system, states, bank):
