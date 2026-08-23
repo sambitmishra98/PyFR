@@ -1308,6 +1308,122 @@ def build_quad_tri_operators(mesh, elemap, mcon, cfg):
     }
 
 
+def _build_mortar_operator_sets(
+    group, bases, sample_maps, masses, right_interp, mqrule, unique_keys,
+    state_projection
+):
+    operator_sets = []
+    for key in unique_keys:
+        left_interp = []
+        left_proj = []
+        right_ops = []
+        for pi, patch in enumerate(key.patches):
+            qpts = patch.left_map.apply(mqrule.pts)
+            det = patch.left_map.determinant
+            lint = bases[0].nodal_basis_at(qpts)
+            weights = mqrule.wts*det
+
+            lto, lfrom = sample_maps[0]
+            rto, rfrom = sample_maps[pi + 1]
+            rint = right_interp[pi]
+
+            left_interp.append(lint @ lto)
+            left_proj.append(lfrom @ np.linalg.solve(
+                masses[0], lint.T*weights
+            ))
+            right_ops.append((
+                rint @ rto,
+                rfrom @ np.linalg.solve(masses[pi + 1], rint.T*weights),
+            ))
+
+        opset = {
+            'left_interp': tuple(left_interp),
+            'right_interp': tuple(op[0] for op in right_ops),
+            'left_proj': tuple(left_proj),
+            'right_proj': tuple(op[1] for op in right_ops),
+        }
+        if state_projection:
+            opset['right_state_proj'] = tuple(
+                sample_maps[pi + 1][1] @ np.linalg.solve(
+                    masses[pi + 1], right_interp[pi].T*mqrule.wts
+                )
+                for pi in range(len(group.right))
+            )
+        operator_sets.append(opset)
+
+    return operator_sets
+
+
+def _build_mortar_geometry(
+    group, eles, maps_per_record, mqrule, topology, geom_tol
+):
+    physical_points = [[] for _ in group.right]
+    normals = [[] for _ in group.right]
+    geom_errors = [[] for _ in group.right]
+    normal_errors = [[] for _ in group.right]
+    determinants = [[] for _ in group.right]
+
+    left_ele = eles[0]
+    for mi, maps in enumerate(maps_per_record):
+        lfidx = group.left.fidxs[mi]
+        leidx = group.left.eidxs[mi]
+        lkind, lproj, lnorm = left_ele.basis.faces[lfidx]
+        if lkind != topology:
+            raise ValueError('Invalid left mortar face type')
+
+        for pi, (side, rmap) in enumerate(zip(group.right, maps)):
+            right_ele = eles[pi + 1]
+            rfidx = side.fidxs[mi]
+            reidx = side.eidxs[mi]
+            rkind, rproj, rnorm = right_ele.basis.faces[rfidx]
+            if rkind != topology:
+                raise ValueError('Invalid right mortar face type')
+
+            lqpts = rmap.apply(mqrule.pts)
+            det = rmap.determinant
+            determinants[pi].append(det)
+
+            lvpts = proj_pts(lproj, lqpts)
+            rvpts = proj_pts(rproj, mqrule.pts)
+            lploc = left_ele.ploc_at_np(lvpts)[:, :, leidx]
+            rploc = right_ele.ploc_at_np(rvpts)[:, :, reidx]
+            physical_points[pi].append(lploc)
+            geom_errors[pi].append(np.max(np.abs(lploc - rploc)))
+
+            ln = np.broadcast_to(lnorm, (len(lqpts), left_ele.ndims))
+            rn = np.broadcast_to(rnorm, (len(lqpts), right_ele.ndims))
+            lpnorm = left_ele.pnorm_at(lvpts, ln)[:, leidx]
+            rpnorm = right_ele.pnorm_at(rvpts, rn)[:, reidx]
+            normals[pi].append(lpnorm)
+            normal_errors[pi].append(
+                np.max(np.abs(rpnorm + det*lpnorm))
+            )
+
+    def stack(values):
+        return np.stack(values, axis=-1)
+
+    geometry = MortarGeometry(
+        'left', topology, np.asarray(mqrule.pts), np.asarray(mqrule.wts),
+        tuple(stack(values) for values in physical_points),
+        tuple(stack(values) for values in normals),
+        tuple(np.asarray(values) for values in determinants),
+        tuple(np.asarray(values) for values in geom_errors),
+        tuple(np.asarray(values) for values in normal_errors),
+    )
+    if geometry.max_coordinate_error > geom_tol:
+        raise ValueError(
+            f'Mortar geometry mismatch {geometry.max_coordinate_error:.3e} '
+            f'exceeds tolerance {geom_tol:.3e}'
+        )
+    if geometry.max_normal_error > 10*geom_tol:
+        raise ValueError(
+            f'Mortar normal mismatch {geometry.max_normal_error:.3e} '
+            f'exceeds tolerance {10*geom_tol:.3e}'
+        )
+
+    return geometry, determinants
+
+
 def build_quad_quad4_operators(
     mesh, elemap, mcon, cfg, *, state_projection=False
 ):
@@ -1362,108 +1478,14 @@ def build_quad_quad4_operators(
     unique_keys, opidx = _unique_signatures(keys)
     nops = len(unique_keys)
 
-    operator_sets = []
-    for key in unique_keys:
-        left_interp = []
-        left_proj = []
-        right_ops = []
-        for pi, patch in enumerate(key.patches):
-            qpts = patch.left_map.apply(mqrule.pts)
-            det = patch.left_map.determinant
-            lint = bases[0].nodal_basis_at(qpts)
-            weights = mqrule.wts*det
-
-            lto, lfrom = sample_maps[0]
-            rto, rfrom = sample_maps[pi + 1]
-            rint = right_interp[pi]
-
-            left_interp.append(lint @ lto)
-            left_proj.append(lfrom @ np.linalg.solve(
-                masses[0], lint.T*weights
-            ))
-            right_ops.append((
-                rint @ rto,
-                rfrom @ np.linalg.solve(masses[pi + 1], rint.T*weights),
-            ))
-
-        opset = {
-            'left_interp': tuple(left_interp),
-            'right_interp': tuple(op[0] for op in right_ops),
-            'left_proj': tuple(left_proj),
-            'right_proj': tuple(op[1] for op in right_ops),
-        }
-        if state_projection:
-            opset['right_state_proj'] = tuple(
-                sample_maps[pi + 1][1] @ np.linalg.solve(
-                    masses[pi + 1], right_interp[pi].T*mqrule.wts
-                )
-                for pi in range(len(group.right))
-            )
-        operator_sets.append(opset)
-
-    physical_points = [[] for _ in group.right]
-    normals = [[] for _ in group.right]
-    geom_errors = [[] for _ in group.right]
-    normal_errors = [[] for _ in group.right]
-    determinants = [[] for _ in group.right]
-
-    left_ele = eles[0]
-    for mi, maps in enumerate(maps_per_record):
-        lfidx = group.left.fidxs[mi]
-        leidx = group.left.eidxs[mi]
-        lkind, lproj, lnorm = left_ele.basis.faces[lfidx]
-        if lkind != 'quad':
-            raise ValueError('Invalid left mortar face type')
-
-        for pi, (side, rmap) in enumerate(zip(group.right, maps)):
-            right_ele = eles[pi + 1]
-            rfidx = side.fidxs[mi]
-            reidx = side.eidxs[mi]
-            rkind, rproj, rnorm = right_ele.basis.faces[rfidx]
-            if rkind != 'quad':
-                raise ValueError('Invalid right mortar face type')
-
-            lqpts = rmap.apply(mqrule.pts)
-            det = rmap.determinant
-            determinants[pi].append(det)
-
-            lvpts = proj_pts(lproj, lqpts)
-            rvpts = proj_pts(rproj, mqrule.pts)
-            lploc = left_ele.ploc_at_np(lvpts)[:, :, leidx]
-            rploc = right_ele.ploc_at_np(rvpts)[:, :, reidx]
-            physical_points[pi].append(lploc)
-            geom_errors[pi].append(np.max(np.abs(lploc - rploc)))
-
-            ln = np.broadcast_to(lnorm, (len(lqpts), left_ele.ndims))
-            rn = np.broadcast_to(rnorm, (len(lqpts), right_ele.ndims))
-            lpnorm = left_ele.pnorm_at(lvpts, ln)[:, leidx]
-            rpnorm = right_ele.pnorm_at(rvpts, rn)[:, reidx]
-            normals[pi].append(lpnorm)
-            normal_errors[pi].append(
-                np.max(np.abs(rpnorm + det*lpnorm))
-            )
-
-    def stack(values):
-        return np.stack(values, axis=-1)
-
-    geometry = MortarGeometry(
-        'left', 'quad', np.asarray(mqrule.pts), np.asarray(mqrule.wts),
-        tuple(stack(values) for values in physical_points),
-        tuple(stack(values) for values in normals),
-        tuple(np.asarray(values) for values in determinants),
-        tuple(np.asarray(values) for values in geom_errors),
-        tuple(np.asarray(values) for values in normal_errors),
+    operator_sets = _build_mortar_operator_sets(
+        group, bases, sample_maps, masses, right_interp, mqrule,
+        unique_keys, state_projection
     )
-    if geometry.max_coordinate_error > geom_tol:
-        raise ValueError(
-            f'Mortar geometry mismatch {geometry.max_coordinate_error:.3e} '
-            f'exceeds tolerance {geom_tol:.3e}'
-        )
-    if geometry.max_normal_error > 10*geom_tol:
-        raise ValueError(
-            f'Mortar normal mismatch {geometry.max_normal_error:.3e} '
-            f'exceeds tolerance {10*geom_tol:.3e}'
-        )
+
+    geometry, determinants = _build_mortar_geometry(
+        group, eles, maps_per_record, mqrule, 'quad', geom_tol
+    )
 
     operator_groups = [
         np.flatnonzero(opidx == oi) for oi in range(nops)
@@ -1560,108 +1582,14 @@ def build_line_line2_operators(
     ]
 
     unique_keys, opidx = _unique_signatures(keys)
-    operator_sets = []
-    for key in unique_keys:
-        left_interp = []
-        left_proj = []
-        right_ops = []
-        for pi, patch in enumerate(key.patches):
-            qpts = patch.left_map.apply(mqrule.pts)
-            det = patch.left_map.determinant
-            lint = bases[0].nodal_basis_at(qpts)
-            weights = mqrule.wts*det
-
-            lto, lfrom = sample_maps[0]
-            rto, rfrom = sample_maps[pi + 1]
-            rint = right_interp[pi]
-
-            left_interp.append(lint @ lto)
-            left_proj.append(lfrom @ np.linalg.solve(
-                masses[0], lint.T*weights
-            ))
-            right_ops.append((
-                rint @ rto,
-                rfrom @ np.linalg.solve(masses[pi + 1], rint.T*weights),
-            ))
-
-        opset = {
-            'left_interp': tuple(left_interp),
-            'right_interp': tuple(op[0] for op in right_ops),
-            'left_proj': tuple(left_proj),
-            'right_proj': tuple(op[1] for op in right_ops),
-        }
-        if state_projection:
-            opset['right_state_proj'] = tuple(
-                sample_maps[pi + 1][1] @ np.linalg.solve(
-                    masses[pi + 1], right_interp[pi].T*mqrule.wts
-                )
-                for pi in range(len(group.right))
-            )
-        operator_sets.append(opset)
-
-    physical_points = [[] for _ in group.right]
-    normals = [[] for _ in group.right]
-    geom_errors = [[] for _ in group.right]
-    normal_errors = [[] for _ in group.right]
-    determinants = [[] for _ in group.right]
-
-    left_ele = eles[0]
-    for mi, maps in enumerate(maps_per_record):
-        lfidx = group.left.fidxs[mi]
-        leidx = group.left.eidxs[mi]
-        lkind, lproj, lnorm = left_ele.basis.faces[lfidx]
-        if lkind != 'line':
-            raise ValueError('Invalid left mortar face type')
-
-        for pi, (side, rmap) in enumerate(zip(group.right, maps)):
-            right_ele = eles[pi + 1]
-            rfidx = side.fidxs[mi]
-            reidx = side.eidxs[mi]
-            rkind, rproj, rnorm = right_ele.basis.faces[rfidx]
-            if rkind != 'line':
-                raise ValueError('Invalid right mortar face type')
-
-            lqpts = rmap.apply(mqrule.pts)
-            det = rmap.determinant
-            determinants[pi].append(det)
-
-            lvpts = proj_pts(lproj, lqpts)
-            rvpts = proj_pts(rproj, mqrule.pts)
-            lploc = left_ele.ploc_at_np(lvpts)[:, :, leidx]
-            rploc = right_ele.ploc_at_np(rvpts)[:, :, reidx]
-            physical_points[pi].append(lploc)
-            geom_errors[pi].append(np.max(np.abs(lploc - rploc)))
-
-            ln = np.broadcast_to(lnorm, (len(lqpts), left_ele.ndims))
-            rn = np.broadcast_to(rnorm, (len(lqpts), right_ele.ndims))
-            lpnorm = left_ele.pnorm_at(lvpts, ln)[:, leidx]
-            rpnorm = right_ele.pnorm_at(rvpts, rn)[:, reidx]
-            normals[pi].append(lpnorm)
-            normal_errors[pi].append(
-                np.max(np.abs(rpnorm + det*lpnorm))
-            )
-
-    def stack(values):
-        return np.stack(values, axis=-1)
-
-    geometry = MortarGeometry(
-        'left', 'line', np.asarray(mqrule.pts), np.asarray(mqrule.wts),
-        tuple(stack(values) for values in physical_points),
-        tuple(stack(values) for values in normals),
-        tuple(np.asarray(values) for values in determinants),
-        tuple(np.asarray(values) for values in geom_errors),
-        tuple(np.asarray(values) for values in normal_errors),
+    operator_sets = _build_mortar_operator_sets(
+        group, bases, sample_maps, masses, right_interp, mqrule,
+        unique_keys, state_projection
     )
-    if geometry.max_coordinate_error > geom_tol:
-        raise ValueError(
-            f'Mortar geometry mismatch {geometry.max_coordinate_error:.3e} '
-            f'exceeds tolerance {geom_tol:.3e}'
-        )
-    if geometry.max_normal_error > 10*geom_tol:
-        raise ValueError(
-            f'Mortar normal mismatch {geometry.max_normal_error:.3e} '
-            f'exceeds tolerance {10*geom_tol:.3e}'
-        )
+
+    geometry, determinants = _build_mortar_geometry(
+        group, eles, maps_per_record, mqrule, 'line', geom_tol
+    )
 
     operator_groups = [
         np.flatnonzero(opidx == oi) for oi in range(len(unique_keys))
