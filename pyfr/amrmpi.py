@@ -1085,6 +1085,46 @@ def _validate_global_mixed_hex_transfer(
     )
 
 
+
+def _validate_staged_mixed_hex_rhs(
+    comm, intg, stage_system, transferred, bank
+):
+    stage_system.preproc(intg.tcurr, bank)
+    stage_system.backend.wait()
+    preproc_error = None
+    try:
+        after_preproc = _local_mixed_state(
+            stage_system, bank, 'post-preproc'
+        )
+        for etype in transferred:
+            if not np.array_equal(after_preproc[etype], transferred[etype]):
+                raise MPIAMRTransactionError(
+                    f'V10K staged {etype} bank changed in preproc'
+                )
+    except Exception as exc:
+        preproc_error = exc
+    _collective_error(comm, 'V10K staged preprocessing', preproc_error)
+
+    scratch_bank = _scratch_bank(stage_system, bank)
+    rhs, bank_drift = _scratch_rhs(
+        stage_system, intg.tcurr, bank, scratch_bank
+    )
+    rhs_error = None
+    try:
+        after_rhs = _local_mixed_state(stage_system, bank, 'post-RHS')
+        for etype in transferred:
+            if not np.array_equal(after_rhs[etype], transferred[etype]):
+                raise MPIAMRTransactionError(
+                    f'V10K staged {etype} bank changed after first RHS'
+                )
+        if not all(np.isfinite(a).all() for a in rhs):
+            raise MPIAMRTransactionError('V10K first staged RHS is not finite')
+    except Exception as exc:
+        rhs_error = exc
+    _collective_error(comm, 'V10K first staged RHS', rhs_error)
+
+    return rhs, bank_drift, scratch_bank
+
 def _validate_mpi_mixed_hex_integrator(intg):
     comm, _, _ = get_comm_rank_root()
     if comm.size not in {2, 4}:
@@ -1702,41 +1742,9 @@ def perform_one_mpi_mixed_hex_amr_transaction(
             local_rho, local_pressure, next(iter(old_states.values())).dtype
         )
 
-        stage_system.preproc(intg.tcurr, bank)
-        stage_system.backend.wait()
-        preproc_error = None
-        try:
-            after_preproc = _local_mixed_state(
-                stage_system, bank, 'post-preproc'
-            )
-            for etype in transferred:
-                if not np.array_equal(after_preproc[etype], transferred[etype]):
-                    raise MPIAMRTransactionError(
-                        f'V10K staged {etype} bank changed in preproc'
-                    )
-        except Exception as exc:
-            preproc_error = exc
-        _collective_error(comm, 'V10K staged preprocessing', preproc_error)
-
-        scratch_bank = _scratch_bank(stage_system, bank)
-        rhs, bank_drift = _scratch_rhs(
-            stage_system, intg.tcurr, bank, scratch_bank
+        rhs, bank_drift, scratch_bank = _validate_staged_mixed_hex_rhs(
+            comm, intg, stage_system, transferred, bank
         )
-        rhs_error = None
-        try:
-            after_rhs = _local_mixed_state(stage_system, bank, 'post-RHS')
-            for etype in transferred:
-                if not np.array_equal(after_rhs[etype], transferred[etype]):
-                    raise MPIAMRTransactionError(
-                        f'V10K staged {etype} bank changed after first RHS'
-                    )
-            if not all(np.isfinite(a).all() for a in rhs):
-                raise MPIAMRTransactionError(
-                    'V10K first staged RHS is not finite'
-                )
-        except Exception as exc:
-            rhs_error = exc
-        _collective_error(comm, 'V10K first staged RHS', rhs_error)
 
         old_error = None
         try:
