@@ -1,18 +1,3 @@
-"""V10 D5B2 - native Hex octree materializer.
-
-Consumes an immutable single-rank native PyFR root mesh (a
-:class:`pyfr.readers.native.Mesh`, already read by
-:class:`~pyfr.readers.native.NativeReader`) and an explicit, already
-2:1-balanced :class:`~pyfr.amr.HexLeafTree`, and materializes the raw
-proposed native mesh arrays (nodes / eles/hex / codec / mortar records)
-for that tree.
-
-D5B2 does not close, mark, plan, or otherwise mutate the tree. D2 owns
-import-time closure; D4B owns coarsening legality; D6 will own online
-closure before calling this module. D5B2 only validates that the supplied
-tree is physically 2:1 balanced and materializes it. D5B2 does not write
-HDF5; that is D5C's responsibility.
-"""
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -29,14 +14,11 @@ from pyfr.amr import (
 
 
 class AMRMeshError(ValueError):
-    """Raised for any D5B2 fail-closed scope, coverage, or balance
-    violation. Never silently repaired or worked around."""
+    pass
 
 
 @dataclass(frozen=True)
 class AdaptedRawMesh:
-    """Deterministic proposed raw native mesh bundle. D5C persists this;
-    D5B2 never touches HDF5."""
 
     root_mesh_uuid: str
     node_ids: np.ndarray
@@ -299,7 +281,6 @@ def _materialize_leaf_pids(pids_by_g, leaves, store):
 
 
 def _hex_face_nodes(row, fidx):
-    """Return the four corner node ids for any canonical Hex shape order."""
     from pyfr.shapes import HexShape
 
     row = np.asarray(row)
@@ -308,7 +289,6 @@ def _hex_face_nodes(row, fidx):
 
 
 def _materialize_isoparametric_hex_leaves(mesh, pids_by_g, leaves, store):
-    """Restrict immutable root Hex geometry maps onto active leaves."""
     from pyfr.amr import hex_tree_cell_index
     from pyfr.polys import get_polybasis
     from pyfr.shapes import HexShape
@@ -370,9 +350,6 @@ def _materialize_isoparametric_hex_leaves(mesh, pids_by_g, leaves, store):
 # ---------------------------------------------------------------------------
 
 def materialize_native_hex_tree(mesh, tree, *, comm_size=1):
-    """Materialize an :class:`AdaptedRawMesh` for ``tree`` against the
-    immutable native ``mesh``. Fails closed on any scope, coverage, or
-    balance violation; never mutates ``mesh`` or ``tree``."""
     _validate_scope(mesh, tree, comm_size)
 
     l2g, g2l, pids_by_g, tags_by_g = _hex_local_maps(mesh)
@@ -531,7 +508,6 @@ def materialize_native_hex_tree(mesh, tree, *, comm_size=1):
 
 @dataclass(frozen=True)
 class AdaptedQuadRawMesh:
-    """Deterministic proposed raw native Quad mesh bundle."""
 
     root_mesh_uuid: str
     node_ids: np.ndarray
@@ -547,7 +523,6 @@ class AdaptedQuadRawMesh:
 
 @dataclass(frozen=True)
 class LineMortarRecord:
-    """One coarse Line coupled to two canonical low/high fine Lines."""
 
     name: str
     left_eidx: int
@@ -560,7 +535,6 @@ class LineMortarRecord:
 
 @dataclass(frozen=True)
 class MixedLineMortarRecord:
-    """One coarse Line coupled to two fine Quad Lines on a mixed mesh."""
 
     name: str
     left_etype: str
@@ -575,7 +549,6 @@ class MixedLineMortarRecord:
 
 @dataclass(frozen=True)
 class AdaptedMixedQuadRawMesh:
-    """Mixed Tri+Quad raw mesh with immutable Tris and adapted Quads."""
 
     root_mesh_uuid: str
     node_ids: np.ndarray
@@ -790,12 +763,6 @@ def _materialize_quad_leaf_pids(pids_by_g, leaves, store):
 
 
 def materialize_native_quad_tree(mesh, tree, *, comm_size=1):
-    """Materialize a raw native Quad mesh for ``tree`` against ``mesh``.
-
-    The supplied tree is never marked, closed, or otherwise mutated here.
-    Invalid scope, root coverage, topology, or physical 2:1 balance fails
-    closed.
-    """
     _validate_quad_scope(mesh, tree, comm_size)
 
     l2g, pids_by_g, tags_by_g = _quad_local_maps(mesh)
@@ -1012,7 +979,6 @@ def _validate_mixed_quad_scope(mesh, tree, comm_size):
 
 
 def _derive_mixed_quad_root_face_topology(mesh, pids_by_g, l2g):
-    """Return Quad root-face topology plus immutable non-Quad neighbours."""
     rootfaces = {}
     rootkinds = {}
     fixed = {}
@@ -1090,7 +1056,6 @@ def _derive_mixed_quad_root_face_topology(mesh, pids_by_g, l2g):
 
 
 def _order_fixed_line1x2_faces(coarse_nodes, fine_faces, store, tol=1e-10):
-    """Order fine Lines by the immutable coarse Line's native orientation."""
     coarse_nodes = tuple(map(int, coarse_nodes))
     if len(coarse_nodes) != 2 or len(fine_faces) != 2:
         raise AMRMeshError('Mixed line-1x2 requires one Line and two halves')
@@ -1139,12 +1104,6 @@ def _order_fixed_line1x2_faces(coarse_nodes, fine_faces, store, tol=1e-10):
 
 
 def materialize_native_mixed_quad_tree(mesh, tree, *, comm_size=1):
-    """Materialize affine Tri+Quad topology while adapting only Quads.
-
-    The accepted Quad tree, refinement geometry, Quad-Quad connectivity, and
-    Line-1x2 ordering are reused unchanged.  Triangles are copied exactly and
-    act as fixed level-0 neighbours on shared Line interfaces.
-    """
     _validate_mixed_quad_scope(mesh, tree, comm_size)
 
     l2g, pids_by_g, tags_by_g = _quad_local_maps(mesh)
@@ -1414,7 +1373,6 @@ def materialize_native_mixed_quad_tree(mesh, tree, *, comm_size=1):
 
 @dataclass(frozen=True)
 class MixedQuadMortarRecord:
-    """One coarse quadrilateral face coupled to four fine Hex faces."""
 
     name: str
     left_etype: str
@@ -1429,7 +1387,6 @@ class MixedQuadMortarRecord:
 
 @dataclass(frozen=True)
 class AdaptedMixedHexRawMesh:
-    """Mixed Tet+Pyramid+Hex mesh with immutable Tet/Pyramid elements."""
 
     root_mesh_uuid: str
     node_ids: np.ndarray
@@ -1519,7 +1476,6 @@ def _fixed_face_corner_nodes(mesh, etype, eidx, fidx):
 
 
 def _derive_mixed_hex_root_face_topology(mesh, pids_by_g, l2g):
-    """Return Hex root-face topology plus immutable Pyramid neighbours."""
     from pyfr.amr import hex_d4_transform
 
     rootfaces = {}
@@ -1610,7 +1566,6 @@ def _derive_mixed_hex_root_face_topology(mesh, pids_by_g, l2g):
 def _order_hex_quad2x2_faces(
     coarse_row, fidx, fine_faces, store, tol=1e-10
 ):
-    """Order fine faces by the exact coarse Hex isoparametric face map."""
     from pyfr.polys import get_polybasis
     from pyfr.shapes import HexShape, QuadShape, proj_pts
 
@@ -1670,7 +1625,6 @@ def _order_hex_quad2x2_faces(
 
 
 def _order_fixed_quad2x2_faces(coarse_nodes, fine_faces, store, tol=1e-10):
-    """Order four fine quads by an immutable coarse Quad orientation."""
     from pyfr.shapes import QuadShape
 
     coarse_nodes = tuple(map(int, coarse_nodes))
@@ -1757,7 +1711,6 @@ def _validate_mixed_hex_fixed_balance(groups, fixed):
 
 
 def materialize_native_mixed_hex_tree(mesh, tree, *, comm_size=1):
-    """Materialize affine Tet+Pyramid+Hex topology while adapting only Hexes."""
     _validate_mixed_hex_scope(mesh, tree, comm_size)
 
     l2g, _, pids_by_g, tags_by_g = _hex_local_maps(mesh)
