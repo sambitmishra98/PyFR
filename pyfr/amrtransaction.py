@@ -1818,24 +1818,26 @@ def _copy_state_by_etype(system, bank):
     return dict(zip(system.ele_types, _copy_state(system, bank)))
 
 
-def _inject_staged_mixed_bank(stage_system, states, bank):
-    bankmap = _uniform_etype_bank_map(stage_system, bank, 'staged')
+def _inject_staged_mixed_bank(
+    stage_system, states, bank, bank_map, prefix
+):
+    bankmap = bank_map(stage_system, bank, 'staged')
     for etype, state in states.items():
         shape, gbank = bankmap[etype]
         if tuple(state.shape) != shape:
             raise AMRTransactionError(
-                f'MIX2D1 transferred {etype} state shape mismatch'
+                f'{prefix} transferred {etype} state shape mismatch'
             )
         gbank.set(np.array(state, copy=True, order='C'))
     stage_system.backend.wait()
 
     readback = _copy_state_by_etype(stage_system, bank)
     if set(readback) != set(states):
-        raise AMRTransactionError('MIX2D1 staged state group mismatch')
+        raise AMRTransactionError(f'{prefix} staged state group mismatch')
     for etype in states:
         if not np.array_equal(readback[etype], states[etype]):
             raise AMRTransactionError(
-                f'MIX2D1 staged {etype} bank differs from injected state'
+                f'{prefix} staged {etype} bank differs from injected state'
             )
     return readback, tuple(
         (etype, tuple(readback[etype].shape)) for etype in sorted(readback)
@@ -1969,7 +1971,7 @@ def _prepare_mixed_quad_transfer(
 
 
 def _build_staged_mixed_system(
-    intg, system, stage_mesh, transferred, bank, inject_bank
+    intg, system, stage_mesh, transferred, bank, bank_map, prefix
 ):
     staged = Solution(
         config=intg.cfg, stats=None, fields=None,
@@ -1982,8 +1984,8 @@ def _build_staged_mixed_system(
         intg.cfg, stage_serialiser, needs_cfl=False,
     )
     stage_system.commit()
-    staged_states, stage_shapes = inject_bank(
-        stage_system, transferred, bank
+    staged_states, stage_shapes = _inject_staged_mixed_bank(
+        stage_system, transferred, bank, bank_map, prefix
     )
     return stage_system, stage_serialiser, staged_states, stage_shapes
 
@@ -2194,7 +2196,7 @@ def perform_indicator_mixed_quad_amr_transaction(
         stage_system, stage_serialiser, staged_states, stage_shapes = (
             _build_staged_mixed_system(
                 intg, system, stage_mesh, transferred, bank,
-                _inject_staged_mixed_bank
+                _uniform_etype_bank_map, 'MIX2D1'
             )
         )
 
@@ -2306,28 +2308,6 @@ class MixedHexIndicatorAMRResult:
 
 
 
-def _inject_staged_mixed_hex_bank(stage_system, states, bank):
-    bankmap = _mixed_hex_bank_map(stage_system, bank, 'staged')
-    for etype, state in states.items():
-        shape, gbank = bankmap[etype]
-        if tuple(state.shape) != shape:
-            raise AMRTransactionError(
-                f'V10J transferred {etype} state shape mismatch'
-            )
-        gbank.set(np.array(state, copy=True, order='C'))
-    stage_system.backend.wait()
-
-    readback = _copy_state_by_etype(stage_system, bank)
-    if set(readback) != set(states):
-        raise AMRTransactionError('V10J staged state group mismatch')
-    for etype in states:
-        if not np.array_equal(readback[etype], states[etype]):
-            raise AMRTransactionError(
-                f'V10J staged {etype} bank differs from injected state'
-            )
-    return readback, tuple(
-        (etype, tuple(readback[etype].shape)) for etype in sorted(readback)
-    )
 
 
 def _validate_mixed_hex_online_integrator(intg, restart_root_mesh=None):
@@ -2659,7 +2639,7 @@ def _commit_mixed_hex_refinement(
         stage_system, stage_serialiser, staged_states, stage_shapes = (
             _build_staged_mixed_system(
                 intg, system, stage_mesh, transferred, bank,
-                _inject_staged_mixed_hex_bank
+                _mixed_hex_bank_map, 'V10J'
             )
         )
 
