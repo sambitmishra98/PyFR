@@ -918,6 +918,51 @@ def _stage_local_bank(stage_mesh, rords, rstates):
     return local, eidxs
 
 
+def _prepare_distributed_hex_transfer(
+    comm, system, old_tree, proposed_tree, old_state, local_by_leaf, vparts,
+    action, stage_mesh
+):
+    transfer_error = None
+    try:
+        if action == 'refine':
+            ords, states = _produce_local_refined_records(
+                system, old_tree, proposed_tree, old_state, local_by_leaf
+            )
+        else:
+            ords, states = _produce_local_coarsened_records(
+                comm, system, old_tree, proposed_tree, old_state,
+                local_by_leaf, vparts
+            )
+    except _CollectiveFailure:
+        raise
+    except Exception as exc:
+        transfer_error = exc
+    _collective_error(
+        comm, 'distributed transfer preparation', transfer_error
+    )
+
+    produced = comm.allgather(ords)
+    all_ords = np.concatenate(produced)
+    if (len(all_ords) != proposed_tree.nleaves or
+            not np.array_equal(
+                np.sort(all_ords), np.arange(proposed_tree.nleaves)
+            )):
+        raise MPIAMRTransactionError(
+            'D7A distributed transfer does not produce every proposed '
+            'leaf exactly once'
+        )
+    _collective_error(comm, 'distributed transfer coverage')
+
+    rords, rstates, scount, rcount = _exchange_leaf_states(
+        comm, ords, states, vparts
+    )
+    local_transfer, stage_eidxs = _stage_local_bank(
+        stage_mesh, rords, rstates
+    )
+    _collective_error(comm, 'state migration')
+    return local_transfer, stage_eidxs, scount, rcount
+
+
 def _validate_mpi_integrator(intg):
     comm, _, _ = get_comm_rank_root()
     if comm.size < 2:
@@ -2200,43 +2245,12 @@ def perform_one_mpi_amr_transaction(
             bank_error = exc
         _collective_error(comm, 'accepted local bank', bank_error)
 
-        transfer_error = None
-        try:
-            if action == 'refine':
-                ords, states = _produce_local_refined_records(
-                    system, old_tree, proposed_tree, old_state,
-                    local_by_leaf
-                )
-            else:
-                ords, states = _produce_local_coarsened_records(
-                    comm, system, old_tree, proposed_tree, old_state,
-                    local_by_leaf, vparts
-                )
-        except _CollectiveFailure:
-            raise
-        except Exception as exc:
-            transfer_error = exc
-        _collective_error(
-            comm, 'distributed transfer preparation', transfer_error
-        )
-        produced = comm.allgather(ords)
-        all_ords = np.concatenate(produced)
-        if (len(all_ords) != proposed_tree.nleaves or
-                not np.array_equal(np.sort(all_ords),
-                                   np.arange(proposed_tree.nleaves))):
-            raise MPIAMRTransactionError(
-                'D7A distributed transfer does not produce every proposed '
-                'leaf exactly once'
+        local_transfer, stage_eidxs, scount, rcount = (
+            _prepare_distributed_hex_transfer(
+                comm, system, old_tree, proposed_tree, old_state,
+                local_by_leaf, vparts, action, stage_mesh
             )
-        _collective_error(comm, 'distributed transfer coverage')
-
-        rords, rstates, scount, rcount = _exchange_leaf_states(
-            comm, ords, states, vparts
         )
-        local_transfer, stage_eidxs = _stage_local_bank(
-            stage_mesh, rords, rstates
-        )
-        _collective_error(comm, 'state migration')
 
         staged = Solution(
             config=intg.cfg, stats=None, fields=None,
