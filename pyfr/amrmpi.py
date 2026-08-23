@@ -1143,6 +1143,52 @@ def _validate_staged_mixed_hex_rhs(
     return rhs, bank_drift, scratch_bank
 
 
+def _validate_staged_hex_rhs(comm, intg, stage_system, readback, bank):
+    stage_system.preproc(intg.tcurr, bank)
+    stage_system.backend.wait()
+    if not np.array_equal(_copy_state(stage_system, bank)[0], readback):
+        raise MPIAMRTransactionError(
+            'D7A staged accepted bank changed during preprocessing'
+        )
+    _collective_error(comm, 'staged preprocessing')
+
+    scratch_bank = _scratch_bank(stage_system, bank)
+    rhs, bank_drift = _scratch_rhs(
+        stage_system, intg.tcurr, bank, scratch_bank
+    )
+    _collective_error(comm, 'first staged RHS')
+    return rhs, bank_drift, scratch_bank
+
+
+def _validate_hex_precommit(comm, stage_system, stage_mesh, expected_mortars):
+    local_mortars = sum(len(m) for m in stage_mesh.mcon.values())
+    mortar_count = scal_coll(comm.Allreduce, local_mortars, op=mpi.SUM)
+    if mortar_count != expected_mortars:
+        raise MPIAMRTransactionError(
+            'D7A distributed mortar count differs from global materialisation'
+        )
+
+    local_mpi_faces = sum(len(c) for c in stage_mesh.con_p.values())
+    mpi_face_incidence = scal_coll(
+        comm.Allreduce, local_mpi_faces, op=mpi.SUM
+    )
+    if mpi_face_incidence % 2:
+        raise MPIAMRTransactionError(
+            'D7A MPI face incidence is not two-sided'
+        )
+    mpi_faces = mpi_face_incidence // 2
+    if mpi_faces <= 0:
+        raise MPIAMRTransactionError(
+            'D7A initial mechanics gate requires real MPI connectivity'
+        )
+
+    staged_gndofs = scal_coll(
+        comm.Allreduce, sum(stage_system.ele_ndofs), op=mpi.SUM
+    )
+    _collective_error(comm, 'pre-COMMIT validation')
+    return mortar_count, mpi_faces, staged_gndofs
+
+
 def _validate_mixed_hex_precommit(
     comm, stage_mesh, stage_system, stage_mortar_expected, stage_uuid,
     new_epoch, proposed_tree, repartition
@@ -2257,19 +2303,9 @@ def perform_one_mpi_amr_transaction(
             )
         _collective_error(comm, 'global conservation and EOS')
 
-        stage_system.preproc(intg.tcurr, bank)
-        stage_system.backend.wait()
-        if not np.array_equal(_copy_state(stage_system, bank)[0], readback):
-            raise MPIAMRTransactionError(
-                'D7A staged accepted bank changed during preprocessing'
-            )
-        _collective_error(comm, 'staged preprocessing')
-
-        scratch_bank = _scratch_bank(stage_system, bank)
-        rhs, bank_drift = _scratch_rhs(
-            stage_system, intg.tcurr, bank, scratch_bank
+        rhs, bank_drift, scratch_bank = _validate_staged_hex_rhs(
+            comm, intg, stage_system, readback, bank
         )
-        _collective_error(comm, 'first staged RHS')
 
         if not np.array_equal(
             _copy_state(system, bank)[0], old_state_snapshot
@@ -2277,30 +2313,10 @@ def perform_one_mpi_amr_transaction(
             raise MPIAMRTransactionError(
                 'D7A old live accepted state changed before COMMIT'
             )
-        local_mortars = sum(len(m) for m in stage_mesh.mcon.values())
-        mortar_count = scal_coll(comm.Allreduce, local_mortars, op=mpi.SUM)
-        if mortar_count != stage_mortar_expected:
-            raise MPIAMRTransactionError(
-                'D7A distributed mortar count differs from global '
-                'materialisation'
-            )
-        local_mpi_faces = sum(len(c) for c in stage_mesh.con_p.values())
-        mpi_face_incidence = scal_coll(
-            comm.Allreduce, local_mpi_faces, op=mpi.SUM
+
+        mortar_count, mpi_faces, staged_gndofs = _validate_hex_precommit(
+            comm, stage_system, stage_mesh, stage_mortar_expected
         )
-        if mpi_face_incidence % 2:
-            raise MPIAMRTransactionError(
-                'D7A MPI face incidence is not two-sided'
-            )
-        mpi_faces = mpi_face_incidence // 2
-        if mpi_faces <= 0:
-            raise MPIAMRTransactionError(
-                'D7A initial mechanics gate requires real MPI connectivity'
-            )
-        staged_gndofs = scal_coll(
-            comm.Allreduce, sum(stage_system.ele_ndofs), op=mpi.SUM
-        )
-        _collective_error(comm, 'pre-COMMIT validation')
 
         # All-rank COMMIT.  No rank may decide independently after this
         # barrier.
