@@ -2099,17 +2099,56 @@ def _prepare_mixed_quad_state(intg, system, root_mesh, old_leaves, bank):
     )
 
 
+def _close_mixed_quad_refinement(
+    root_mesh, roots, old_leaves, rootfaces, rootkinds, fixed, marks,
+    wall_boundaries, wall_min_level, l2g, max_level
+):
+    from pyfr.amr import quad_tree_face_groups, quad_tree_leaves
+    from pyfr.amroffline import _close_2to1, _split_nodes, _wall_floor_splits
+
+    # A level-1 Quad touching an immutable Tri cannot be refined to level 2.
+    blocked = _fixed_blocked_quad_leaves(old_leaves, rootfaces, fixed)
+    fixed_blocked_marks = tuple(sorted(marks & blocked))
+    marks -= blocked
+
+    wall_roots = _quad_wall_roots(root_mesh, wall_boundaries, l2g)
+    existing = _split_nodes(old_leaves)
+    wall_floor = _wall_floor_splits(wall_roots, wall_min_level)
+
+    # Do not weaken the accepted wall-floor policy against an immutable Tri.
+    wall_leaves = tuple(quad_tree_leaves(roots, existing | wall_floor))
+    wall_groups = quad_tree_face_groups(wall_leaves, rootfaces)
+    if any(
+        frag['level'] > 1
+        for surface in fixed
+        for fragments in wall_groups.get(surface, {}).values()
+        for frag in fragments
+    ):
+        raise AMRTransactionError(
+            'MIX2D1 wall minimum level conflicts with immutable Tri 2:1 '
+            'constraint; add a Quad buffer layer'
+        )
+
+    wall_splits = tuple(sorted(wall_floor - existing - marks))
+    split = existing | marks | wall_floor
+    try:
+        new_leaves, closure = _close_2to1(
+            roots, split, rootfaces, rootkinds, max_level
+        )
+    except Exception as exc:
+        raise AMRTransactionError(str(exc)) from exc
+
+    return (
+        tuple(new_leaves), tuple(sorted(marks)), wall_splits, tuple(closure),
+        fixed_blocked_marks
+    )
+
+
 def perform_indicator_mixed_quad_amr_transaction(
     intg, *, restart_root_mesh=None
 ):
     """Perform one genuine mixed Tri+Quad online Quad refinement event."""
     from pyfr.amrindicator import density_velocity_variation_scores
-    from pyfr.amroffline import (
-        _close_2to1, _split_nodes, _validate_state,
-        _wall_floor_splits,
-    )
-    from pyfr.amr import quad_tree_face_groups, quad_tree_leaves
-
     system, mesh, root_mesh = _validate_mixed_quad_online_integrator(
         intg, restart_root_mesh
     )
@@ -2151,42 +2190,12 @@ def perform_indicator_mixed_quad_amr_transaction(
         if len(leaf[1]) < max_level and score >= refine_threshold
     }
 
-    # A level-1 Quad touching an immutable Tri cannot be refined to level 2.
-    # This is topology legality, not an indicator/tolerance change.
-    blocked = _fixed_blocked_quad_leaves(old_leaves, rootfaces, fixed)
-    fixed_blocked_marks = tuple(sorted(marks & blocked))
-    marks -= blocked
-
-    wall_roots = _quad_wall_roots(root_mesh, wall_boundaries, l2g)
-    existing = _split_nodes(old_leaves)
-    wall_floor = _wall_floor_splits(wall_roots, wall_min_level)
-
-    # The accepted wall-floor policy must not be silently weakened.  If it
-    # itself would create L2 Quad faces against an immutable Tri, fail closed
-    # and require a mesh with sufficient Quad buffering around the wall.
-    wall_leaves = tuple(quad_tree_leaves(roots, existing | wall_floor))
-    wall_groups = quad_tree_face_groups(wall_leaves, rootfaces)
-    if any(
-        frag['level'] > 1
-        for surface in fixed
-        for fragments in wall_groups.get(surface, {}).values()
-        for frag in fragments
-    ):
-        raise AMRTransactionError(
-            'MIX2D1 wall minimum level conflicts with immutable Tri 2:1 '
-            'constraint; add a Quad buffer layer'
-        )
-
-    wall_splits = tuple(sorted(wall_floor - existing - marks))
-    split = existing | marks | wall_floor
-    try:
-        new_leaves, closure = _close_2to1(
-            roots, split, rootfaces, rootkinds, max_level
-        )
-    except Exception as exc:
-        raise AMRTransactionError(str(exc)) from exc
-    new_leaves = tuple(new_leaves)
-    marks = tuple(sorted(marks))
+    (
+        new_leaves, marks, wall_splits, closure, fixed_blocked_marks
+    ) = _close_mixed_quad_refinement(
+        root_mesh, roots, old_leaves, rootfaces, rootkinds, fixed, marks,
+        wall_boundaries, wall_min_level, l2g, max_level
+    )
     trigger = max(
         (score for leaf, score in score_items if leaf in set(marks)),
         default=None,
